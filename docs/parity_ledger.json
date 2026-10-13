@@ -152,7 +152,12 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Gap: no configurable ignore-date preference; engine refuses incompatible saved identity.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/naming_duplicates.py",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "N14",
@@ -160,7 +165,12 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiation prompt. Native host has independent filename sanitation.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/naming_duplicates.py",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "N15",
@@ -329,6 +339,7 @@
       "test_refs": [
         "tests/integration/http_engine.py",
         "tests/integration/http_fixture.py",
+        "tests/integration/contracts_core.py",
         "crates/xdm-http/src/lib.rs",
         "crates/xdm-daemon/src/main.rs"
       ]

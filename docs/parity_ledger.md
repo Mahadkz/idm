@@ -25,8 +25,8 @@
 | N10 | Origin/path login credentials | implemented | Implemented on Linux (2026-10-13): site/path credential store with pattern match… | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs, crates/xdm-daemon/src/main.rs |
 | N11 | Authentication retries and expiry | partial | Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, … | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs |
 | N12 | Remote-object validators | partial | Partial: checks size/final URL/header-context hash and available strong ETag/dat… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
-| N13 | Ignore modification-time preference | missing | Gap: no configurable ignore-date preference; engine refuses incompatible saved i… | — |
-| N14 | User-visible filename/type changes | missing | Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiat… | — |
+| N13 | Ignore modification-time preference | missing | Gap: no configurable ignore-date preference; engine refuses incompatible saved i… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N14 | User-visible filename/type changes | missing | Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiat… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N15 | Permission/permanent HTTP errors | partial | Partial:403/404 nonretryable; daemon records failed. Error is text rather than t… | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py |
 | N16 | Transient server/network retries | partial | Partial: probe/full requests retry up to four times on network/408/429/5xx honor… | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py |
 | N17 | Timeouts, DNS and diagnostics | partial | Partial: blocking client has30-second request timeout; network errors propagate.… | tests/integration/contracts_core.py |
@@ -43,7 +43,7 @@
 | N28 | Windows dial-up/VPN and redial | missing | Missing. | — |
 | N29 | Static segment allocation | implemented | Implemented independent static1–16 partitioning; one worker thread per segment,6… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N30 | Dynamic splitting and worker reuse | partial | Partial (2026-10-13): workers form a pool of the requested size that claims idle… | tests/integration/http_engine.py |
-| N31 | Stall recovery and adaptive connections | implemented | Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a con… | tests/integration/http_engine.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs |
+| N31 | Stall recovery and adaptive connections | implemented | Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a con… | tests/integration/http_engine.py, tests/integration/http_fixture.py, tests/integration/contracts_core.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs |
 | N32 | Overlap/data-corruption validation | partial | Partial safety: strict headers/body lengths/validators; no persisted interval ch… | — |
 | N33 | Preallocation and offset writes | different | Independent implementation: set_len plus positional write_at; not explicit Linux… | — |
 | N34 | Checkpoint schema and write ordering | partial | Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validat… | tests/integration/contracts_core.py |
@@ -190,8 +190,6 @@
 
 | ID | Title | Status | Source Document |
 |---|---|---|---|
-| N13 | Ignore modification-time preference | missing | idm_core_queue_contracts.md |
-| N14 | User-visible filename/type changes | missing | idm_core_queue_contracts.md |
 | N22 | FTP optional connections/pipelining | missing | idm_core_queue_contracts.md |
 | N26 | System proxy/PAC/WPAD | partial | idm_core_queue_contracts.md |
 | N27 | Browser proxy/VPN context fallback | missing | idm_core_queue_contracts.md |
@@ -251,7 +249,7 @@
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | idm_behavior_review.md |
 
-**Count: 60**
+**Count: 58**
 
 ### Partial contracts WITH tests (next priority)
 

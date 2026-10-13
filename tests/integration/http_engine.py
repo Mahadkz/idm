@@ -30,14 +30,43 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def interrupted(url, output, *extra, after=0.4):
+def interrupted(url, output, *extra, after=None):
+    from urllib.parse import urlsplit
+    req_path = urlsplit(url).path
+    req_log = Path(output).parent / "requests.jsonl"
+    conns = 1
+    if "--connections" in extra:
+        conns = int(extra[extra.index("--connections") + 1])
     worker = subprocess.Popen([str(CLI), url, str(output), *map(str, extra)],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    time.sleep(after)
-    worker.send_signal(signal.SIGINT)
-    stdout, stderr = worker.communicate(timeout=20)
-    assert worker.returncode != 0 and "paused" in stderr, (worker.returncode, stdout, stderr)
     meta = Path(f"{output}.part.meta")
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if worker.poll() is not None:
+            raise AssertionError(f"worker exited prematurely with code {worker.returncode}")
+        if meta.exists():
+            try:
+                state = json.loads(meta.read_text())
+                done = sum(s["cursor"] - s["start"] for s in state.get("segments", []))
+                if 0 < done < SIZE:
+                    break
+            except (json.JSONDecodeError, OSError):
+                pass
+            if req_log.exists():
+                try:
+                    lines = [json.loads(l) for l in req_log.read_text().splitlines()]
+                    reqs = [r for r in lines if r.get("path") == req_path]
+                    if len(reqs) >= min(conns, 2):
+                        time.sleep(0.05)
+                        break
+                except (json.JSONDecodeError, OSError):
+                    pass
+        time.sleep(0.01)
+    else:
+        raise AssertionError("timed out waiting for transfer to make checkpoint progress")
+    worker.send_signal(signal.SIGINT)
+    stdout, stderr = worker.communicate(timeout=60)
+    assert worker.returncode != 0 and "paused" in stderr, (worker.returncode, stdout, stderr)
     assert meta.exists(), "pause must leave a resumable checkpoint"
     done = sum(s["cursor"] - s["start"] for s in json.loads(meta.read_text())["segments"])
     assert 0 < done < SIZE, done
@@ -118,7 +147,7 @@ def main():
             # Pause and resume with one connection, then change connection counts across resumes.
             for first, second, name in [(1, 1, "resume-1-1"), (1, 4, "resume-1-4"), (4, 1, "resume-4-1")]:
                 out = directory / f"{name}.bin"
-                interrupted(f"{base}/{name}.bin", out, "--connections", first, after=0.4 / first)
+                interrupted(f"{base}/{name}.bin", out, "--connections", first)
                 run(f"{base}/{name}.bin", out, "--connections", second)
                 assert digest(out) == EXPECTED, name
                 assert not Path(f"{out}.part.meta").exists()
@@ -127,11 +156,20 @@ def main():
 
             # A file created at the destination during a transfer is never overwritten.
             out = directory / "race.bin"
+            meta = Path(f"{out}.part.meta")
             worker = subprocess.Popen([str(CLI), f"{base}/race.bin", str(out), "--connections", "1"],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            time.sleep(0.3)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if worker.poll() is not None:
+                    raise AssertionError(f"worker exited prematurely with code {worker.returncode}")
+                if meta.exists() or requests("/race.bin"):
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("timed out waiting for race.bin download to start")
             out.write_bytes(b"keep")
-            _, stderr = worker.communicate(timeout=30)
+            _, stderr = worker.communicate(timeout=60)
             assert worker.returncode != 0 and "appeared" in stderr, stderr
             assert out.read_bytes() == b"keep"
             assert digest(Path(f"{out}.part")) == EXPECTED

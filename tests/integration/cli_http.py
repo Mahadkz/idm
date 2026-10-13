@@ -45,14 +45,37 @@ def main():
             assert not denied.exists()
 
             paused = directory / "paused.bin"
-            command = [str(CLI), url("changed.bin"), str(paused), "--connections", "4"]
-            worker = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            time.sleep(0.3)
-            worker.send_signal(signal.SIGINT)
-            stdout, stderr = worker.communicate(timeout=15)
-            assert worker.returncode != 0 and "paused" in stderr, (stdout, stderr)
             metadata = Path(str(paused) + ".part.meta")
             partial = Path(str(paused) + ".part")
+            command = [str(CLI), url("changed.bin"), str(paused), "--connections", "4"]
+            worker = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if worker.poll() is not None:
+                    raise AssertionError(f"worker exited prematurely with code {worker.returncode}")
+                if metadata.exists():
+                    try:
+                        checkpoint = json.loads(metadata.read_text())
+                        if any(segment["cursor"] > segment["start"] for segment in checkpoint.get("segments", [])):
+                            break
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                    req_log = directory / "requests.jsonl"
+                    if req_log.exists():
+                        try:
+                            lines = [json.loads(l) for l in req_log.read_text().splitlines()]
+                            reqs = [r for r in lines if "/changed.bin" in r.get("path", "")]
+                            if len(reqs) >= 2:
+                                time.sleep(0.05)
+                                break
+                        except (json.JSONDecodeError, OSError):
+                            pass
+                time.sleep(0.01)
+            else:
+                raise AssertionError("timed out waiting for transfer to make checkpoint progress")
+            worker.send_signal(signal.SIGINT)
+            stdout, stderr = worker.communicate(timeout=30)
+            assert worker.returncode != 0 and "paused" in stderr, (stdout, stderr)
             assert metadata.exists() and partial.exists()
             checkpoint = json.loads(metadata.read_text())
             assert any(segment["cursor"] > segment["start"] for segment in checkpoint["segments"])

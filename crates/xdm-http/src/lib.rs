@@ -3,8 +3,8 @@
 use reqwest::{Method, StatusCode};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap, HeaderName,
-    HeaderValue, IF_RANGE, LAST_MODIFIED, PROXY_AUTHENTICATE, RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
+    HeaderMap, HeaderName, HeaderValue, IF_RANGE, LAST_MODIFIED, PROXY_AUTHENTICATE, RANGE, RETRY_AFTER,
     WWW_AUTHENTICATE,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use xdm_categories::valid_filename;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -71,6 +72,24 @@ impl Default for Options {
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+/// Resume policy of a saved segmented transfer (N13). With
+/// `ignore_modification_date`, a resume may proceed when only Last-Modified
+/// changed while a strong ETag and the length still match.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResumePolicy {
+    pub ignore_modification_date: bool,
+}
+
+/// Response facts of the request that probed a transfer (N14). Delivered
+/// through the naming callback of `download_ex` so callers can choose a
+/// task's final filename before bytes stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseMetadata {
+    pub effective_url: String,
+    pub content_disposition: Option<String>,
+    pub content_length: Option<u64>,
 }
 
 /// Shared controls and live counters for a single HTTP transfer.
@@ -269,10 +288,23 @@ struct Probe {
     ranges: bool,
     etag: Option<String>,
     last_modified: Option<String>,
+    /// Content-Disposition of the serving response (N14 naming).
+    disposition: Option<String>,
     /// First response, kept so its body is adopted instead of requesting the resource again.
     response: Option<Response>,
     /// Byte offset at which the adopted body begins.
     offset: u64,
+}
+
+impl Probe {
+    /// Response facts for the N14 naming decision, taken before any byte streams.
+    fn metadata(&self) -> ResponseMetadata {
+        ResponseMetadata {
+            effective_url: self.effective_url.clone(),
+            content_disposition: self.disposition.clone(),
+            content_length: self.length,
+        }
+    }
 }
 
 /// Largest request body replayed with each request of a transfer.
@@ -430,6 +462,127 @@ fn unreliable(at: u64, reason: impl Into<String>) -> Box<dyn Error + Send + Sync
     })
 }
 
+/// Filenames from `Content-Disposition` (RFC 6266): the RFC 5987 extended
+/// `filename*` value wins when present and decodable as UTF-8, otherwise the
+/// plain `filename` parameter.
+pub fn disposition_filename(disposition: Option<&str>) -> Option<String> {
+    let mut legacy = None;
+    let mut extended = None;
+    for parameter in split_parameters(disposition?) {
+        let Some((name, value)) = parameter.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if name == "filename*" {
+            if let Some((charset, coded)) = value.trim().split_once("''") {
+                if charset.trim().eq_ignore_ascii_case("utf-8") {
+                    extended = percent_decode(coded.trim());
+                }
+            }
+        } else if name == "filename" {
+            legacy = Some(unquote(value.trim()));
+        }
+    }
+    extended.or(legacy).filter(|value| !value.is_empty())
+}
+
+/// Preserves quoted runs while splitting `;` parameters, so arguments like
+/// `filename="a;b.zip"` stay whole.
+fn split_parameters(value: &str) -> Vec<&str> {
+    let mut parameters = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, ch) in value.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                parameters.push(&value[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parameters.push(&value[start..]);
+    parameters
+}
+
+/// Straps surrounding quotes off and unfolds the `\"` escapes inside them.
+fn unquote(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix('"') {
+        let inner = rest.strip_suffix('"').unwrap_or(rest);
+        return inner
+            .replace("\\\\", "\\")
+            .replace("\\\"", "\"");
+    }
+    value.to_owned()
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .ok()
+        .filter(|decoded| !decoded.is_empty())
+        .map(|decoded| decoded.into_owned())
+}
+
+/// The URL's last percent-decoded path segment, without query or fragment; a
+/// redirected probe reports its final URL so the file takes the real name.
+pub fn url_filename(url: &str) -> Option<String> {
+    let no_fragment = url.split('#').next().unwrap_or(url);
+    let no_query = no_fragment.split('?').next().unwrap_or(no_fragment);
+    let segment = no_query.rsplit('/').next().unwrap_or("");
+    percent_decode(segment)
+}
+
+/// Cross-platform filename built from an untrusted server value: path
+/// components are stripped, Windows-invalid characters replaced, trailing
+/// dots and spaces removed and reserved device names disambiguated (N14).
+pub fn sanitize_filename(raw: &str) -> Option<String> {
+    let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || "\\/:<>\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    while cleaned.ends_with(['.', ' ']) {
+        cleaned.pop();
+    }
+    if cleaned.is_empty() {
+        return None;
+    }
+    if !valid_filename(&cleaned) {
+        // Reserved device names (CON, COM1.., NUL) never name a file on
+        // Windows; keep the intended stem by underlining it.
+        let at = cleaned.rfind('.').filter(|&at| at > 0);
+        let repaired = match at {
+            Some(at) => format!("{}_.{}", &cleaned[..at], &cleaned[at + 1..]),
+            None => format!("{cleaned}_"),
+        };
+        if !valid_filename(&repaired) {
+            return None;
+        }
+        cleaned = repaired;
+    }
+    (cleaned.len() <= 240).then_some(cleaned)
+}
+
+/// The server-chosen filename of a task (N14): Content-Disposition first,
+/// else the final URL's last segment; `None` keeps the provisional name,
+/// including when a sanitization loses every meaningful character.
+pub fn server_filename(metadata: &ResponseMetadata, provisional: &str) -> Option<String> {
+    let candidates = [
+        disposition_filename(metadata.content_disposition.as_deref()),
+        url_filename(&metadata.effective_url),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|raw| sanitize_filename(&raw))
+        .filter(|chosen| *chosen != provisional)
+}
+
 /// Parses the first challenge of a WWW-Authenticate or Proxy-Authenticate
 /// header: `Basic realm="xdm-test"`, `Bearer`, or a comma list of schemes.
 fn parse_challenge(header: &str) -> Option<(String, Option<String>)> {
@@ -550,7 +703,7 @@ fn store_checkpoint(file: &File, path: &Path, state: &Checkpoint) -> Result<()> 
     Ok(())
 }
 
-fn validators_match(saved: &Checkpoint, current: &Probe) -> bool {
+fn validators_match(saved: &Checkpoint, current: &Probe, policy: &ResumePolicy) -> bool {
     if Some(saved.length) != current.length || saved.effective_url != current.effective_url {
         return false;
     }
@@ -563,10 +716,16 @@ fn validators_match(saved: &Checkpoint, current: &Probe) -> bool {
         .last_modified
         .as_ref()
         .zip(current.last_modified.as_ref());
-    if etag.is_none() && modified.is_none() {
-        return false;
+    match etag {
+        // A strong ETag that changed always refuses, policy or not (N13).
+        Some((a, b)) if a != b => false,
+        // A still-matching strong ETag alone protects the content identity;
+        // only then may the modification date be ignored (N13).
+        Some(_) => policy.ignore_modification_date || modified.is_none_or(|(a, b)| a == b),
+        // Without a strong ETag the date is the only signal left and stays binding:
+        // disabling the date check alone must never splice changed bytes.
+        None => modified.is_some_and(|(a, b)| a == b),
     }
-    etag.is_none_or(|(a, b)| a == b) && modified.is_none_or(|(a, b)| a == b)
 }
 
 /// Sizes the partial file. Linux allocates real blocks so concurrent range writes do not
@@ -818,6 +977,7 @@ fn retry_send(
 fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> Result<Probe> {
     let response = retry_send(client, request, Some(format!("bytes={offset}-")), stop)?;
     let status = response.status();
+    let disposition = header(&response, CONTENT_DISPOSITION);
     if status == StatusCode::PARTIAL_CONTENT && identity_encoded(&response) {
         let declared = header(&response, CONTENT_LENGTH).map(|v| v.parse::<u64>().ok());
         if let Some((start, end, length)) = header(&response, CONTENT_RANGE)
@@ -834,6 +994,7 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
                     ranges: true,
                     etag: header(&response, ETAG),
                     last_modified: header(&response, LAST_MODIFIED),
+                    disposition,
                     response: Some(response),
                     offset,
                 });
@@ -862,6 +1023,7 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
         ranges: false,
         etag: header(&response, ETAG),
         last_modified: header(&response, LAST_MODIFIED),
+        disposition,
         response: Some(response),
         offset: 0,
     })
@@ -900,6 +1062,8 @@ struct Shared {
     refused: Mutex<Option<StatusCode>>,
     /// Last periodic checkpoint; bounds disk syncs for all workers together.
     checkpointed: Mutex<Instant>,
+    /// N13 resume policy, applied to the validators of every range answer.
+    policy: ResumePolicy,
     /// First terminal worker failure (N05 `RangeUnreliable`, pause, I/O error).
     aborted: Mutex<Option<Box<dyn Error + Send + Sync>>>,
 }
@@ -1153,10 +1317,14 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                     .as_ref()
                     .zip(header(&response, ETAG).as_ref())
                     .is_some_and(|(old, new)| old != new)
-                    || last_modified
-                        .as_ref()
-                        .zip(header(&response, LAST_MODIFIED).as_ref())
-                        .is_some_and(|(old, new)| old != new)
+                {
+                    return Err(err("remote validators changed during range transfer"));
+                }
+                if last_modified
+                    .as_ref()
+                    .zip(header(&response, LAST_MODIFIED).as_ref())
+                    .is_some_and(|(old, new)| old != new)
+                    && !shared.policy.ignore_modification_date
                 {
                     return Err(err("remote validators changed during range transfer"));
                 }
@@ -1384,18 +1552,36 @@ pub fn download_with_stall_timeout(
     control: Arc<TransferControl>,
     stall_timeout: Duration,
 ) -> Result<()> {
+    download_ex(options, control, stall_timeout, ResumePolicy::default(), None)
+}
+
+/// Full-control entry point (daemon use): `policy` carries the N13 resume
+/// policy and, when `decide` is set, it is called once with the probing
+/// response's metadata; the returned path becomes the real destination,
+/// with any checkpoint files moved to it (N14 server-chosen naming). The
+/// destination must stay in `options.output`'s directory.
+pub fn download_ex(
+    options: Options,
+    control: Arc<TransferControl>,
+    stall_timeout: Duration,
+    policy: ResumePolicy,
+    decide: Option<&mut (dyn FnMut(ResponseMetadata) -> Result<PathBuf> + Send)>,
+) -> Result<()> {
     if stall_timeout.is_zero() {
         return Err(err("stall timeout must be greater than zero"));
     }
     ignore_file_size_signal();
     let output = options.output.clone();
-    run_transfer(options, control, stall_timeout).map_err(|error| explain_storage(error, &output))
+    run_transfer(options, control, stall_timeout, &policy, decide)
+        .map_err(|error| explain_storage(error, &output))
 }
 
 fn run_transfer(
-    options: Options,
+    mut options: Options,
     control: Arc<TransferControl>,
     stall_timeout: Duration,
+    policy: &ResumePolicy,
+    decide: Option<&mut (dyn FnMut(ResponseMetadata) -> Result<PathBuf> + Send)>,
 ) -> Result<()> {
     if options.connections == 0 || options.connections > 16 {
         return Err(err("connections must be between 1 and 16"));
@@ -1434,6 +1620,31 @@ fn run_transfer(
         .and_then(|s| s.segments.iter().find(|x| x.cursor <= x.end))
         .map_or(0, |x| x.cursor);
     let mut probe = probe(&client, &request, offset, &options.stop)?;
+    if let Some(decide) = decide {
+        let provisional = options.output.clone();
+        let chosen = decide(probe.metadata())?;
+        if chosen != provisional {
+            let same_directory = chosen.parent() == provisional.parent();
+            if !same_directory || chosen.file_name().is_none() {
+                return Err(err(
+                    "a server-chosen filename must stay in the task's directory",
+                ));
+            }
+            // Move any checkpoint files so resume state follows the final name.
+            for suffix in [".part.meta", ".part"] {
+                let from = PathBuf::from(format!("{}{suffix}", provisional.display()));
+                let to = PathBuf::from(format!("{}{suffix}", chosen.display()));
+                match fs::rename(&from, &to) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            options.output = chosen;
+        }
+    }
+    let part = part_path(&options.output);
+    let meta = meta_path(&options.output);
     if !probe.ranges || probe.length.unwrap_or(0) == 0 {
         if saved.is_some() {
             return Err(err(
@@ -1449,7 +1660,7 @@ fn run_transfer(
         if saved.version != 2
             || saved.url != options.url
             || saved.context_sha256 != context_sha256
-            || !validators_match(&saved, &probe)
+            || !validators_match(&saved, &probe, policy)
             || !part.exists()
             || part.metadata()?.len() != length
         {
@@ -1509,6 +1720,7 @@ fn run_transfer(
         adopted: Mutex::new(probe.response.take().map(|r| (probe.offset, r))),
         refused: Mutex::new(None),
         checkpointed: Mutex::new(Instant::now()),
+        policy: *policy,
         aborted: Mutex::new(None),
     });
     let handles: Vec<_> = (0..options.connections)
@@ -1710,8 +1922,122 @@ mod tests {
         assert!(text.contains("stopped honoring byte ranges at byte 4096"), "{text}");
         assert!(text.contains("--restart"), "{text}");
     }
+
+    #[test]
+    fn validators_match_never_amounts_to_splice() {
+        let saved = |etag: Option<&str>, modified: Option<&str>| Checkpoint {
+            version: 2,
+            url: "u".into(),
+            effective_url: "u".into(),
+            context_sha256: "0".repeat(64),
+            length: 8,
+            etag: etag.map(str::to_owned),
+            last_modified: modified.map(str::to_owned),
+            segments: Vec::new(),
+        };
+        let probe = |etag: Option<&str>, modified: Option<&str>, url: &str, length: u64| Probe {
+            effective_url: url.into(),
+            length: Some(length),
+            ranges: true,
+            etag: etag.map(str::to_owned),
+            last_modified: modified.map(str::to_owned),
+            disposition: None,
+            response: None,
+            offset: 0,
+        };
+        let (etag, date) = ("\"x\"", "Mon, 01 Jan 2024 00:00:00 GMT");
+        let (other_tag, other_date, other_url) = ("\"z\"", "Tue, 02 Jan 2024 00:00:00 GMT", "v");
+        for policy in [ResumePolicy::default(), ResumePolicy { ignore_modification_date: true }] {
+            let old = saved(Some(etag), Some(date));
+            // A changed length, a changed strong ETag or a changed effective URL
+            // refuse in every policy.
+            assert!(!validators_match(&old, &probe(Some(etag), Some(date), "u", 4), &policy));
+            assert!(!validators_match(&old, &probe(Some(other_tag), Some(date), "u", 8), &policy));
+            assert!(!validators_match(&old, &probe(Some(etag), Some(date), other_url, 8), &policy));
+        }
+        let old = saved(Some(etag), Some(date));
+        // Only the date changed: refuse by default, allowed only behind the
+        // N13 flag while the strong ETag and length still match.
+        assert!(!validators_match(&old, &probe(Some(etag), Some(other_date), "u", 8), &ResumePolicy::default()));
+        assert!(validators_match(&old, &probe(Some(etag), Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true }));
+        // Without a strong ETag the date is the only identity signal and stays
+        // binding: disabling the date check alone can never splice new bytes.
+        let dated = saved(None, Some(date));
+        assert!(validators_match(&dated, &probe(None, Some(date), "u", 8), &ResumePolicy::default()));
+        assert!(!validators_match(&dated, &probe(None, Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true }));
+        assert!(!validators_match(&dated, &probe(None, None, "u", 8), &ResumePolicy { ignore_modification_date: true }));
+        let weak = saved(Some("W/\"a\""), Some(date));
+        assert!(!validators_match(&weak, &probe(Some("W/\"a\""), Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true }));
+    }
+    #[test]
+    fn disposition_and_url_filenames_parse() {
+        assert_eq!(
+            disposition_filename(Some(r#"attachment; filename="plain name.pdf""#)),
+            Some("plain name.pdf".into())
+        );
+        // Quoted separators stay whole and escaped quotes unfold.
+        assert_eq!(
+            disposition_filename(Some(r#"attachment; filename="a;b\\c.zip""#)),
+            Some("a;b\\c.zip".into())
+        );
+        // RFC 5987: UTF-8 extended value percent-decoded, and preferred.
+        assert_eq!(
+            disposition_filename(Some("attachment; filename=\"fallback.pdf\"; filename*=UTF-8''caf%C3%A9%20%E2%82%AC.zip")),
+            Some("café €.zip".into())
+        );
+        assert_eq!(disposition_filename(Some("attachment; filename*=iso-8859-1''x.zip; filename=\"fallback\"")),
+            Some("fallback".into()));
+        assert_eq!(disposition_filename(None), None);
+        assert_eq!(url_filename("http://h/final/tree.tar.gz?x=1#frag"), Some("tree.tar.gz".into()));
+        assert_eq!(url_filename("http://127.0.0.1:2/finaldir/red.tar.gz"), Some("red.tar.gz".into()));
+        assert_eq!(url_filename("http://h/"), None);
+    }
+
+    #[test]
+    fn server_names_are_sanitized_and_never_provisional() {
+        let meta = |disposition: Option<&str>, url: &str| ResponseMetadata {
+            effective_url: url.into(),
+            content_disposition: disposition.map(str::to_owned),
+            content_length: Some(8),
+        };
+        assert_eq!(
+            server_filename(&meta(Some(r#"attachment; filename="C:\\evil\\report.pdf""#), "http://h/x"),
+                "plain.pdf"),
+            Some("report.pdf".into())
+        );
+        assert_eq!(
+            server_filename(&meta(Some(r#"attachment; filename="dangerous?q*name.zip""#), "http://h/x"),
+                "plain.pdf"),
+            Some("dangerous_q_name.zip".into())
+        );
+        // Reserved device names and trailing dots/spaces lose their collisions.
+        assert_eq!(
+            server_filename(&meta(Some(r#"attachment; filename="CON""#), "http://h/x"), "plain.pdf"),
+            Some("CON_".into())
+        );
+        assert_eq!(
+            server_filename(&meta(Some(r#"attachment; filename="com1.bin.""#), "http://h/x"), "plain.pdf"),
+            Some("com1_.bin".into())
+        );
+        // A lost disposition name falls back to the URL's final segment.
+        assert_eq!(
+            server_filename(&meta(Some(r#"attachment; filename="a\..\..""#), "http://h/x/real-name.bin"), "p"),
+            Some("real-name.bin".into())
+        );
+        assert_eq!(server_filename(&meta(Some(r#"attachment; filename="a\..\..""#), "http://h/"), "p"), None);
+        // The URL segment fills in when no disposition came.
+        assert_eq!(
+            server_filename(&meta(None, "http://h/final/served.tar.gz"), "plain"),
+            Some("served.tar.gz".into())
+        );
+        // Equal to the provisional name: keep it (no rename, no suffix churn).
+        assert_eq!(server_filename(&meta(None, "http://h/plain.pdf"), "plain.pdf"), None);
+    }
 }
 
+/// Property-style checks for the parsing helpers: server names and
+/// Content-Range values come from untrusted bytes, so garbage must only
+/// produce rejections, never panics.
 #[cfg(test)]
 mod property_tests {
     use super::*;
@@ -1873,6 +2199,7 @@ mod property_tests {
             adopted: Mutex::new(None),
             refused: Mutex::new(None),
             checkpointed: Mutex::new(Instant::now()),
+            policy: ResumePolicy::default(),
             aborted: Mutex::new(None),
         }
     }

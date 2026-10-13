@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
-use xdm_http::{Options, Progress, Proxy, TransferControl, download_with_stall_timeout};
+use xdm_http::{Options, Progress, Proxy, ResumePolicy, ResponseMetadata, TransferControl, download_ex};
 use schedule::{Clock, SystemClock};
 use xdm_ipc::{
     Command, MediaMode, Paths, Reply, Request, TaskSummary, read_frame, write_frame,
@@ -36,6 +36,18 @@ use xdm_ipc::MediaAudioFormat;
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+/// Submit policies carried by the extended `SubmitEx` variant; the legacy
+/// `Submit`/`SubmitRequest` paths submit with every default (all false),
+/// keeping their old semantics.
+#[derive(Debug, Clone, Copy, Default)]
+struct SubmitFlags {
+    name_from_server: bool,
+    ignore_modification_date: bool,
+    /// Only the extended variant runs the duplicate-URL check.
+    check_duplicates: bool,
+    allow_duplicate: bool,
+}
 
 pub(crate) struct Inner {
     pub(crate) db: Connection,
@@ -101,6 +113,65 @@ fn http_part_paths(output: &Path) -> [PathBuf; 2] {
         PathBuf::from(format!("{}.part", output.display())),
         PathBuf::from(format!("{}.part.meta", output.display())),
     ]
+}
+
+/// Variant of `name` with a numeric suffix inserted before the extension:
+/// `dup.txt` -> `dup (2).txt` (N14 duplicate-target rule).
+fn varied_name(name: &str, suffix: u32) -> String {
+    match name.rfind('.').filter(|&at| at > 0) {
+        Some(at) => format!("{} ({}){}", &name[..at], suffix, &name[at..]),
+        None => format!("{name} ({suffix})"),
+    }
+}
+
+/// Resolves the server-chosen destination for an N13/N14 task: the name comes
+/// from `xdm_http::server_filename` and stays inside the provisional file's
+/// directory; occupied names (another task or an existing file) receive a
+/// " (2)"-style suffix instead, and the chosen path is recorded in the row.
+fn choose_server_destination(
+    service: &Service,
+    id: i64,
+    provisional: &str,
+    metadata: &ResponseMetadata,
+) -> Result<PathBuf> {
+    let output = Path::new(provisional);
+    let provisional_name = output.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let Some(name) = xdm_http::server_filename(metadata, provisional_name) else {
+        return Ok(output.to_path_buf());
+    };
+    let directory = output.parent().unwrap_or(Path::new("/")).to_path_buf();
+    let inner = service
+        .inner
+        .lock()
+        .map_err(|_| io::Error::other("task lock poisoned"))?;
+    let mut suffix = 1u32;
+    let mut chosen = name.clone();
+    loop {
+        let candidate = directory.join(&chosen);
+        let output_text = candidate.to_string_lossy();
+        let taken = std::fs::symlink_metadata(&candidate).is_ok()
+            || inner
+                .db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE output=?1)",
+                    [output_text.as_ref()],
+                    |row| row.get::<_, i64>(0),
+                )? != 0;
+        if !taken {
+            break;
+        }
+        suffix += 1;
+        chosen = varied_name(&name, suffix);
+    }
+    if chosen == provisional_name {
+        return Ok(output.to_path_buf());
+    }
+    let destination = directory.join(&chosen);
+    inner.db.execute(
+        "UPDATE tasks SET output=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2",
+        params![destination.to_string_lossy(), id],
+    )?;
+    Ok(destination)
 }
 
 pub(crate) struct Active {
@@ -244,6 +315,10 @@ struct Work {
     stop: Arc<AtomicBool>,
     /// Whether the stop flag was set by the daemon rather than an engine abort.
     stop_requested: Arc<AtomicBool>,
+    /// N13 modification-date policy for this HTTP task.
+    policy: ResumePolicy,
+    /// N14: the final filename comes from the server response.
+    name_from_server: bool,
     /// Live FTP progress holder, mirrored inside the active entry.
     ftp: Option<Arc<FtpLive>>,
     /// Live-recording progress holder, mirrored inside the active entry.
@@ -368,6 +443,31 @@ pub(crate) fn next_task_id(db: &Connection) -> rusqlite::Result<i64> {
     db.query_row("SELECT MAX(COALESCE((SELECT MAX(id) FROM tasks),0),COALESCE((SELECT MAX(task_id) FROM removed_tasks),0))+1", [], |row| row.get(0))
 }
 
+/// Normalizes a URL for duplicate comparison (IDM): scheme and host
+/// lowercased — which `Url` parsing itself does — and no fragment. The
+/// port, path case and query bytes stay as submitted.
+fn normalize_url(raw: &str) -> Option<String> {
+    let no_fragment = raw.split('#').next().unwrap_or(raw);
+    Url::parse(no_fragment).ok().map(|parsed| parsed.as_str().to_owned())
+}
+
+/// The non-removed task owning the same normalized URL, if any.
+fn duplicate_task(db: &Connection, url: &str) -> Result<Option<i64>> {
+    let Some(target) = normalize_url(url) else {
+        return Ok(None);
+    };
+    let mut statement = db.prepare("SELECT id,url FROM tasks LIMIT 10000")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let candidate = row.get::<_, String>(1)?;
+        if normalize_url(&candidate).as_deref() == Some(target.as_str()) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 
 impl Service {
     fn submit_task(
@@ -380,6 +480,7 @@ impl Service {
         body: Option<Vec<u8>>,
         priority: i64,
         connections: usize,
+        flags: SubmitFlags,
     ) -> Result<Reply> {
         let method = method.trim().to_ascii_uppercase();
         if request_id.is_empty()
@@ -435,6 +536,20 @@ impl Service {
             self.wake.notify_one();
             Ok(Reply::accepted(id))
         } else {
+            // Duplicate detection (IDM prompt): the same normalized URL in a
+            // non-removed task is refused with the task ID; an explicit
+            // allow_duplicate repeats the download anyway. Only the extended
+            // variant opts in, so legacy submissions keep their semantics.
+            if flags.check_duplicates
+                && !flags.allow_duplicate
+                && let Some(other) = duplicate_task(&inner.db, &url)?
+            {
+                let mut reply = Reply::error(
+                    "a task for this download already exists; pass allow_duplicate to download again",
+                );
+                reply.duplicate_of = Some(other);
+                return Ok(reply);
+            }
             if std::fs::metadata(&output).is_ok() {
                 return Ok(Reply::error("destination file already exists"));
             }
@@ -447,7 +562,7 @@ impl Service {
                 xdm_categories::classify_with(&rules, name, url_host(&url).as_deref(), None);
             let id = next_task_id(&inner.db)?;
             let kind = if url.starts_with("ftp://") { "ftp" } else { "http" };
-            let inserted = inner.db.execute("INSERT OR IGNORE INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,category,method,body) VALUES (?9,?1,?2,?3,?4,?5,?6,'queued',?8,?7,?10,?11)", params![request_id,url,output,headers_json,priority,connections as i64,category,kind,id,method,body])?;
+            let inserted = inner.db.execute("INSERT OR IGNORE INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,category,method,body,name_from_server,ignore_modified) VALUES (?9,?1,?2,?3,?4,?5,?6,'queued',?8,?7,?10,?11,?12,?13)", params![request_id,url,output,headers_json,priority,connections as i64,category,kind,id,method,body,flags.name_from_server,flags.ignore_modification_date])?;
             if inserted == 0 {
                 return Ok(Reply::error("destination is already assigned to a task"));
             }
@@ -514,6 +629,8 @@ impl Service {
             ("media_mode_json", "TEXT"),
             ("auth_realm", "TEXT"),
             ("restart_reason", "TEXT"),
+            ("name_from_server", "INTEGER NOT NULL DEFAULT 0"),
+            ("ignore_modified", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {name} {definition}"))?;
@@ -680,6 +797,7 @@ impl Service {
                     None,
                     priority,
                     connections,
+                    SubmitFlags::default(),
                 )
             }
             Command::SubmitRequest {
@@ -701,6 +819,37 @@ impl Service {
                     body,
                     priority,
                     connections,
+                    SubmitFlags::default(),
+                )
+            }
+            Command::SubmitEx {
+                request_id,
+                url,
+                output,
+                headers,
+                method,
+                body,
+                priority,
+                connections,
+                name_from_server,
+                ignore_modification_date,
+                allow_duplicate,
+            } => {
+                self.submit_task(
+                    request_id,
+                    url,
+                    output,
+                    headers,
+                    method,
+                    body,
+                    priority,
+                    connections,
+                    SubmitFlags {
+                        name_from_server,
+                        ignore_modification_date,
+                        check_duplicates: true,
+                        allow_duplicate,
+                    },
                 )
             }
             Command::SetProxy { proxy } => {
@@ -1340,7 +1489,7 @@ impl Service {
                     }
                 }
                 let selected = if let Some((id, _)) = best {
-                    inner.db.query_row("SELECT id,url,output,headers_json,connections,kind,media_video,media_audio,media_mode_json,rate_limit,queue_id,method,body FROM tasks WHERE id=?1", [id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,String>(5)?,row.get::<_,Option<i64>>(6)?,row.get::<_,Option<i64>>(7)?,row.get::<_,Option<String>>(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,i64>(10)?,row.get::<_,String>(11)?,row.get::<_,Option<Vec<u8>>>(12)?))).optional()?
+                    inner.db.query_row("SELECT id,url,output,headers_json,connections,kind,media_video,media_audio,media_mode_json,rate_limit,queue_id,method,body,name_from_server,ignore_modified FROM tasks WHERE id=?1", [id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,String>(5)?,row.get::<_,Option<i64>>(6)?,row.get::<_,Option<i64>>(7)?,row.get::<_,Option<String>>(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,i64>(10)?,row.get::<_,String>(11)?,row.get::<_,Option<Vec<u8>>>(12)?,row.get::<_,i64>(13)?,row.get::<_,i64>(14)?))).optional()?
                 } else {
                     None
                 };
@@ -1358,6 +1507,8 @@ impl Service {
                     queue_id,
                     method,
                     body,
+                    name_from_server,
+                    ignore_modified,
                 )) = selected
                 {
                     let (control, ftp) = if kind == "http" {
@@ -1441,6 +1592,8 @@ impl Service {
                         stall_timeout: Duration::from_secs(inner.stall_timeout),
                         stop,
                         stop_requested,
+                        policy: ResumePolicy { ignore_modification_date: ignore_modified != 0 },
+                        name_from_server: name_from_server != 0,
                         ftp,
                         media,
                     });
@@ -1493,22 +1646,44 @@ impl Service {
                         method,
                         body,
                         control,
-                    } => download_with_stall_timeout(
-                        Options {
-                            url: work.url,
-                            output: work.output,
-                            connections,
-                            restart: false,
-                            headers,
-                            method,
-                            body,
-                            bytes_per_second: None,
-                            proxy: work.proxy.clone(),
-                            stop: work.stop.clone(),
-                        },
-                        control,
-                        work.stall_timeout,
-                    ),
+                    } => {
+                        // N14: the naming decision is offered once, right after
+                        // probing; the daemon records the chosen destination.
+                        let mut named = work
+                            .name_from_server
+                            .then(|| {
+                                let service = service.clone();
+                                let id = work.id;
+                                let provisional = work.output.to_string_lossy().into_owned();
+                                Box::new(
+                                    move |metadata: xdm_http::ResponseMetadata| {
+                                        choose_server_destination(&service, id, &provisional, &metadata)
+                                    },
+                                ) as Box<dyn FnMut(ResponseMetadata) -> Result<PathBuf> + Send>
+                            });
+                        let named = named.as_mut().map(|decide| {
+                            &mut **decide
+                                as &mut (dyn FnMut(ResponseMetadata) -> Result<PathBuf> + Send)
+                        });
+                        download_ex(
+                            Options {
+                                url: work.url,
+                                output: work.output,
+                                connections,
+                                restart: false,
+                                headers,
+                                method,
+                                body,
+                                bytes_per_second: None,
+                                proxy: work.proxy.clone(),
+                                stop: work.stop.clone(),
+                            },
+                            control,
+                            work.stall_timeout,
+                            work.policy,
+                            named,
+                        )
+                    }
                     WorkKind::Ftp => match work.ftp.clone() {
                         None => Err("FTP progress holder missing".into()),
                         Some(live) => xdm_ftp::download(
@@ -1960,6 +2135,153 @@ mod tests {
         assert_eq!(task_state(&service, id).1, 5);
         assert!(is_permanent_error("download returned HTTP 410"));
         assert!(!is_permanent_error("probe failed: HTTP 503"));
+    }
+
+    #[test]
+    fn submit_ex_detects_normalized_duplicates_and_allows_with_flag() {
+        let (service, _, _) = service(1000);
+        let ex = |request_id: &str, url: &str, name: &str, allow: bool| {
+            service
+                .command(Command::SubmitEx {
+                    request_id: request_id.into(),
+                    url: url.into(),
+                    output: format!("/nonexistent-xdm-test/{name}"),
+                    headers: Vec::new(),
+                    method: "GET".into(),
+                    body: None,
+                    priority: 1,
+                    connections: 1,
+                    name_from_server: false,
+                    ignore_modification_date: false,
+                    allow_duplicate: allow,
+                })
+                .unwrap()
+        };
+        let first = ex("dup-first", "http://example.test/path", "dup-first.bin", false);
+        assert!(first.ok);
+        let first = first.task_id.unwrap();
+        // Scheme/host case and fragments normalize away; path case does not.
+        let fragment = ex("dup-frag", "http://example.test/path#anchor", "dup-frag.bin", false);
+        assert!(!fragment.ok);
+        assert_eq!(fragment.duplicate_of, Some(first));
+        let host = ex("dup-host", "http://EXAMPLE.test/path", "dup-host.bin", false);
+        assert!(!host.ok && host.duplicate_of == Some(first));
+        // The path case is not normalized away, so this is a new download.
+        assert!(ex("dup-case", "http://example.test/PATH", "dup-case.bin", false).ok);
+        // An explicit can-download-again creates a second task.
+        let again = ex("dup-allow", "http://example.test/path", "dup-allow.bin", true);
+        assert!(again.ok);
+        assert_ne!(again.task_id.unwrap(), first);
+        // The legacy submit keeps its old no-duplicate-check semantics.
+        let legacy = service
+            .command(Command::Submit {
+                request_id: "dup-legacy".into(),
+                url: "http://example.test/path".into(),
+                output: "/nonexistent-xdm-test/dup-legacy.bin".into(),
+                headers: Vec::new(),
+                priority: 1,
+                connections: 1,
+            })
+            .unwrap();
+        assert!(legacy.ok, "{:?}", legacy.error);
+    }
+
+    #[test]
+    fn submit_ex_flags_travel_to_work() {
+        let (service, _, _) = service(1000);
+        let id = service
+            .command(Command::SubmitEx {
+                request_id: "flags-in".into(),
+                url: "http://example.test/f.bin".into(),
+                output: "/nonexistent-xdm-test/flags.bin".into(),
+                headers: Vec::new(),
+                method: "GET".into(),
+                body: None,
+                priority: 1,
+                connections: 1,
+                name_from_server: true,
+                ignore_modification_date: true,
+                allow_duplicate: false,
+            })
+            .unwrap()
+            .task_id
+            .unwrap();
+        let work = service.next_work().unwrap();
+        assert_eq!(work.id, id);
+        assert!(work.name_from_server && work.policy.ignore_modification_date);
+        assert_eq!(work.output, PathBuf::from("/nonexistent-xdm-test/flags.bin"));
+        // Legacy submissions default both policies off.
+        let legacy = submit(&service, "flags-legacy");
+        let work = service.next_work().unwrap();
+        assert_eq!(work.id, legacy);
+        assert!(!work.name_from_server && !work.policy.ignore_modification_date);
+    }
+
+    #[test]
+    fn server_names_stay_in_their_directory_and_never_overwrite() {
+        let (service, _, _) = service(1000);
+        let directory = std::env::temp_dir().join(format!("xdm-naming-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let row = |request_id: &str, output: &std::path::Path| {
+            let inner = service.inner.lock().unwrap();
+            let id = next_task_id(&inner.db).unwrap();
+            inner
+                .db
+                .execute(
+                    "INSERT INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind) VALUES (?1,?2,'http://h/x',?3,'[]',1,1,'queued','http')",
+                    params![id, request_id, output.display().to_string()],
+                )
+                .unwrap();
+            id
+        };
+        let metadata = |disposition: &str| ResponseMetadata {
+            effective_url: "http://h/dir/final.bin".into(),
+            content_disposition: Some(disposition.into()),
+            content_length: Some(8),
+        };
+        // The naming resolution runs before streaming; the row records it.
+        let first = row("srv-first", &directory.join("plain.bin"));
+        let chosen = choose_server_destination(
+            &service,
+            first,
+            &directory.join("plain.bin").display().to_string(),
+            &metadata(r#"attachment; filename="server pick.pdf""#),
+        )
+        .unwrap();
+        assert_eq!(chosen, directory.join("server pick.pdf"));
+        assert_eq!(
+            service.command(Command::GetTask { task_id: first }).unwrap().tasks[0].output,
+            chosen.display().to_string()
+        );
+        // An existing file is never replaced: the name gets a " (2)" suffix.
+        std::fs::write(directory.join("conflict.tar.gz"), b"keep").unwrap();
+        let second = row("srv-second", &directory.join("other.bin"));
+        let conflict = choose_server_destination(
+            &service,
+            second,
+            &directory.join("other.bin").display().to_string(),
+            &metadata(r#"attachment; filename="conflict.tar.gz""#),
+        )
+        .unwrap();
+        assert_eq!(conflict, directory.join("conflict.tar (2).gz"));
+        assert_eq!(std::fs::read(directory.join("conflict.tar.gz")).unwrap(), b"keep");
+        assert!(!directory.join("conflict.tar.gz.part").exists());
+        // A server name equal to the provisional name keeps it untouched.
+        let third = row("srv-third", &directory.join("same.zip"));
+        let kept = choose_server_destination(
+            &service,
+            third,
+            &directory.join("same.zip").display().to_string(),
+            &metadata(r#"attachment; filename="same.zip""#),
+        )
+        .unwrap();
+        assert_eq!(kept, directory.join("same.zip"));
+        assert_eq!(
+            service.command(Command::GetTask { task_id: third }).unwrap().tasks[0].output,
+            directory.join("same.zip").display().to_string()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -9,6 +9,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
+fn default_submit_method() -> String {
+    "GET".into()
+}
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +43,33 @@ pub enum Command {
         body: Option<Vec<u8>>,
         priority: i64,
         connections: usize,
+    },
+    /// Extended submit (N13/N14): legacy clients keep the wire shapes of
+    /// `Submit`/`SubmitRequest`; only this variant carries the server-chosen
+    /// naming flag, the duplicate-URL policy and the modification-date policy.
+    SubmitEx {
+        request_id: String,
+        url: String,
+        output: String,
+        #[serde(default)]
+        headers: Vec<(String, String)>,
+        #[serde(default = "default_submit_method")]
+        method: String,
+        body: Option<Vec<u8>>,
+        priority: i64,
+        connections: usize,
+        /// The final filename comes from Content-Disposition or the final URL
+        /// of the probing response, inside `output`'s directory (N14).
+        #[serde(default)]
+        name_from_server: bool,
+        /// A resume may ignore a changed Last-Modified while a strong ETag and
+        /// the length still match (N13).
+        #[serde(default)]
+        ignore_modification_date: bool,
+        /// A new submission for a URL that another task already owns returns
+        /// `duplicate_of` instead of adding a task; pass true to allow it.
+        #[serde(default)]
+        allow_duplicate: bool,
     },
     SetProxy {
         proxy: ProxyChoice,
@@ -649,6 +680,9 @@ pub struct Reply {
     /// and `SetStallTimeout` replies.
     #[serde(default)]
     pub stall_timeout_seconds: Option<u64>,
+    /// Task that already owns a rejected duplicate submission's URL.
+    #[serde(default)]
+    pub duplicate_of: Option<i64>,
 }
 
 impl Reply {
@@ -674,6 +708,7 @@ impl Reply {
             completion_pending: Vec::new(),
             stall_timeout_seconds: None,
             logins: Vec::new(),
+            duplicate_of: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -698,6 +733,7 @@ impl Reply {
             completion_pending: Vec::new(),
             stall_timeout_seconds: None,
             logins: Vec::new(),
+            duplicate_of: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -731,6 +767,7 @@ impl Reply {
             completion_pending: Vec::new(),
             stall_timeout_seconds: None,
             logins: Vec::new(),
+            duplicate_of: None,
         }
     }
 }
@@ -1224,6 +1261,52 @@ mod tests {
         parked.status = "restart_required".into();
         parked.restart_reason = Some("server stopped honoring byte ranges".into());
         assert!(serde_json::to_string(&parked).unwrap().contains("byte ranges"));
+    }
+
+    #[test]
+    fn submit_ex_and_duplicate_of_round_trip() {
+        let command = Command::SubmitEx {
+            request_id: "e1".into(),
+            url: "http://example.invalid/f.bin".into(),
+            output: "/dl/f.bin".into(),
+            headers: Vec::new(),
+            method: "GET".into(),
+            body: None,
+            priority: 1,
+            connections: 8,
+            name_from_server: true,
+            ignore_modification_date: true,
+            allow_duplicate: true,
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &command).unwrap();
+        let restored: Command = read_frame(&mut bytes.as_slice()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&command).unwrap()
+        );
+        // Older serialized commands without the new flags default them off,
+        // and older replies read without the duplicate flag.
+        let legacy = serde_json::json!({"type": "submit_ex", "payload": {
+            "request_id": "e2", "url": "u", "output": "o", "priority": 0, "connections": 8,
+            "body": null}});
+        let Command::SubmitEx {
+            method, name_from_server, ignore_modification_date, allow_duplicate, ..
+        } = serde_json::from_value(legacy).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!((method.as_str(), name_from_server, ignore_modification_date, allow_duplicate),
+            ("GET", false, false, false));
+        let mut reply = Reply::list(Vec::new());
+        assert!(reply.duplicate_of.is_none());
+        reply.duplicate_of = Some(9);
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &reply).unwrap();
+        let back: Reply = read_frame(&mut bytes.as_slice()).unwrap();
+        assert_eq!(back.duplicate_of, Some(9));
+        let older: Reply = serde_json::from_str(r#"{"version":1,"ok":true,"task_id":null,"tasks":[],"error":null}"#).unwrap();
+        assert_eq!(older.duplicate_of, None);
     }
 
     #[test]

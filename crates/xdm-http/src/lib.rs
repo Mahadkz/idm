@@ -577,11 +577,62 @@ fn preallocate(file: &File, length: u64) -> std::io::Result<()> {
     {
         use std::os::fd::AsRawFd;
         // SAFETY: fallocate only reads the descriptor and sizes we pass.
+        let previous = file.metadata()?.len();
+        // Preflight: never start allocating what the filesystem cannot hold.
+        // SAFETY: fstatvfs only writes into the zeroed struct we own.
+        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut stats) } == 0 {
+            let available = (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64);
+            if length.saturating_sub(previous) > available {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+        }
+        // SAFETY: fallocate only reads the descriptor and sizes we pass.
         if unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, length as libc::off_t) } == 0 {
             return Ok(());
         }
+        // A full disk or a size limit is a real answer, not a reason to fall back to sparse.
+        // ext4 keeps blocks from a failed fallocate, so give them back before reporting.
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EFBIG | libc::EDQUOT)) {
+            let _ = file.set_len(previous);
+            return Err(error);
+        }
     }
     file.set_len(length)
+}
+
+/// Rewrites storage failures into actionable messages; other errors pass through.
+fn explain_storage(error: Box<dyn Error + Send + Sync>, output: &Path) -> Box<dyn Error + Send + Sync> {
+    let Some(io) = error.downcast_ref::<std::io::Error>() else {
+        return error;
+    };
+    let reason = match io.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => {
+            "not enough disk space (or quota) for the download"
+        }
+        std::io::ErrorKind::FileTooLarge => {
+            "the file exceeds the filesystem or process file-size limit"
+        }
+        _ => return error,
+    };
+    err(format!(
+        "{reason} at {}; the partial download was kept for resuming after space is freed",
+        output.display()
+    ))
+}
+
+/// Without this, exceeding a file-size limit (RLIMIT_FSIZE) kills the process with SIGXFSZ
+/// instead of returning EFBIG that can be reported and recovered from.
+fn ignore_file_size_signal() {
+    #[cfg(unix)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        // SAFETY: setting a signal's disposition to ignore installs no handler code.
+        ONCE.call_once(|| unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        });
+    }
 }
 
 fn write_at(file: &File, offset: u64, mut data: &[u8]) -> std::io::Result<()> {
@@ -1336,7 +1387,9 @@ pub fn download_with_stall_timeout(
     if stall_timeout.is_zero() {
         return Err(err("stall timeout must be greater than zero"));
     }
-    run_transfer(options, control, stall_timeout)
+    ignore_file_size_signal();
+    let output = options.output.clone();
+    run_transfer(options, control, stall_timeout).map_err(|error| explain_storage(error, &output))
 }
 
 fn run_transfer(
@@ -1768,6 +1821,28 @@ mod property_tests {
         assert_eq!(cursor(first), first + 1024);
         assert_eq!(cursor(second), second + 4096);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn impossible_preallocation_fails_without_growing_the_file() {
+        let path = std::env::temp_dir().join(format!("xdm-prealloc-{}", std::process::id()));
+        let file = File::create(&path).unwrap();
+        // Far beyond any disk and any filesystem's maximum file size.
+        let error = preallocate(&file, 1 << 62).unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::FileTooLarge
+                    | std::io::ErrorKind::QuotaExceeded
+                    | std::io::ErrorKind::InvalidInput
+            ),
+            "{error:?}"
+        );
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        let explained = explain_storage(Box::new(error), &path).to_string();
+        assert!(explained.contains("disk space") || explained.contains("size limit"), "{explained}");
+        fs::remove_file(path).unwrap();
     }
 
     fn claim_shared(length: u64, connections: usize, dir: &Path) -> Shared {

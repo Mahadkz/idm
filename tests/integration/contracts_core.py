@@ -39,12 +39,9 @@ MIB = 1024 ** 2
 
 # Contracts that genuinely fail acceptance today, with the observed reason.
 EXPECTED_FAIL = {
-    "N39": "disk-full: no space preflight, temporary-save fallback or injected "
-           "ENOSPC support; an unprivileged harness cannot mount a "
-           "size-limited filesystem to drive one end to end",
-    "N40": "no filesystem size-limit preflight or actionable size-limit "
-           "failure: under RLIMIT_FSIZE the CLI is killed by SIGXFSZ with no "
-           "diagnostic and no recoverable-state handling",
+    "N39": "a genuinely full filesystem cannot be driven end to end without a "
+           "size-limited mount; the engine's free-space preflight and clear "
+           "ENOSPC/EFBIG reporting are covered by xdm-http unit tests instead",
 }
 
 

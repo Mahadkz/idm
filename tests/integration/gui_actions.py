@@ -1,6 +1,7 @@
 """Desktop task dialogs on a dedicated Xvfb display; never uses the user's display."""
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -11,12 +12,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PAYLOAD = b"payload for gui actions " * 1024
+HLS_DIR = None
 
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
+        if HLS_DIR and self.path.startswith("/hls/"):
+            rel = self.path[len("/hls/"):].split("?")[0]
+            target = HLS_DIR / rel
+            if target.is_file():
+                content = target.read_bytes()
+                self.send_response(200)
+                if target.suffix == ".m3u8":
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                elif target.suffix == ".ts":
+                    self.send_header("Content-Type", "video/mp2t")
+                elif target.suffix == ".vtt":
+                    self.send_header("Content-Type", "text/vtt")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            self.send_response(404)
+            self.end_headers()
+            return
+
         self.send_response(200)
         self.send_header("Content-Length", str(len(PAYLOAD)))
         self.end_headers()
@@ -26,9 +48,40 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+def generate_hls_fixture(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    ffmpeg_bin = shutil.which("ffmpeg") or "/home/mahad/.local/bin/ffmpeg"
+    subprocess.run([ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc2=size=320x180:rate=10", "-t", "2", "-c:v", "libx264",
+                    "-f", "mpegts", str(folder / "v180.ts")], check=True)
+    subprocess.run([ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "sine=frequency=440:sample_rate=48000", "-t", "2", "-c:a", "aac",
+                    "-f", "mpegts", str(folder / "audio.ts")], check=True)
+    subprocess.run([ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "sine=frequency=880:sample_rate=48000", "-t", "2", "-c:a", "libmp3lame",
+                    "-f", "mpegts", str(folder / "mp3.ts")], check=True)
+    (folder / "subs.vtt").write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello from XDM\n")
+    playlists = {
+        "v180.m3u8": "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nv180.ts\n#EXT-X-ENDLIST\n",
+        "audio.m3u8": "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\naudio.ts\n#EXT-X-ENDLIST\n",
+        "subs.m3u8": "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsubs.vtt\n#EXT-X-ENDLIST\n",
+        "master.m3u8": '#EXTM3U\n'
+                       '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="sound",DEFAULT=YES,LANGUAGE="en",URI="audio.m3u8"\n'
+                       '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="s",NAME="subs",DEFAULT=YES,LANGUAGE="en",URI="subs.m3u8"\n'
+                       '#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=320x180,AUDIO="a",SUBTITLES="s"\n'
+                       'v180.m3u8\n',
+    }
+    for name, text in playlists.items():
+        (folder / name).write_text(text)
+
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="xdm-gui-actions-") as directory:
         base = Path(directory)
+        global HLS_DIR
+        HLS_DIR = base / "hls"
+        generate_hls_fixture(HLS_DIR)
         server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         port = server.server_address[1]
@@ -107,7 +160,7 @@ def main():
             assert cli("list")["tasks"][0]["id"] == source
             urls = base / "urls.txt"
             urls.write_text("http://example.invalid/b.bin\nhttp://example.invalid/c.bin\n")
-            click(main_window, 470, 195)
+            click(main_window, 340, 195)
             lists = until(lambda: window("XDM.*Import and export$"))
             type_field(lists, 200, 70, urls)
             type_field(lists, 200, 118, base / "batch")
@@ -198,7 +251,7 @@ def main():
                         return
                     cur_pos = get_pos()
                     row_y = 400 if cur_pos == 1 else 460
-                    click(main_window, 930, 76)  # Refresh button
+                    click(main_window, 835, 76)  # Refresh button (toolbar row 2 since the Add media button)
                     click(main_window, 120, row_y)  # Select second task's current row
                     click(main_window, btn_x, btn_y)  # Click move button
                     step_end = time.monotonic() + 2.0
@@ -258,6 +311,39 @@ def main():
             click(pref_win, 540, 570)     # "Close" button
             until(lambda: window("XDM.*Preferences$") is None)
 
+            # Exercise Add media dialog with HLS inspection and audio-only job submission
+            click(main_window, 530, 195)  # "Add media…" button in toolbar
+            media_win = until(lambda: window("XDM.*Add media$"))
+            type_field(media_win, 400, 70, f"http://127.0.0.1:{port}/hls/master.m3u8")
+            type_field(media_win, 400, 130, "Cookie: xdm=audio_test\nReferer: http://127.0.0.1/")
+            click(media_win, 705, 70)   # "Inspect" button
+            # Inspection runs off-UI thread; wait for response
+            time.sleep(2.0)
+            click(media_win, 305, 345)  # "Audio only" mode button
+            click(media_win, 585, 400)  # "MP3" format button
+            media_dest = base / "media-audio.mp3"
+            type_field(media_win, 400, 515, str(media_dest))
+            click(media_win, 200, 600)  # "Download" button
+            until(lambda: window("XDM.*Add media$") is None)
+
+            media_task = until(lambda: next((t for t in cli("list")["tasks"] if t["output"] == str(media_dest)), None))
+            assert media_task["kind"] == "media"
+            assert media_task["category"] == "Music"
+
+            # Exercise Live recording media task label change ("Stop and save" vs "Pause")
+            live_dest = base / "live-rec.mp4"
+            live_task_id = cli("media-job", f"http://127.0.0.1:{port}/hls/master.m3u8", str(live_dest),
+                               "live", "2", "0", "--max-seconds", "30")["task_id"]
+            click(main_window, 835, 76)  # Refresh button
+            live_task = until(lambda: next((t for t in cli("list")["tasks"] if t["id"] == live_task_id), None))
+            assert live_task["kind"] == "media"
+            # In main window, select live task in tasks listview
+            click(main_window, 120, 410)
+            time.sleep(0.5)
+            # Click row 1 to select standard task
+            click(main_window, 120, 450)
+            time.sleep(0.5)
+
             # Exercise Countdown banner and Cancel button in main window
             banner_task = cli("submit", f"http://127.0.0.1:{port}/complete.bin", base / "banner-test.bin")["task_id"]
             banner_queue = cli("queue", "create", "BannerQueue", 1)["queue_id"]
@@ -288,7 +374,7 @@ def main():
             assert any(e.get("action_status") == "cancelled" for e in events), f"Expected cancelled event, got {events}"
 
             assert gui.poll() is None
-            print("isolated GUI task actions, batch dialog, categories editor, connection settings, preferences dialog, and completion actions passed")
+            print("isolated GUI task actions, batch dialog, categories editor, connection settings, preferences dialog, add media dialog, and completion actions passed")
         finally:
             log_path = base / "gui.log"
             if log_path.exists():

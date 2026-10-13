@@ -53,6 +53,7 @@ slint::slint! {
         in-out property <string> pending-action-text: "";
         in-out property <int> pending-queue-id: 0;
         in-out property <int> pending-seconds-remaining: 0;
+        in-out property <string> pause-button-text: "Pause";
         callback cancel-completion(int);
         callback add-task();
         callback pause-task();
@@ -79,6 +80,8 @@ slint::slint! {
         callback open-connection();
         callback open-preferences();
         callback open-add-url();
+        callback open-add-media();
+        callback task-selected(int);
         callback show-clipboard-prompt(string);
 
         VerticalBox {
@@ -121,7 +124,7 @@ slint::slint! {
                 Button { text: "Grabber…"; clicked => { root.open-grabber(); } }
                 Button { text: "Categories…"; clicked => { root.open-categories(); } }
                 Button { text: "Connection…"; clicked => { root.open-connection(); } }
-                Button { text: "Pause"; clicked => { root.pause-task(); } }
+                Button { text: root.pause-button-text; clicked => { root.pause-task(); } }
                 Button { text: "Resume"; clicked => { root.resume-task(); } }
                 Button { text: "Refresh"; clicked => { root.refresh(); } }
             }
@@ -136,6 +139,7 @@ slint::slint! {
                 Button { text: "Start all"; clicked => { root.queue-start(); } }
                 Button { text: "Stop all"; clicked => { root.queue-stop(); } }
                 Button { text: "Import / Export…"; clicked => { root.transfer-lists(); } }
+                Button { text: "Add media…"; clicked => { root.open-add-media(); } }
                 Text { text: root.queue-state; color: #38536f; vertical-alignment: center; }
                 Button { text: root.tools-expanded ? "Hide controls" : "More controls"; clicked => { root.tools-expanded = !root.tools-expanded; } }
             }
@@ -211,7 +215,7 @@ slint::slint! {
                     background: root.selected == index ? #d8eaff : (Math.mod(index, 2) == 0 ? #ffffff : #f7f9fc);
                     Text { x: 12px; y: 10px; width: parent.width - 24px; text: task.label; color: #172a3f; overflow: elide; }
                     Rectangle { y: parent.height - 3px; width: parent.width * task.progress / 100; height: 3px; background: #2874c7; }
-                    TouchArea { clicked => { root.selected = index; } }
+                    TouchArea { clicked => { root.selected = index; root.task-selected(index); } }
                 }
             }
             Text { text: root.message; color: #52677c; }
@@ -1126,6 +1130,187 @@ slint::slint! {
             }
         }
     }
+
+    export struct MediaTrackItem {
+        text: string,
+    }
+
+    export component MediaWindow inherits Window {
+        title: "XDM — Add media";
+        width: 760px;
+        height: 640px;
+        background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
+        default-font-family: "DejaVu Sans";
+        public function apply-theme(theme: string) {
+            if (theme == "dark") {
+                Palette.color-scheme = ColorScheme.dark;
+            } else if (theme == "light") {
+                Palette.color-scheme = ColorScheme.light;
+            } else {
+                Palette.color-scheme = ColorScheme.unknown;
+            }
+        }
+        in-out property <string> url: "";
+        in-out property <string> headers: "";
+        in-out property <string> destination: "";
+        in-out property <string> message: "Enter manifest URL (.m3u8 or .mpd) and click Inspect.";
+        in-out property <[MediaTrackItem]> tracks: [];
+        in-out property <int> selected-track: -1;
+        in-out property <bool> is-live: false;
+        in-out property <bool> inspecting: false;
+        in-out property <string> mode: "video";
+        in-out property <string> video-track: "0";
+        in-out property <string> audio-track: "";
+        in-out property <string> subtitles-tracks: "";
+        in-out property <string> audio-format: "original";
+        in-out property <string> audio-bitrate: "128";
+        in-out property <string> max-minutes: "";
+        in-out property <string> output-container: "mp4";
+
+        callback inspect();
+        callback set-mode(string);
+        callback set-audio-format(string);
+        callback select-track(int);
+        callback submit();
+        callback dismiss();
+
+        VerticalBox {
+            padding: 16px;
+            spacing: 8px;
+            Text {
+                text: "Add media / stream download";
+                font-size: 18px;
+                font-weight: 700;
+                color: Palette.color-scheme == ColorScheme.dark ? #70a5f5 : #143f73;
+            }
+
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Manifest URL:"; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.url; placeholder-text: "https://example.com/playlist.m3u8 or .mpd"; }
+                Button {
+                    text: root.inspecting ? "Inspecting…" : "Inspect";
+                    enabled: !root.inspecting;
+                    clicked => { root.inspect(); }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Headers (opt):"; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.headers; placeholder-text: "Cookie: sid=abc; Referer: https://example.com"; }
+            }
+
+            Text {
+                text: "Available Tracks:";
+                font-weight: 700;
+                color: Palette.color-scheme == ColorScheme.dark ? #70a5f5 : #143f73;
+            }
+            Rectangle {
+                height: 120px;
+                background: Palette.color-scheme == ColorScheme.dark ? #282c34 : #ffffff;
+                border-width: 1px;
+                border-color: #c8d0db;
+                border-radius: 4px;
+                ListView {
+                    for track[idx] in root.tracks: Rectangle {
+                        height: 28px;
+                        background: root.selected-track == idx ? #d8eaff : (Math.mod(idx, 2) == 0 ? (Palette.color-scheme == ColorScheme.dark ? #282c34 : #ffffff) : (Palette.color-scheme == ColorScheme.dark ? #21252b : #f9fafb));
+                        Text { x: 8px; y: 6px; text: track.text; color: root.selected-track == idx ? #172a3f : (Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f); font-size: 12px; }
+                        TouchArea { clicked => { root.selected-track = idx; root.select-track(idx); } }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+                Text { text: "Mode:"; vertical-alignment: center; width: 60px; font-weight: 700; }
+                Button { text: root.mode == "video" ? "[ Video ]" : "Video"; clicked => { root.set-mode("video"); } }
+                Button { text: root.mode == "audio" ? "[ Audio only ]" : "Audio only"; clicked => { root.set-mode("audio"); } }
+                Button { text: root.mode == "subtitles" ? "[ Subtitles only ]" : "Subtitles only"; clicked => { root.set-mode("subtitles"); } }
+                Button {
+                    text: root.is-live ? (root.mode == "live" ? "[ Live recording ]" : "Live recording") : "Live (disabled)";
+                    enabled: root.is-live;
+                    clicked => { root.set-mode("live"); }
+                }
+            }
+
+            if root.mode == "video": VerticalBox {
+                spacing: 6px;
+                padding: 0px;
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "Video track #:"; vertical-alignment: center; width: 110px; }
+                    LineEdit { text <=> root.video-track; preferred-width: 80px; }
+                    Text { text: "Audio track #:"; vertical-alignment: center; width: 110px; }
+                    LineEdit { text <=> root.audio-track; placeholder-text: "opt"; preferred-width: 80px; }
+                    Text { text: "Container:"; vertical-alignment: center; }
+                    Button { text: root.output-container == "mp4" ? "[ .mp4 ]" : ".mp4"; clicked => { root.output-container = "mp4"; } }
+                    Button { text: root.output-container == "mkv" ? "[ .mkv ]" : ".mkv"; clicked => { root.output-container = "mkv"; } }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "Subtitles (multi):"; vertical-alignment: center; width: 110px; }
+                    LineEdit { text <=> root.subtitles-tracks; placeholder-text: "e.g. 2, 3 (comma-separated track indices)"; }
+                }
+            }
+
+            if root.mode == "audio": VerticalBox {
+                spacing: 6px;
+                padding: 0px;
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "Audio track #:"; vertical-alignment: center; width: 110px; }
+                    LineEdit { text <=> root.audio-track; placeholder-text: "track index"; preferred-width: 80px; }
+                    Text { text: "Format:"; vertical-alignment: center; }
+                    Button { text: root.audio-format == "original" ? "[ Original ]" : "Original"; clicked => { root.set-audio-format("original"); } }
+                    Button { text: root.audio-format == "mp3" ? "[ MP3 ]" : "MP3"; clicked => { root.set-audio-format("mp3"); } }
+                    Button { text: root.audio-format == "m4a" ? "[ M4A ]" : "M4A"; clicked => { root.set-audio-format("m4a"); } }
+                    Button { text: root.audio-format == "opus" ? "[ Opus ]" : "Opus"; clicked => { root.set-audio-format("opus"); } }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "Bitrate (kbps):"; vertical-alignment: center; width: 110px; }
+                    LineEdit {
+                        text <=> root.audio-bitrate;
+                        enabled: root.audio-format != "original";
+                        placeholder-text: "32–320 (e.g. 128)";
+                        preferred-width: 120px;
+                    }
+                }
+            }
+
+            if root.mode == "subtitles": HorizontalBox {
+                spacing: 8px;
+                Text { text: "Subtitle track #:"; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.subtitles-tracks; placeholder-text: "track index (e.g. 2)"; preferred-width: 100px; }
+            }
+
+            if root.mode == "live": HorizontalBox {
+                spacing: 8px;
+                Text { text: "Video track #:"; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.video-track; preferred-width: 80px; }
+                Text { text: "Audio track #:"; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.audio-track; preferred-width: 80px; }
+                Text { text: "Max minutes:"; vertical-alignment: center; width: 90px; }
+                LineEdit { text <=> root.max-minutes; placeholder-text: "opt (e.g. 60)"; preferred-width: 100px; }
+            }
+
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Save as:"; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.destination; placeholder-text: "/path/to/output.file"; }
+            }
+
+            Text { text: root.message; wrap: word-wrap; color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #52677c; }
+
+            HorizontalBox {
+                spacing: 8px;
+                Button { text: "Download"; clicked => { root.submit(); } }
+                Button { text: "Cancel"; clicked => { root.dismiss(); } }
+            }
+        }
+    }
 }
 
 fn task_details(task: &TaskSummary) -> String {
@@ -1202,11 +1387,50 @@ impl IpcClient {
     }
 }
 
+fn is_live_task(
+    db_path: &std::path::Path,
+    task_id: i64,
+    media_seconds: Option<u64>,
+    live_ids: &Arc<Mutex<std::collections::HashSet<i64>>>,
+) -> bool {
+    if media_seconds.is_some() {
+        return true;
+    }
+    if let Ok(guard) = live_ids.lock() {
+        if guard.contains(&task_id) {
+            return true;
+        }
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    let mode_res: rusqlite::Result<String> = conn.query_row(
+        "SELECT media_mode_json FROM tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    );
+    if let Ok(json) = mode_res {
+        if let Ok(mode) = serde_json::from_str::<xdm_ipc::MediaMode>(&json) {
+            if matches!(mode, xdm_ipc::MediaMode::Live { .. }) {
+                if let Ok(mut guard) = live_ids.lock() {
+                    guard.insert(task_id);
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::open()?;
     let ipc = IpcClient::new(paths.clone());
     let ui = MainWindow::new()?;
     let task_ids = Arc::new(Mutex::new(Vec::new()));
+    let live_task_ids = Arc::new(Mutex::new(std::collections::HashSet::<i64>::new()));
     let gui_settings = Arc::new(Mutex::new(settings::load_settings(&paths.dir)));
 
     let initial_settings = gui_settings.lock().map(|s| s.clone()).unwrap_or_default();
@@ -1282,6 +1506,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prev_queues_refresh = previous_queue_statuses.clone();
     let initialized_statuses_refresh = initialized_statuses.clone();
     let settings_sound_refresh = gui_settings.clone();
+    let live_ids_refresh = live_task_ids.clone();
+    let db_path_refresh = paths.dir.join("tasks.sqlite3");
     let refresh: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if is_refreshing.swap(true, Ordering::SeqCst) {
             return;
@@ -1293,6 +1519,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let prev_queues = prev_queues_refresh.clone();
         let initialized_statuses = initialized_statuses_refresh.clone();
         let sound_settings = settings_sound_refresh.clone();
+        let live_ids_refresh = live_ids_refresh.clone();
+        let db_path_refresh = db_path_refresh.clone();
         ipc_refresh.execute(move |paths| {
             let reply_res = paths.request(Command::List);
             let _ = slint::invoke_from_event_loop(move || {
@@ -1386,6 +1614,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if queue_filter != 0 {
                             task_list.sort_by_key(|t| (t.position, t.id));
                         }
+                        let mut task_media_secs: std::collections::HashMap<i64, Option<u64>> =
+                            std::collections::HashMap::new();
+                        for t in &task_list {
+                            task_media_secs.insert(t.id, t.media_seconds);
+                        }
                         let rows = task_list
                             .into_iter()
                             .filter(|task| queue_filter == 0 || task.queue_id == queue_filter)
@@ -1434,11 +1667,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             })
                             .collect::<Vec<_>>();
-                        ui.set_selected(
-                            previous_selection
-                                .and_then(|id| ids.iter().position(|candidate| *candidate == id))
-                                .map_or(-1, |index| index as i32),
-                        );
+                        let new_selected_index = previous_selection
+                            .and_then(|id| ids.iter().position(|candidate| *candidate == id))
+                            .map_or(-1, |index| index as i32);
+                        ui.set_selected(new_selected_index);
+                        let selected_task_id = usize::try_from(new_selected_index)
+                            .ok()
+                            .and_then(|idx| ids.get(idx).copied());
+                        let is_live = selected_task_id.is_some_and(|id| {
+                            let media_sec = task_media_secs.get(&id).copied().flatten();
+                            is_live_task(&db_path_refresh, id, media_sec, &live_ids_refresh)
+                        });
+                        ui.set_pause_button_text(if is_live { "Stop and save".into() } else { "Pause".into() });
                         ui.set_tasks(ModelRc::new(VecModel::from(rows)));
                         ui.set_message(format!("{} task(s)", ids.len()).into());
                     }
@@ -1451,6 +1691,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let refresh_button = refresh.clone();
     ui.on_refresh(move || {
         refresh_button();
+    });
+
+    let weak_select = ui.as_weak();
+    let ids_select = task_ids.clone();
+    let db_path_select = paths.dir.join("tasks.sqlite3");
+    let live_ids_select = live_task_ids.clone();
+    ui.on_task_selected(move |index| {
+        let Some(ui) = weak_select.upgrade() else { return; };
+        let task_id = usize::try_from(index)
+            .ok()
+            .and_then(|idx| ids_select.lock().ok().and_then(|guard| guard.get(idx).copied()));
+        let is_live = task_id.is_some_and(|id| {
+            is_live_task(&db_path_select, id, None, &live_ids_select)
+        });
+        ui.set_pause_button_text(if is_live { "Stop and save".into() } else { "Pause".into() });
     });
 
     let ipc_add = ipc.clone();
@@ -3669,6 +3924,331 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let open_add_for_ui = open_add_url_fn.clone();
     ui.on_open_add_url(move || {
         open_add_for_ui(None);
+    });
+
+    let media_window = Rc::new(RefCell::new(None::<MediaWindow>));
+    let weak_main_media = ui.as_weak();
+    let ipc_media_dlg = ipc.clone();
+    let refresh_media_dlg = refresh.clone();
+    let paths_dir_media = paths.dir.clone();
+    let live_ids_media = live_task_ids.clone();
+    let media_win_holder = media_window.clone();
+    let settings_media_dlg = gui_settings.clone();
+
+    ui.on_open_add_media(move || {
+        let Some(main_ui) = weak_main_media.upgrade() else { return; };
+        let dialog = match MediaWindow::new() {
+            Ok(d) => d,
+            Err(e) => { main_ui.set_message(e.to_string().into()); return; }
+        };
+        let current_theme = settings_media_dlg.lock().map(|s| s.theme.clone()).unwrap_or_default();
+        dialog.invoke_apply_theme(current_theme.into());
+
+        let tracks_cache = Arc::new(Mutex::new(Vec::<xdm_media::Track>::new()));
+        let is_live_flag = Arc::new(AtomicBool::new(false));
+
+        // on_inspect
+        let weak_d = dialog.as_weak();
+        let tracks_inspect = tracks_cache.clone();
+        let is_live_inspect = is_live_flag.clone();
+        let paths_dir_inspect = paths_dir_media.clone();
+        dialog.on_inspect(move || {
+            let Some(dialog) = weak_d.upgrade() else { return; };
+            let url = dialog.get_url().trim().to_string();
+            if url.is_empty() {
+                dialog.set_message("Please enter a manifest URL".into());
+                return;
+            }
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                dialog.set_message("URL must start with http:// or https://".into());
+                return;
+            }
+            let headers = dialog_helpers::parse_header_lines(dialog.get_headers().as_str());
+            dialog.set_inspecting(true);
+            dialog.set_message("Inspecting manifest off UI thread…".into());
+
+            let weak_thread = weak_d.clone();
+            let tracks_thread = tracks_inspect.clone();
+            let is_live_thread = is_live_inspect.clone();
+            let paths_dir_thread = paths_dir_inspect.clone();
+            std::thread::spawn(move || {
+                let report_res = xdm_media::inspect_report_with_headers(&url, &headers);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(dialog) = weak_thread.upgrade() else { return; };
+                    dialog.set_inspecting(false);
+                    match report_res {
+                        Ok(inspection) => {
+                            is_live_thread.store(inspection.live, Ordering::SeqCst);
+                            dialog.set_is_live(inspection.live);
+                            let track_items: Vec<MediaTrackItem> = inspection
+                                .tracks
+                                .iter()
+                                .map(|t| MediaTrackItem {
+                                    text: dialog_helpers::format_media_track(t).into(),
+                                })
+                                .collect();
+                            dialog.set_tracks(ModelRc::new(VecModel::from(track_items)));
+
+                            let first_video = inspection.tracks.iter().find(|t| t.kind.eq_ignore_ascii_case("video")).map(|t| t.index);
+                            let first_audio = inspection.tracks.iter().find(|t| t.kind.eq_ignore_ascii_case("audio")).map(|t| t.index);
+                            let first_sub = inspection.tracks.iter().find(|t| t.kind.eq_ignore_ascii_case("subtitle")).map(|t| t.index);
+
+                            if let Some(v) = first_video {
+                                dialog.set_video_track(v.to_string().into());
+                            }
+                            if let Some(a) = first_audio {
+                                dialog.set_audio_track(a.to_string().into());
+                            }
+                            if let Some(s) = first_sub {
+                                dialog.set_subtitles_tracks(s.to_string().into());
+                            }
+
+                            let mode_str = dialog.get_mode().to_string();
+                            let mode_res = dialog_helpers::build_media_mode(
+                                &mode_str,
+                                first_video,
+                                first_audio,
+                                &dialog.get_subtitles_tracks().to_string(),
+                                dialog.get_audio_format().as_str(),
+                                dialog.get_audio_bitrate().as_str(),
+                                dialog.get_max_minutes().as_str(),
+                                inspection.live,
+                            );
+
+                            if let Ok(m) = mode_res {
+                                if dialog.get_destination().trim().is_empty() {
+                                    let filename = dialog_helpers::suggest_media_filename(&url, &m);
+                                    let dest = paths_dir_thread.join("downloads").join(filename);
+                                    dialog.set_destination(dest.to_string_lossy().to_string().into());
+                                }
+                            }
+
+                            let live_msg = if inspection.live {
+                                " (Live stream detected — Live recording available)"
+                            } else {
+                                ""
+                            };
+                            dialog.set_message(
+                                format!("Inspection successful: {} track(s) found.{}", inspection.tracks.len(), live_msg).into(),
+                            );
+                            if let Ok(mut guard) = tracks_thread.lock() {
+                                *guard = inspection.tracks;
+                            }
+                        }
+                        Err(err) => {
+                            dialog.set_message(format!("Inspection failed: {err}").into());
+                        }
+                    }
+                });
+            });
+        });
+
+        // on_set_mode
+        let weak_d = dialog.as_weak();
+        let paths_dir_mode = paths_dir_media.clone();
+        dialog.on_set_mode(move |new_mode| {
+            let Some(dialog) = weak_d.upgrade() else { return; };
+            dialog.set_mode(new_mode.clone());
+            let dest = dialog.get_destination().trim().to_string();
+            let new_ext = match new_mode.as_str() {
+                "video" => dialog.get_output_container().to_string(),
+                "audio" => match dialog.get_audio_format().as_str() {
+                    "original" => "m4a".to_string(),
+                    other => other.to_string(),
+                },
+                "subtitles" => "srt".to_string(),
+                "live" => "mp4".to_string(),
+                _ => "mp4".to_string(),
+            };
+            if !dest.is_empty() {
+                let p = std::path::PathBuf::from(dest);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("media");
+                let parent = p.parent().unwrap_or_else(|| std::path::Path::new(""));
+                let new_path = parent.join(format!("{stem}.{new_ext}"));
+                dialog.set_destination(new_path.to_string_lossy().to_string().into());
+            } else {
+                let url = dialog.get_url().to_string();
+                let stem = dialog_helpers::suggest_media_filename(&url, &xdm_ipc::MediaMode::Video { video: 0, audio: None, subtitles: vec![] });
+                let p = std::path::PathBuf::from(stem);
+                let stem_str = p.file_stem().and_then(|s| s.to_str()).unwrap_or("media");
+                let new_dest = paths_dir_mode.join("downloads").join(format!("{stem_str}.{new_ext}"));
+                dialog.set_destination(new_dest.to_string_lossy().to_string().into());
+            }
+        });
+
+        // on_set_audio_format
+        let weak_d = dialog.as_weak();
+        dialog.on_set_audio_format(move |new_fmt| {
+            let Some(dialog) = weak_d.upgrade() else { return; };
+            dialog.set_audio_format(new_fmt.clone());
+            let dest = dialog.get_destination().trim().to_string();
+            if !dest.is_empty() {
+                let new_ext = match new_fmt.as_str() {
+                    "original" => "m4a",
+                    "mp3" => "mp3",
+                    "m4a" => "m4a",
+                    "opus" => "opus",
+                    _ => "mp3",
+                };
+                let p = std::path::PathBuf::from(dest);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                let parent = p.parent().unwrap_or_else(|| std::path::Path::new(""));
+                let new_path = parent.join(format!("{stem}.{new_ext}"));
+                dialog.set_destination(new_path.to_string_lossy().to_string().into());
+            }
+        });
+
+        // on_select_track
+        let weak_d = dialog.as_weak();
+        let tracks_select = tracks_cache.clone();
+        dialog.on_select_track(move |idx| {
+            let Some(dialog) = weak_d.upgrade() else { return; };
+            if let Ok(guard) = tracks_select.lock() {
+                if let Some(track) = usize::try_from(idx).ok().and_then(|i| guard.get(i)) {
+                    match track.kind.to_ascii_lowercase().as_str() {
+                        "video" => {
+                            dialog.set_video_track(track.index.to_string().into());
+                            if dialog.get_mode() != "video" && dialog.get_mode() != "live" {
+                                dialog.set_mode("video".into());
+                            }
+                        }
+                        "audio" => {
+                            dialog.set_audio_track(track.index.to_string().into());
+                            if dialog.get_mode() != "audio" && dialog.get_mode() != "video" && dialog.get_mode() != "live" {
+                                dialog.set_mode("audio".into());
+                            }
+                        }
+                        "subtitle" => {
+                            dialog.set_subtitles_tracks(track.index.to_string().into());
+                            if dialog.get_mode() != "subtitles" && dialog.get_mode() != "video" {
+                                dialog.set_mode("subtitles".into());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        // on_submit
+        let weak_d = dialog.as_weak();
+        let weak_m = weak_main_media.clone();
+        let ipc_submit = ipc_media_dlg.clone();
+        let refresh_submit = refresh_media_dlg.clone();
+        let live_ids_submit = live_ids_media.clone();
+        dialog.on_submit(move || {
+            let Some(dialog) = weak_d.upgrade() else { return; };
+            let url = dialog.get_url().trim().to_string();
+            if url.is_empty() {
+                dialog.set_message("Manifest URL is required".into());
+                return;
+            }
+            let headers = dialog_helpers::parse_header_lines(dialog.get_headers().as_str());
+            let mode_str = dialog.get_mode().to_string();
+            let video_idx = dialog.get_video_track().trim().parse::<usize>().ok();
+            let audio_idx = dialog.get_audio_track().trim().parse::<usize>().ok();
+            let subtitles_str = dialog.get_subtitles_tracks().to_string();
+            let audio_format = dialog.get_audio_format().to_string();
+            let audio_bitrate = dialog.get_audio_bitrate().to_string();
+            let max_minutes = dialog.get_max_minutes().to_string();
+            let is_live = dialog.get_is_live();
+
+            let mode = match dialog_helpers::build_media_mode(
+                &mode_str,
+                video_idx,
+                audio_idx,
+                &subtitles_str,
+                &audio_format,
+                &audio_bitrate,
+                &max_minutes,
+                is_live,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    dialog.set_message(e.into());
+                    return;
+                }
+            };
+
+            let dest_str = dialog.get_destination().trim().to_string();
+            let dest_path = match dialog_helpers::validate_media_destination(&dest_str, &mode) {
+                Ok(p) => p,
+                Err(e) => {
+                    dialog.set_message(e.into());
+                    return;
+                }
+            };
+
+            let request_id = format!(
+                "gui-media-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+
+            let weak_thread = weak_d.clone();
+            let weak_main = weak_m.clone();
+            let refresh_thread = refresh_submit.clone();
+            let live_ids_thread = live_ids_submit.clone();
+            let is_live_job = matches!(mode, xdm_ipc::MediaMode::Live { .. });
+
+            ipc_submit.execute(move |paths| {
+                let res = paths.request(Command::SubmitMediaJob {
+                    request_id,
+                    url,
+                    output: dest_path.to_string_lossy().to_string(),
+                    headers,
+                    mode,
+                    priority: 1,
+                });
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(dialog) = weak_thread.upgrade() {
+                        match res {
+                            Ok(reply) if reply.ok => {
+                                if let Some(task_id) = reply.task_id {
+                                    if is_live_job {
+                                        if let Ok(mut guard) = live_ids_thread.lock() {
+                                            guard.insert(task_id);
+                                        }
+                                    }
+                                    if let Some(main) = weak_main.upgrade() {
+                                        main.set_message(format!("Media task #{task_id} accepted").into());
+                                    }
+                                }
+                                let _ = dialog.hide();
+                                refresh_thread();
+                            }
+                            Ok(reply) => {
+                                dialog.set_message(
+                                    reply.error.unwrap_or_else(|| "Media submission rejected".into()).into(),
+                                );
+                            }
+                            Err(e) => {
+                                dialog.set_message(format!("Daemon unavailable: {e}").into());
+                            }
+                        }
+                    }
+                });
+            });
+        });
+
+        // on_dismiss
+        let weak_d = dialog.as_weak();
+        dialog.on_dismiss(move || {
+            if let Some(dialog) = weak_d.upgrade() {
+                let _ = dialog.hide();
+            }
+        });
+
+        if let Some(prev) = media_win_holder.borrow_mut().take() {
+            let _ = prev.hide();
+        }
+        if let Err(e) = dialog.show() {
+            main_ui.set_message(e.to_string().into());
+        }
+        *media_win_holder.borrow_mut() = Some(dialog);
     });
 
     let preferences_window = Rc::new(RefCell::new(None::<PreferencesWindow>));

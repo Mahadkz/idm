@@ -5814,6 +5814,7 @@ name = "xdm-gui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
  "slint",
@@ -5821,6 +5822,7 @@ dependencies = [
  "xdm-categories",
  "xdm-grabber",
  "xdm-ipc",
+ "xdm-media",
  "xdm-transfer-list",
 ]
 

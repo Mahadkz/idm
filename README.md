@@ -16,6 +16,8 @@ cargo run -p xdm-daemon
 cargo run -p xdm-gui
 ```
 
+Without root access to install those packages, `tools/dev-setup.sh` extracts them, plus a MinGW cross-compiler for Windows builds, into `~/.local/share/xdm-toolchain`; then `. ~/.local/share/xdm-toolchain/env.sh` before `cargo build --workspace` or `PATH=$XDM_CROSS_BIN:$PATH cargo build --workspace --target x86_64-pc-windows-gnu`.
+
 The daemon must be running for the GUI, native host, and `xdm-cli daemon` commands. `XDM_DATA_DIR` can isolate its token, socket, and SQLite database during development.
 
 ```sh

@@ -7,7 +7,7 @@ download and daemon scenarios, and samples the process tree through
 ``/proc/<pid>/status`` and ``/proc/<pid>/stat`` every 100 ms.
 
 Usage:
-    . /tmp/xdm-work/env.sh          # provides the offline cargo toolchain
+    . ~/.local/share/xdm-toolchain/env.sh          # provides the offline cargo toolchain
     python3 bench/run_bench.py [--quick] [--no-build] [--repeat 3]
     python3 bench/run_bench.py --compare old.json new.json [--threshold 10]
 
@@ -40,7 +40,7 @@ INTERVAL_SECONDS = 0.1
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 GIB = 1024 ** 3
 MIB = 1024 ** 2
-ENV_SCRIPT = "/tmp/xdm-work/env.sh"
+ENV_SCRIPT = os.path.expanduser("~/.local/share/xdm-toolchain/env.sh")
 PROC = Path("/proc")
 
 # Scenario sizes. `--quick` keeps the whole run well under a minute.

@@ -4,11 +4,11 @@ Reproducible RAM/CPU harness for the download path. Python 3 stdlib only.
 
 ## Prerequisites
 
-The offline cargo toolchain lives in `/tmp/xdm-work/env.sh`; source it before
+The build toolchain environment is `~/.local/share/xdm-toolchain/env.sh` (created by `tools/dev-setup.sh`); source it before
 running so `cargo` and its native build dependencies are on `PATH`:
 
 ```sh
-. /tmp/xdm-work/env.sh
+. ~/.local/share/xdm-toolchain/env.sh
 python3 bench/run_bench.py            # full: 256 MiB, 1000 queued, 30 s idle
 python3 bench/run_bench.py --quick    # 32 MiB, 200 queued, 5 s idle
 python3 bench/run_bench.py --no-build # reuse target/release binaries

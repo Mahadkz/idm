@@ -4,67 +4,67 @@
 
 | Document | Implemented | Partial | Different | Missing | Unknown | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| idm_core_queue_contracts.md | 7 | 37 | 6 | 19 | 0 | 69 |
+| idm_core_queue_contracts.md | 8 | 41 | 6 | 14 | 0 | 69 |
 | idm_browser_behavior_contracts.md | 2 | 25 | 5 | 30 | 0 | 62 |
 | idm_behavior_review.md | 0 | 27 | 0 | 12 | 0 | 39 |
-| **Total** | **9** | **89** | **11** | **61** | **0** | **170** |
+| **Total** | **10** | **93** | **11** | **56** | **0** | **170** |
 
 ## Contract Details
 
 | ID | Title | Status | Current XDM Behavior | Tests |
 |---|---|---|---|---|
 | N01 | GET/HEAD discovery | implemented | Implemented (2026-10-13): no HEAD. One GET with `Range: bytes=OFFSET-` both veri… | tests/integration/http_engine.py |
-| N02 | HTTP methods and request bodies | partial | Partial: `Options.method/body` and CLI `--method/--data-file` replay the method … | — |
-| N03 | One-shot and expiring URLs | partial | Partial: request adoption means a ranged or full one-shot link is fetched by the… | — |
-| N04 | Range capability and boundaries | implemented | Implemented static path: strict Content-Range parser, bounded segments, identity… | — |
-| N05 | Ignored or malformed partial response | different | Different: malformed probe can fall back to full transfer; malformed worker resp… | — |
+| N02 | HTTP methods and request bodies | partial | Partial: `Options.method/body` and CLI `--method/--data-file` replay the method … | tests/integration/request_context.py |
+| N03 | One-shot and expiring URLs | partial | Partial: request adoption means a ranged or full one-shot link is fetched by the… | tests/integration/http_engine.py |
+| N04 | Range capability and boundaries | implemented | Implemented static path: strict Content-Range parser, bounded segments, identity… | tests/integration/http_engine.py |
+| N05 | Ignored or malformed partial response | different | Different: malformed probe can fall back to full transfer; malformed worker resp… | tests/integration/http_engine.py |
 | N06 | Representation compression | different | Restricted: sends Accept-Encoding identity and rejects nonidentity final/range r… | — |
-| N07 | Known and unknown response length | partial | Partial: unknown size streams the adopted full response until EOF with total/ETA… | — |
-| N08 | Redirect chains and credentials | partial | Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authoriz… | — |
-| N09 | Cookie/User-Agent/Referer/header forwarding | partial | Partial: HTTP header list is persisted and shared among workers; engine owns Ran… | — |
-| N10 | Origin/path login credentials | missing | Gap: no site/path credential manager or challenge UI. Explicit Authorization hea… | crates/xdm-daemon/src/credentials.rs, crates/xdm-daemon/src/main.rs |
-| N11 | Authentication retries and expiry | missing | Gap: HTTP 401/407 become errors; no Basic/Digest/NTLM negotiation or password-ex… | crates/xdm-daemon/src/credentials.rs |
-| N12 | Remote-object validators | partial | Partial: checks size/final URL/header-context hash and available strong ETag/dat… | — |
+| N07 | Known and unknown response length | partial | Partial: unknown size streams the adopted full response until EOF with total/ETA… | tests/integration/http_engine.py |
+| N08 | Redirect chains and credentials | partial | Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authoriz… | tests/integration/http_engine.py |
+| N09 | Cookie/User-Agent/Referer/header forwarding | partial | Partial: HTTP header list is persisted and shared among workers; engine owns Ran… | tests/integration/http_engine.py |
+| N10 | Origin/path login credentials | implemented | Implemented on Linux (2026-10-13): site/path credential store with pattern match… | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs, crates/xdm-daemon/src/main.rs |
+| N11 | Authentication retries and expiry | partial | Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, … | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs |
+| N12 | Remote-object validators | partial | Partial: checks size/final URL/header-context hash and available strong ETag/dat… | tests/integration/http_engine.py |
 | N13 | Ignore modification-time preference | missing | Gap: no configurable ignore-date preference; engine refuses incompatible saved i… | — |
 | N14 | User-visible filename/type changes | missing | Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiat… | — |
-| N15 | Permission/permanent HTTP errors | partial | Partial:403/404 nonretryable; daemon records failed. Error is text rather than t… | — |
-| N16 | Transient server/network retries | partial | Partial: probe/full requests retry up to four times on network/408/429/5xx honor… | — |
+| N15 | Permission/permanent HTTP errors | partial | Partial:403/404 nonretryable; daemon records failed. Error is text rather than t… | tests/integration/http_engine.py, tests/integration/cli_http.py |
+| N16 | Transient server/network retries | partial | Partial: probe/full requests retry up to four times on network/408/429/5xx honor… | tests/integration/http_engine.py, tests/integration/cli_http.py |
 | N17 | Timeouts, DNS and diagnostics | partial | Partial: blocking client has30-second request timeout; network errors propagate.… | — |
 | N18 | TLS/certificates and Microsoft TLS1.3 preference | different | Different backend: reqwest rustls-tls. No Microsoft TLS toggle, custom trust/cli… | — |
-| N19 | FTP authentication/control replies | missing | Missing: daemon only permits http/https; no FTP module. | — |
-| N20 | FTP passive and active data modes | missing | Missing. | — |
-| N21 | FTP REST/SIZE and resume | missing | Missing. | — |
-| N22 | FTP optional connections/pipelining | missing | Missing. | — |
-| N23 | Manual per-protocol proxy | partial | Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http … | — |
-| N24 | SOCKS4/SOCKS5 and remote DNS | partial | Partial (2026-10-13): reqwest `socks` feature enabled; `socks4://`, `socks5://` … | — |
-| N25 | Proxy exclusions and host patterns | partial | Partial (2026-10-13): manual proxies take a bypass list of host names (subdomain… | — |
+| N19 | FTP authentication/control replies | partial | Partial (2026-10-13): independent FTP client (`xdm-ftp` crate) implements contro… | tests/integration/protocol_tasks.py, crates/xdm-ftp/tests/ftp.rs |
+| N20 | FTP passive and active data modes | partial | Partial (2026-10-13): passive mode implemented via EPSV (preferred) with PASV fa… | crates/xdm-ftp/tests/ftp.rs |
+| N21 | FTP REST/SIZE and resume | partial | Partial (2026-10-13): SIZE, MDTM, REST implemented. Resume guarded by SIZE+MDTM … | tests/integration/protocol_tasks.py, crates/xdm-ftp/tests/ftp.rs |
+| N22 | FTP optional connections/pipelining | missing | Missing: single serialized control session per task; no concurrent data connecti… | — |
+| N23 | Manual per-protocol proxy | partial | Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http … | tests/integration/http_engine.py, tests/integration/request_context.py |
+| N24 | SOCKS4/SOCKS5 and remote DNS | partial | Partial (2026-10-13): reqwest `socks` feature enabled; `socks4://`, `socks5://` … | tests/integration/http_engine.py |
+| N25 | Proxy exclusions and host patterns | partial | Partial (2026-10-13): manual proxies take a bypass list of host names (subdomain… | tests/integration/http_engine.py |
 | N26 | System proxy/PAC/WPAD | partial | Partial: `Proxy::System` uses proxy environment variables only (fixture verifies… | — |
 | N27 | Browser proxy/VPN context fallback | missing | Missing: captured task has no resolved browser proxy route. | — |
 | N28 | Windows dial-up/VPN and redial | missing | Missing. | — |
-| N29 | Static segment allocation | implemented | Implemented independent static1–16 partitioning; one worker thread per segment,6… | — |
-| N30 | Dynamic splitting and worker reuse | partial | Partial (2026-10-13): workers form a pool of the requested size that claims idle… | — |
+| N29 | Static segment allocation | implemented | Implemented independent static1–16 partitioning; one worker thread per segment,6… | tests/integration/http_engine.py |
+| N30 | Dynamic splitting and worker reuse | partial | Partial (2026-10-13): workers form a pool of the requested size that claims idle… | tests/integration/http_engine.py |
 | N31 | Stall recovery and adaptive connections | missing | Missing: fixed workers and whole-request timeout/retry. Client clones share conn… | — |
 | N32 | Overlap/data-corruption validation | partial | Partial safety: strict headers/body lengths/validators; no persisted interval ch… | — |
 | N33 | Preallocation and offset writes | different | Independent implementation: set_len plus positional write_at; not explicit Linux… | — |
 | N34 | Checkpoint schema and write ordering | partial | Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validat… | — |
-| N35 | Pause/resume with one connection | implemented | Implemented (2026-10-13): connections=1 uses a single range worker with a `.part… | — |
-| N36 | Non-range pause/restart | partial | Partial: single stream pause retains .part, no meta; next attempt restarts at ze… | — |
+| N35 | Pause/resume with one connection | implemented | Implemented (2026-10-13): connections=1 uses a single range worker with a `.part… | tests/integration/http_engine.py |
+| N36 | Non-range pause/restart | partial | Partial: single stream pause retains .part, no meta; next attempt restarts at ze… | tests/integration/http_engine.py |
 | N37 | Crash recovery and stale running states | partial | Partial: daemon maps running/pausing→queued at open; segmented checkpoint valida… | — |
 | N38 | Separate temporary and final directories | missing | Missing: .part and.meta sit beside destination; no distinct temp-root setting or… | — |
 | N39 | Disk-full and access-denied assembly | partial | Partial: I/O errors propagate; no space preflight, temporary-save alternative, a… | — |
 | N40 | Large files and filesystem limits | partial | Partial: u64 offsets/lengths and set_len; no >4GiB verification or filesystem li… | — |
 | N41 | File timestamps | missing | Missing: no preserve-server-date option or timestamp write. | — |
-| N42 | Finalize, rename and output conflicts | partial | Partial (2026-10-13): publication uses a hard link plus removal of `.part` (chec… | — |
+| N42 | Finalize, rename and output conflicts | partial | Partial (2026-10-13): publication uses a hard link plus removal of `.part` (chec… | tests/integration/http_engine.py |
 | N43 | Orphan partial cleanup | missing | Missing: stopped-task remove retains files by design; no orphan inventory/cleanu… | — |
 | N44 | Default/per-server connection caps | partial | Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget… | — |
-| N45 | Per-file limiter and remembered exceptions | partial | Partial: shared token bucket across a task workers, persisted task cap, adjustab… | — |
+| N45 | Per-file limiter and remembered exceptions | partial | Partial: shared token bucket across a task workers, persisted task cap, adjustab… | tests/integration/task_rate.py |
 | N46 | Aggregate/per-host bandwidth limits | missing | Missing: no aggregate/per-host bucket. | — |
 | N47 | Usage quota and automatic resumption | missing | Missing: live counters exist but no durable quota ledger/window scheduler. | — |
-| N48 | Resource efficiency contract | partial | Partial: bounded64KiB buffers, task-limit bounded threads; per-MiB sync checkpoi… | — |
-| Q01 | Queue types and default queues | partial | Partial: only Main + named ordinary queues; no fixed Synchronization queue or mo… | — |
-| Q02 | Named queues and membership | partial | Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max3… | — |
+| N48 | Resource efficiency contract | partial | Partial: bounded 64 KiB buffers, task-limit bounded threads; per-MiB sync checkp… | — |
+| Q01 | Queue types and default queues | partial | Partial: only Main + named ordinary queues; no fixed Synchronization queue or mo… | tests/integration/daemon_ipc.py |
+| Q02 | Named queues and membership | partial | Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max3… | tests/integration/named_queues.py |
 | Q03 | Independent start/stop and global controls | partial | Partial: `queue start-one ID` sets a per-queue independent-start flag so the que… | tests/integration/queue_policies.py |
-| Q04 | Per-queue simultaneous files | implemented | Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/gl… | — |
+| Q04 | Per-queue simultaneous files | implemented | Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/gl… | tests/integration/named_queues.py |
 | Q05 | Manual queue order and priority | partial | Partial: `position` column (migrated; new tasks append via trigger), `daemon mov… | tests/integration/queue_policies.py |
 | Q06 | Completion leaves ordinary queue | partial | Partial: when a task completes, `queue_id` becomes 0 (no live queue) and the ori… | tests/integration/queue_policies.py |
 | Q07 | Queue retry count and rotation | partial | Partial: per-queue `queue retry ID COUNT | tests/integration/queue_policies.py |
@@ -75,7 +75,7 @@
 | Q12 | Missed runs and daemon availability | partial | Partial: per-queue missed-run policy is implemented (catch up once if the window… | — |
 | Q13 | Sleep wake timers | missing | Missing: no wake registration or capability warning. | — |
 | Q14 | Completion success/failure/manual-stop rules | partial | Partial (2026-10-13): per-queue cycle state (`idle/running/completed/completed_w… | tests/integration/completion_actions.py, tests/integration/queue_policies.py |
-| Q15 | Completion program/file launch | implemented | Implemented (2026-10-13): `queue completion ID program PATH [ARGS...]` stores th… | — |
+| Q15 | Completion program/file launch | implemented | Implemented (2026-10-13): `queue completion ID program PATH [ARGS...]` stores th… | tests/integration/completion_actions.py |
 | Q16 | Disconnect modem/VPN and app exit | partial | Partial: the modem/VPN disconnect action remains missing (no dial-up or VPN adap… | — |
 | Q17 | Shutdown/restart/sleep/hibernate | implemented | Implemented (2026-10-13): sleep, hibernate, shutdown and restart are settable pe… | tests/integration/completion_actions.py |
 | Q18 | Force process termination setting | missing | Not implemented: there is no Windows "force close applications" setting and no f… | — |
@@ -190,46 +190,26 @@
 
 | ID | Title | Status | Source Document |
 |---|---|---|---|
-| N02 | HTTP methods and request bodies | partial | idm_core_queue_contracts.md |
-| N03 | One-shot and expiring URLs | partial | idm_core_queue_contracts.md |
-| N07 | Known and unknown response length | partial | idm_core_queue_contracts.md |
-| N08 | Redirect chains and credentials | partial | idm_core_queue_contracts.md |
-| N09 | Cookie/User-Agent/Referer/header forwarding | partial | idm_core_queue_contracts.md |
-| N12 | Remote-object validators | partial | idm_core_queue_contracts.md |
 | N13 | Ignore modification-time preference | missing | idm_core_queue_contracts.md |
 | N14 | User-visible filename/type changes | missing | idm_core_queue_contracts.md |
-| N15 | Permission/permanent HTTP errors | partial | idm_core_queue_contracts.md |
-| N16 | Transient server/network retries | partial | idm_core_queue_contracts.md |
 | N17 | Timeouts, DNS and diagnostics | partial | idm_core_queue_contracts.md |
-| N19 | FTP authentication/control replies | missing | idm_core_queue_contracts.md |
-| N20 | FTP passive and active data modes | missing | idm_core_queue_contracts.md |
-| N21 | FTP REST/SIZE and resume | missing | idm_core_queue_contracts.md |
 | N22 | FTP optional connections/pipelining | missing | idm_core_queue_contracts.md |
-| N23 | Manual per-protocol proxy | partial | idm_core_queue_contracts.md |
-| N24 | SOCKS4/SOCKS5 and remote DNS | partial | idm_core_queue_contracts.md |
-| N25 | Proxy exclusions and host patterns | partial | idm_core_queue_contracts.md |
 | N26 | System proxy/PAC/WPAD | partial | idm_core_queue_contracts.md |
 | N27 | Browser proxy/VPN context fallback | missing | idm_core_queue_contracts.md |
 | N28 | Windows dial-up/VPN and redial | missing | idm_core_queue_contracts.md |
-| N30 | Dynamic splitting and worker reuse | partial | idm_core_queue_contracts.md |
 | N31 | Stall recovery and adaptive connections | missing | idm_core_queue_contracts.md |
 | N32 | Overlap/data-corruption validation | partial | idm_core_queue_contracts.md |
 | N34 | Checkpoint schema and write ordering | partial | idm_core_queue_contracts.md |
-| N36 | Non-range pause/restart | partial | idm_core_queue_contracts.md |
 | N37 | Crash recovery and stale running states | partial | idm_core_queue_contracts.md |
 | N38 | Separate temporary and final directories | missing | idm_core_queue_contracts.md |
 | N39 | Disk-full and access-denied assembly | partial | idm_core_queue_contracts.md |
 | N40 | Large files and filesystem limits | partial | idm_core_queue_contracts.md |
 | N41 | File timestamps | missing | idm_core_queue_contracts.md |
-| N42 | Finalize, rename and output conflicts | partial | idm_core_queue_contracts.md |
 | N43 | Orphan partial cleanup | missing | idm_core_queue_contracts.md |
 | N44 | Default/per-server connection caps | partial | idm_core_queue_contracts.md |
-| N45 | Per-file limiter and remembered exceptions | partial | idm_core_queue_contracts.md |
 | N46 | Aggregate/per-host bandwidth limits | missing | idm_core_queue_contracts.md |
 | N47 | Usage quota and automatic resumption | missing | idm_core_queue_contracts.md |
 | N48 | Resource efficiency contract | partial | idm_core_queue_contracts.md |
-| Q01 | Queue types and default queues | partial | idm_core_queue_contracts.md |
-| Q02 | Named queues and membership | partial | idm_core_queue_contracts.md |
 | Q10 | Synchronization repeat/check changed objects | missing | idm_core_queue_contracts.md |
 | Q12 | Missed runs and daemon availability | partial | idm_core_queue_contracts.md |
 | Q13 | Sleep wake timers | missing | idm_core_queue_contracts.md |
@@ -332,12 +312,33 @@
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | idm_behavior_review.md |
 
-**Count: 141**
+**Count: 121**
 
 ### Partial contracts WITH tests (next priority)
 
 | ID | Title | Status | Tests | Source Document |
 |---|---|---|---|---|
+| N02 | HTTP methods and request bodies | partial | tests/integration/request_context.py | idm_core_queue_contracts.md |
+| N03 | One-shot and expiring URLs | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N07 | Known and unknown response length | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N08 | Redirect chains and credentials | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N09 | Cookie/User-Agent/Referer/header forwarding | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N11 | Authentication retries and expiry | partial | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs | idm_core_queue_contracts.md |
+| N12 | Remote-object validators | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N15 | Permission/permanent HTTP errors | partial | tests/integration/http_engine.py, tests/integration/cli_http.py | idm_core_queue_contracts.md |
+| N16 | Transient server/network retries | partial | tests/integration/http_engine.py, tests/integration/cli_http.py | idm_core_queue_contracts.md |
+| N19 | FTP authentication/control replies | partial | tests/integration/protocol_tasks.py, crates/xdm-ftp/tests/ftp.rs | idm_core_queue_contracts.md |
+| N20 | FTP passive and active data modes | partial | crates/xdm-ftp/tests/ftp.rs | idm_core_queue_contracts.md |
+| N21 | FTP REST/SIZE and resume | partial | tests/integration/protocol_tasks.py, crates/xdm-ftp/tests/ftp.rs | idm_core_queue_contracts.md |
+| N23 | Manual per-protocol proxy | partial | tests/integration/http_engine.py, tests/integration/request_context.py | idm_core_queue_contracts.md |
+| N24 | SOCKS4/SOCKS5 and remote DNS | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N25 | Proxy exclusions and host patterns | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N30 | Dynamic splitting and worker reuse | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N36 | Non-range pause/restart | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N45 | Per-file limiter and remembered exceptions | partial | tests/integration/task_rate.py | idm_core_queue_contracts.md |
+| Q01 | Queue types and default queues | partial | tests/integration/daemon_ipc.py | idm_core_queue_contracts.md |
+| Q02 | Named queues and membership | partial | tests/integration/named_queues.py | idm_core_queue_contracts.md |
 | Q03 | Independent start/stop and global controls | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q05 | Manual queue order and priority | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q06 | Completion leaves ordinary queue | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
@@ -346,4 +347,4 @@
 | Q09 | Daily/weekday recurrence | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q14 | Completion success/failure/manual-stop rules | partial | tests/integration/completion_actions.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 
-**Count: 7**
+**Count: 28**

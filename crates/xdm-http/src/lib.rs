@@ -229,6 +229,8 @@ struct Segment {
     active: bool,
     #[serde(skip)]
     claimed: u64, // bytes before this are promised to the active worker
+    #[serde(skip)]
+    written: u64, // bytes before this are in the file, possibly not yet checkpointed
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,6 +467,7 @@ fn split_segments(length: u64, workers: usize) -> Vec<Segment> {
                 cursor: start,
                 active: false,
                 claimed: start,
+                written: start,
             };
             start += size;
             segment
@@ -817,6 +820,10 @@ impl Shared {
         let mut guard = self.lock()?;
         let index = find(&guard, start)?;
         guard.segments[index].cursor = cursor;
+        // One sync covers every worker's flushed bytes, so record them all, not only the caller's.
+        for segment in &mut guard.segments {
+            segment.cursor = segment.cursor.max(segment.written);
+        }
         store_checkpoint(&self.file, &self.meta, &guard)
     }
 
@@ -853,6 +860,7 @@ impl Shared {
         {
             segment.active = true;
             segment.claimed = segment.cursor;
+            segment.written = segment.cursor;
             return Ok(Some(segment.start));
         }
         let Some((index, from)) = guard
@@ -880,6 +888,7 @@ impl Shared {
                 cursor: middle,
                 active: true,
                 claimed: middle,
+                written: middle,
             },
         );
         store_checkpoint(&self.file, &self.meta, &guard)?;
@@ -1055,6 +1064,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                     }
                 }
                 let segment = &mut guard.segments[index];
+                segment.written = segment.written.max(written);
                 shrunk |= segment.end < end;
                 if position > segment.end {
                     0
@@ -1601,6 +1611,26 @@ mod property_tests {
     #[test]
     fn split_segments_of_zero_length_is_empty() {
         assert!(split_segments(0, 8).is_empty());
+    }
+
+    #[test]
+    fn checkpoint_records_every_workers_flushed_bytes() {
+        let dir = std::env::temp_dir().join(format!("xdm-ckpt-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let shared = claim_shared(8 << 20, 2, &dir);
+        let first = shared.claim().unwrap().unwrap();
+        let second = shared.claim().unwrap().unwrap();
+        {
+            let mut guard = shared.lock().unwrap();
+            let index = find(&guard, second).unwrap();
+            guard.segments[index].written = second + 4096;
+        }
+        shared.persist(first, first + 1024).unwrap();
+        let saved: Checkpoint = serde_json::from_reader(File::open(&shared.meta).unwrap()).unwrap();
+        let cursor = |at| saved.segments.iter().find(|s| s.start == at).unwrap().cursor;
+        assert_eq!(cursor(first), first + 1024);
+        assert_eq!(cursor(second), second + 4096);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn claim_shared(length: u64, connections: usize, dir: &Path) -> Shared {

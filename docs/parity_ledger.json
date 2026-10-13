@@ -2,10 +2,10 @@
   "schema_version": 1,
   "summary": {
     "idm_core_queue_contracts.md": {
-      "implemented": 7,
-      "partial": 37,
+      "implemented": 8,
+      "partial": 41,
       "different": 6,
-      "missing": 19
+      "missing": 14
     },
     "idm_browser_behavior_contracts.md": {
       "different": 5,
@@ -33,33 +33,41 @@
       "id": "N02",
       "title": "HTTP methods and request bodies",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: `Options.method/body` and CLI `--method/--data-file` replay the method and a bounded (1 MiB) body on every probe/range request; GET with body, HEAD/CONNECT/TRACE/OPTIONS are rejected; 301/302/303 on a non-GET request fails instead of becoming GET, 307/308 preserve it. Context hash covers method/body. Fixture verifies POST-only file with 4 connections, 307 and refused 302. Daemon/browser submissions do not yet carry method/body.",
+      "current_behavior": "Partial: `Options.method/body` and CLI `--method/--data-file` replay the method and a bounded (1 MiB) body on every probe/range request; GET with body, HEAD/CONNECT/TRACE/OPTIONS are rejected; 301/302/303 on a non-GET request fails instead of becoming GET, 307/308 preserve it. Context hash covers method/body. Fixture verifies POST-only file with 4 connections, 307 and refused 302. Daemon IPC `submit_request` carries method/body (tested in [request_context.py](../tests/integration/request_context.py): POST replay with correct hash, GET refusal, method/body validation, restart persistence, CLI `submit-post`, persisted proxy routing). Browser submissions do not yet carry method/body.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/request_context.py"
+      ]
     },
     {
       "id": "N03",
       "title": "One-shot and expiring URLs",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: request adoption means a ranged or full one-shot link is fetched by the probe response alone. If extra range connections are refused (401/403/404/410 on their first request), those ranges are released and the adopted open-ended stream absorbs adjacent untouched ranges; fixture `oneshot.bin` (8 connections) and `oneshot-norange.bin` succeed with one accepted request. No request-token lease, expiry detection or site rules.",
+      "current_behavior": "Partial: request adoption means a ranged or full one-shot link is fetched by the probe response alone. If extra range connections are refused (401/403/404/410 on their first request), those ranges are released and the adopted open-ended stream absorbs adjacent untouched ranges; fixture `oneshot.bin` (8 connections) and `oneshot-norange.bin` succeed with one accepted request. No request-token lease, expiry detection or site rules. [Engine fixture](../tests/integration/http_engine.py) verifies oneshot and oneshot-norange with 8 connections.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N04",
       "title": "Range capability and boundaries",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented static path: strict Content-Range parser, bounded segments, identity encoding, exact body coverage. Accept-Ranges alone is not used as proof.",
+      "current_behavior": "Implemented static path: strict Content-Range parser, bounded segments, identity encoding, exact body coverage. Accept-Ranges alone is not used as proof. [Engine fixture](../tests/integration/http_engine.py) verifies 8-connection ranged download, 1-connection single request, and range header parsing.",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N05",
       "title": "Ignored or malformed partial response",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Different: malformed probe can fall back to full transfer; malformed worker response fails and retains checkpoint. No automatic verified single-stream restart after worker corruption.",
+      "current_behavior": "Different: malformed probe can fall back to full transfer; malformed worker response fails and retains checkpoint. No automatic verified single-stream restart after worker corruption. [Engine fixture](../tests/integration/http_engine.py) verifies wrong-range handling and flaky non-range retry from zero.",
       "status": "different",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N06",
@@ -73,33 +81,40 @@
       "id": "N07",
       "title": "Known and unknown response length",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: unknown size streams the adopted full response until EOF with total/ETA unknown; zero-length resources (416 to the open range) complete as empty files; no resumable metadata for non-range content.",
+      "current_behavior": "Partial: unknown size streams the adopted full response until EOF with total/ETA unknown; zero-length resources (416 to the open range) complete as empty files; no resumable metadata for non-range content. [Engine fixture](../tests/integration/http_engine.py) verifies empty body (416) and flaky non-range retry from zero.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N08",
       "title": "Redirect chains and credentials",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authorization/UA/Referer/Accept(-Language) may follow cross-origin redirects because the client strips Cookie/Authorization on host change (fixture verifies the redirected host receives no Cookie); any other custom header stops cross-origin redirects, and any supplied header stops an HTTPS→HTTP downgrade.",
+      "current_behavior": "Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authorization/UA/Referer/Accept(-Language) may follow cross-origin redirects because the client strips Cookie/Authorization on host change (fixture verifies the redirected host receives no Cookie); any other custom header stops cross-origin redirects, and any supplied header stops an HTTPS→HTTP downgrade. [Engine fixture](../tests/integration/http_engine.py) verifies cross-host redirect strips Cookie, same-origin preserves headers.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N09",
       "title": "Cookie/User-Agent/Referer/header forwarding",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: HTTP header list is persisted and shared among workers; engine owns Range/If-Range/Host/encoding/length framing. No browser-context cookie refresh.",
+      "current_behavior": "Partial: HTTP header list is persisted and shared among workers; engine owns Range/If-Range/Host/encoding/length framing. No browser-context cookie refresh. [Engine fixture](../tests/integration/http_engine.py) verifies custom headers (User-Agent) sent and Cookie stripped on cross-host redirect.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N10",
       "title": "Origin/path login credentials",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Gap: no site/path credential manager or challenge UI. Explicit Authorization header can be supplied to HTTP tasks.",
-      "status": "missing",
+      "current_behavior": "Implemented on Linux (2026-10-13): site/path credential store with pattern matching (exact host, wildcard subdomain, path prefix, port), most-specific-first selection, stored in an owner-only (0600) file on Unix — permission-protected, not encrypted — and DPAPI-sealed on Windows (compile-checked only, not run on Windows), never exposed in IPC/exports/logs. Basic auth applied automatically on 401 challenge; task enters `auth_required` with realm, no retry loop; `TaskProvideLogin` IPC requeues with credentials; `--remember` persists origin pattern. Fixture verifies challenge→auth_required, foreign-host login never sent, save/list without passwords, automatic application, wrong password rejected, disabled logins skipped, stdin password entry, credentials.json mode 0600. [Daemon unit tests](../crates/xdm-daemon/src/credentials.rs), [integration fixture](../tests/integration/credentials.py).",
+      "status": "implemented",
       "test_refs": [
+        "tests/integration/credentials.py",
         "crates/xdm-daemon/src/credentials.rs",
         "crates/xdm-daemon/src/main.rs"
       ]
@@ -108,9 +123,10 @@
       "id": "N11",
       "title": "Authentication retries and expiry",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Gap: HTTP 401/407 become errors; no Basic/Digest/NTLM negotiation or password-expiry workflow.",
-      "status": "missing",
+      "current_behavior": "Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, no automatic retry (queue retry policy excludes 401/407); Basic auth implemented via credential store (N10); `TaskProvideLogin` IPC accepts credentials (file or stdin) and requeues; wrong credentials recorded as `auth_required` again, not failed. No Digest/NTLM negotiation, no password-expiry workflow, no proxy auth (407). [Integration fixture](../tests/integration/credentials.py) covers challenge→auth_required, requeue, wrong password, disabled entry, stdin, secret handling.",
+      "status": "partial",
       "test_refs": [
+        "tests/integration/credentials.py",
         "crates/xdm-daemon/src/credentials.rs"
       ]
     },
@@ -118,9 +134,11 @@
       "id": "N12",
       "title": "Remote-object validators",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: checks size/final URL/header-context hash and available strong ETag/date; ranges send If-Range. Missing response validators are not themselves rejected.",
+      "current_behavior": "Partial: checks size/final URL/header-context hash and available strong ETag/date; ranges send If-Range. Missing response validators are not themselves rejected. [Engine fixture](../tests/integration/http_engine.py) verifies changed validator detection (identity changed) and ETag handling.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N13",
@@ -142,17 +160,23 @@
       "id": "N15",
       "title": "Permission/permanent HTTP errors",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial:403/404 nonretryable; daemon records failed. Error is text rather than typed recovery classification.",
+      "current_behavior": "Partial:403/404 nonretryable; daemon records failed. Error is text rather than typed recovery classification. [Engine fixture](../tests/integration/http_engine.py) and [CLI fixture](../tests/integration/cli_http.py) verify 403 handling and no completed file.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py",
+        "tests/integration/cli_http.py"
+      ]
     },
     {
       "id": "N16",
       "title": "Transient server/network retries",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: probe/full requests retry up to four times on network/408/429/5xx honoring Retry-After (capped 30 s) with pause-aware waits; range requests retry the same way. Full non-range streams now retry from byte zero after a disconnect or short body (fixture `flaky-norange.bin`). No jitter or global retry fairness.",
+      "current_behavior": "Partial: probe/full requests retry up to four times on network/408/429/5xx honoring Retry-After (capped 30 s) with pause-aware waits; range requests retry the same way. Full non-range streams now retry from byte zero after a disconnect or short body (fixture `flaky-norange.bin`). No jitter or global retry fairness. [Engine fixture](../tests/integration/http_engine.py) and [CLI fixture](../tests/integration/cli_http.py) verify 503 retry and flaky non-range retry from zero.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py",
+        "tests/integration/cli_http.py"
+      ]
     },
     {
       "id": "N17",
@@ -174,31 +198,39 @@
       "id": "N19",
       "title": "FTP authentication/control replies",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing: daemon only permits http/https; no FTP module.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "Partial (2026-10-13): independent FTP client (`xdm-ftp` crate) implements control channel subset for resumable single-stream download: USER/PASS (anonymous or credentials from URL), TYPE I, SIZE, MDTM, EPSV with PASV fallback, REST, RETR, QUIT. Multiline replies parsed with bounded continuation lines (128). Passive data connections always made to control peer (defeats FTP bounce). Credentials from `ftp://user:pass@host/path` URL. No active mode (PORT/EPRT). Daemon tasks accept `ftp://` URLs with progress/pause/resume via IPC. [Crate unit tests](../crates/xdm-ftp/src/lib.rs), [crate integration tests](../crates/xdm-ftp/tests/ftp.rs), [daemon IPC fixture](../tests/integration/protocol_tasks.py) covers submit, live progress, pause/resume, hash verification.",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/protocol_tasks.py",
+        "crates/xdm-ftp/tests/ftp.rs"
+      ]
     },
     {
       "id": "N20",
       "title": "FTP passive and active data modes",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "Partial (2026-10-13): passive mode implemented via EPSV (preferred) with PASV fallback. PASV advertised address is ignored; data connection always made to control peer IP (security). EPSV/PASV reply parsing bounded. Active mode (PORT/EPRT) NOT implemented. Single serialized control session per task; no concurrent data connections. [Crate tests](../crates/xdm-ftp/tests/ftp.rs) verify EPSV, PASV, foreign PASV IP uses control peer, multiline banner.",
+      "status": "partial",
+      "test_refs": [
+        "crates/xdm-ftp/tests/ftp.rs"
+      ]
     },
     {
       "id": "N21",
       "title": "FTP REST/SIZE and resume",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "Partial (2026-10-13): SIZE, MDTM, REST implemented. Resume guarded by SIZE+MDTM validators in `.part.ftp` checkpoint; mismatch requires explicit restart (`--restart` or new task). Checkpoint stores size and modification time; on resume, REST sent only if validators match. Rejected REST, changed MDTM, changed SIZE all require restart (fixtures verify). No-clobber publish (hard link + remove, checked rename fallback). [Crate tests](../crates/xdm-ftp/tests/ftp.rs): disconnect→resume, changed MDTM requires restart, changed SIZE requires restart, rejected REST requires restart, PASV foreign IP uses control peer. [Daemon IPC fixture](../tests/integration/protocol_tasks.py): submit, live progress, pause/resume, hash.",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/protocol_tasks.py",
+        "crates/xdm-ftp/tests/ftp.rs"
+      ]
     },
     {
       "id": "N22",
       "title": "FTP optional connections/pipelining",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing.",
+      "current_behavior": "Missing: single serialized control session per task; no concurrent data connections, no command pipelining. Per-host FTP session budget and cross-task synchronization not implemented.",
       "status": "missing",
       "test_refs": []
     },
@@ -206,25 +238,32 @@
       "id": "N23",
       "title": "Manual per-protocol proxy",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http and https targets (HTTP proxy, HTTPS CONNECT, credentials in URL user info); CLI `--proxy`. Fixture routes a 4-connection transfer through a logging forward proxy. No daemon/GUI settings model, no FTP proxy, no 407 prompt.",
+      "current_behavior": "Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http and https targets (HTTP proxy, HTTPS CONNECT, credentials in URL user info); CLI `--proxy`. Fixture routes a 4-connection transfer through a logging forward proxy. No daemon/GUI settings model, no FTP proxy, no 407 prompt. [Engine fixture](../tests/integration/http_engine.py) and [request_context fixture](../tests/integration/request_context.py) verify HTTP proxy, HTTPS CONNECT, and persisted manual proxy routing.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py",
+        "tests/integration/request_context.py"
+      ]
     },
     {
       "id": "N24",
       "title": "SOCKS4/SOCKS5 and remote DNS",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): reqwest `socks` feature enabled; `socks4://`, `socks5://` and `socks5h://` (proxy-side DNS) URLs with user/password. Fixture verifies SOCKS5 user/password auth, domain-type CONNECT for socks5h and failure on wrong credentials. No settings UI.",
+      "current_behavior": "Partial (2026-10-13): reqwest `socks` feature enabled; `socks4://`, `socks5://` and `socks5h://` (proxy-side DNS) URLs with user/password. Fixture verifies SOCKS5 user/password auth, domain-type CONNECT for socks5h and failure on wrong credentials. No settings UI. [Engine fixture](../tests/integration/http_engine.py) verifies SOCKS5 auth, socks5h domain-type CONNECT, and wrong credential rejection.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N25",
       "title": "Proxy exclusions and host patterns",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): manual proxies take a bypass list of host names (subdomain match), IPs and CIDR ranges via reqwest NoProxy; fixture verifies a bypassed host connects directly. Wildcard/port-specific patterns are not supported.",
+      "current_behavior": "Partial (2026-10-13): manual proxies take a bypass list of host names (subdomain match), IPs and CIDR ranges via reqwest NoProxy; fixture verifies a bypassed host connects directly. Wildcard/port-specific patterns are not supported. [Engine fixture](../tests/integration/http_engine.py) verifies bypass list (127.0.0.1 bypassed) and direct connection for bypassed hosts.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N26",
@@ -254,17 +293,21 @@
       "id": "N29",
       "title": "Static segment allocation",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented independent static1–16 partitioning; one worker thread per segment,64KiB per-worker read buffer.",
+      "current_behavior": "Implemented independent static1–16 partitioning; one worker thread per segment,64KiB per-worker read buffer. [Engine fixture](../tests/integration/http_engine.py) verifies 1-connection and 8-connection downloads with correct hashes.",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N30",
       "title": "Dynamic splitting and worker reuse",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): workers form a pool of the requested size that claims idle segments; when none remain a worker splits the largest unclaimed remainder (≥1 MiB) of a running segment at its midpoint, with per-chunk reservations so split points never overlap in-flight bytes. Splits are checkpointed. Thresholds are independent; no stall-based reassignment.",
+      "current_behavior": "Partial (2026-10-13): workers form a pool of the requested size that claims idle segments; when none remain a worker splits the largest unclaimed remainder (≥1 MiB) of a running segment at its midpoint, with per-chunk reservations so split points never overlap in-flight bytes. Splits are checkpointed. Thresholds are independent; no stall-based reassignment. [Engine fixture](../tests/integration/http_engine.py) verifies 8-connection download with correct hash (dynamic splitting exercised).",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N31",
@@ -302,17 +345,21 @@
       "id": "N35",
       "title": "Pause/resume with one connection",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented (2026-10-13): connections=1 uses a single range worker with a `.part.meta` checkpoint. Saved segments are resumed by any worker count (excess segments are processed in turn, spare workers split). Fixture pauses and resumes 1→1, 1→4 and 4→1 with hash checks and verifies the resume probe starts at the saved byte.",
+      "current_behavior": "Implemented (2026-10-13): connections=1 uses a single range worker with a `.part.meta` checkpoint. Saved segments are resumed by any worker count (excess segments are processed in turn, spare workers split). Fixture pauses and resumes 1→1, 1→4 and 4→1 with hash checks and verifies the resume probe starts at the saved byte. [Engine fixture](../tests/integration/http_engine.py) verifies pause/resume 1→1, 1→4, 4→1 with hash checks.",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N36",
       "title": "Non-range pause/restart",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: single stream pause retains .part, no meta; next attempt restarts at zero. Disconnects during a full stream retry from zero (bounded four times). Daemon per-file automatic full retry is now governed by queue retry policy (Q07).",
+      "current_behavior": "Partial: single stream pause retains .part, no meta; next attempt restarts at zero. Disconnects during a full stream retry from zero (bounded four times). Daemon per-file automatic full retry is now governed by queue retry policy (Q07). [Engine fixture](../tests/integration/http_engine.py) verifies non-range pause leaves .part and restart from zero; flaky non-range retry from zero.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N37",
@@ -358,9 +405,11 @@
       "id": "N42",
       "title": "Finalize, rename and output conflicts",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): publication uses a hard link plus removal of `.part` (checked rename when hard links are unsupported), so a destination created during the transfer is never replaced; the error keeps the completed `.part`. Fixture creates the destination mid-transfer and verifies both files. Cross-volume move remains absent.",
+      "current_behavior": "Partial (2026-10-13): publication uses a hard link plus removal of `.part` (checked rename when hard links are unsupported), so a destination created during the transfer is never replaced; the error keeps the completed `.part`. Fixture creates the destination mid-transfer and verifies both files. Cross-volume move remains absent. [Engine fixture](../tests/integration/http_engine.py) verifies no-clobber publication (destination created mid-transfer).",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
     },
     {
       "id": "N43",
@@ -382,9 +431,11 @@
       "id": "N45",
       "title": "Per-file limiter and remembered exceptions",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: shared token bucket across a task workers, persisted task cap, adjustable live. No app default enabled-state or per-file exception inheritance policy.",
+      "current_behavior": "Partial: shared token bucket across a task workers, persisted task cap, adjustable live. No app default enabled-state or per-file exception inheritance policy. [Task rate fixture](../tests/integration/task_rate.py) verifies live cap changes, counters/ETA, persisted cap, pause/resume, unlimited resume, and exact output hash.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/task_rate.py"
+      ]
     },
     {
       "id": "N46",
@@ -406,7 +457,7 @@
       "id": "N48",
       "title": "Resource efficiency contract",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: bounded64KiB buffers, task-limit bounded threads; per-MiB sync checkpoint and blocking worker design need measurement.",
+      "current_behavior": "Partial: bounded 64 KiB buffers, task-limit bounded threads; per-MiB sync checkpoint and blocking worker design measured (2026-10-13). Daemon idle: ~7 MiB RSS with 0% CPU over 30 s including 1000 queued tasks. CLI downloads: 256 MiB at 1–16 connections achieves 183–532 MiB/s, peak RSS 5.7–26 MiB. Benchmark script [bench/run_bench.py](../bench/run_bench.py) samples `/proc` tree at 100 ms intervals, verifies hash integrity. Not yet compared to other download managers; Windows measurements absent.",
       "status": "partial",
       "test_refs": []
     },
@@ -414,17 +465,21 @@
       "id": "Q01",
       "title": "Queue types and default queues",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: only Main + named ordinary queues; no fixed Synchronization queue or mode.",
+      "current_behavior": "Partial: only Main + named ordinary queues; no fixed Synchronization queue or mode. [Daemon IPC fixture](../tests/integration/daemon_ipc.py) verifies queue creation, durable acceptance, and ordering/concurrency.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/daemon_ipc.py"
+      ]
     },
     {
       "id": "Q02",
       "title": "Named queues and membership",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max32, names1–64bytes. Every task always has queue_id1 by default; no no-queue option or queue selector in all creation paths.",
+      "current_behavior": "Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max32, names1–64bytes. Every task always has queue_id1 by default; no no-queue option or queue selector in all creation paths. [Named queue fixture](../tests/integration/named_queues.py) verifies separate caps, isolated stop, atomic guarded membership, persisted names/state, and output hashes.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/named_queues.py"
+      ]
     },
     {
       "id": "Q03",
@@ -440,9 +495,11 @@
       "id": "Q04",
       "title": "Per-queue simultaneous files",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/global2 differs observed original default4.",
+      "current_behavior": "Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/global2 differs observed original default4. [Named queue fixture](../tests/integration/named_queues.py) verifies per-queue and global limits with hash/isolation tests.",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/named_queues.py"
+      ]
     },
     {
       "id": "Q05",
@@ -543,7 +600,9 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Implemented (2026-10-13): `queue completion ID program PATH [ARGS...]` stores the executable plus a literal argument list (IPC `CompletionAction::Program`, at most 64 arguments) and launches it without a shell after a qualifying completion, spawned without blocking the daemon while a reaper thread collects the exit status; the queue event records `started`, `executed` or the spawn error. The path is configured per queue, never browser-supplied. The completion fixture launches a real script through the recording adapter and asserts every argument arrives literally, spaces and shell metacharacters (`a;b",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/completion_actions.py"
+      ]
     },
     {
       "id": "Q16",

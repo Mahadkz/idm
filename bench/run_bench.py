@@ -8,7 +8,7 @@ download and daemon scenarios, and samples the process tree through
 
 Usage:
     . /tmp/xdm-work/env.sh          # provides the offline cargo toolchain
-    python3 bench/run_bench.py [--quick] [--no-build]
+    python3 bench/run_bench.py [--quick] [--no-build] [--repeat 3]
     python3 bench/run_bench.py --compare old.json new.json [--threshold 10]
 
 The ``--compare`` mode prints every regression beyond the threshold and exits
@@ -27,6 +27,7 @@ import os
 import shlex
 import shutil
 import socket
+import statistics
 import struct
 import subprocess
 import sys
@@ -255,7 +256,7 @@ class Measure:
 
 
 def compute_metrics(samples, transferred, wall, usage=None):
-    """RSS/CPU/throughput metrics for one scenario.
+    """RSS/CPU/throughput metrics for one scenario run.
 
     `usage` is the ``os.wait4`` rusage of a short-lived child; it supplies exact
     CPU and context-switch counters that the 100 ms samples can miss in the
@@ -291,6 +292,28 @@ def compute_metrics(samples, transferred, wall, usage=None):
         "context_switches_nonvoluntary": involuntary,
         "samples": len(samples),
     }
+
+
+def aggregate_metrics(runs):
+    """Aggregate metrics from multiple runs: return median, min, max, and all samples for each metric."""
+    if not runs:
+        return {}
+    metrics_names = runs[0].keys()
+    aggregated = {}
+    for name in metrics_names:
+        values = [run[name] for run in runs if run[name] is not None]
+        if not values:
+            aggregated[name] = {"median": None, "min": None, "max": None, "samples": []}
+            continue
+        sorted_vals = sorted(values)
+        median = sorted_vals[len(sorted_vals) // 2]
+        aggregated[name] = {
+            "median": median,
+            "min": sorted_vals[0],
+            "max": sorted_vals[-1],
+            "samples": values,
+        }
+    return aggregated
 
 
 # --------------------------------------------------------------------------- #
@@ -466,200 +489,276 @@ def start_daemon(repo, env, data_dir, home_dir):
 # --------------------------------------------------------------------------- #
 
 
-def make_result(name, detail, transferred, metrics, output, expected_sha256):
-    actual = sha256_file(output) if output is not None else None
-    return {
+def make_result(name, detail, transferred, metrics, expected_sha256, runs=None):
+    # Compute hash_ok from runs if available, otherwise None
+    if runs is not None and expected_sha256 is not None:
+        # Handle both CLI runs (with output_sha256) and daemon runs (with hash_ok)
+        hash_ok = True
+        for run in runs:
+            if "output_sha256" in run:
+                if run["output_sha256"] != expected_sha256:
+                    hash_ok = False
+                    break
+            elif "hash_ok" in run:
+                if not run["hash_ok"]:
+                    hash_ok = False
+                    break
+            else:
+                hash_ok = False
+                break
+    elif expected_sha256 is not None:
+        hash_ok = None  # No runs data, can't verify
+    else:
+        hash_ok = None  # No expected hash to verify against
+    result = {
         "name": name,
         "detail": detail,
         "bytes": transferred,
         "metrics": metrics,
-        "output_sha256": actual,
         "expected_sha256": expected_sha256,
-        # None when the scenario produces no artifact to verify.
-        "hash_ok": (actual == expected_sha256) if expected_sha256 is not None else None,
+        "hash_ok": hash_ok,
     }
+    if runs is not None:
+        result["runs"] = runs
+    return result
 
 
 def cli_download_scenarios(args, fixture, repo, env, output_dir, results):
     cli = str(repo / "target" / "release" / "xdm-cli")
     for connections in (1, 4, 8, 16):
         name = f"cli_{args.size_mib}MiB_c{connections}"
-        output = output_dir / f"{name}.bin"
+        all_runs = []
+        all_metrics = []
+        for run_idx in range(args.repeat):
+            output = output_dir / f"{name}_run{run_idx}.bin"
+            command = [
+                cli,
+                "--no-proxy",
+                fixture.url,
+                str(output),
+                "--connections",
+                str(connections),
+            ]
+            run = run_child(command, env, repo, args.interval)
+            if run["returncode"] != 0:
+                raise RuntimeError(f"{name} run {run_idx} failed: {run['stderr'].strip()}")
+            metrics = compute_metrics(run["samples"], fixture.size, run["wall"], run["usage"])
+            all_metrics.append(metrics)
+            all_runs.append({
+                "run": run_idx,
+                "wall": run["wall"],
+                "returncode": run["returncode"],
+                "metrics": metrics,
+                "output_sha256": sha256_file(output),
+            })
+            log(f"{name} run {run_idx+1}/{args.repeat}: {run['wall']:.2f}s")
+            output.unlink(missing_ok=True)
+            os.sync()
+        aggregated = aggregate_metrics(all_metrics)
+        results.append(
+            make_result(
+                name,
+                {"connections": connections, "rate_kib": None},
+                fixture.size,
+                aggregated,
+                fixture.sha256,
+                runs=all_runs,
+            )
+        )
+        log(f"{name}: median wall {aggregated['wall_seconds']['median']:.2f}s (min {aggregated['wall_seconds']['min']:.2f}s, max {aggregated['wall_seconds']['max']:.2f}s)")
+
+
+def cli_rate_scenario(args, fixture, repo, env, output_dir, results):
+    cli = str(repo / "target" / "release" / "xdm-cli")
+    name = f"cli_{args.size_mib}MiB_c4_rate{args.rate_kib}KiB"
+    all_runs = []
+    all_metrics = []
+    for run_idx in range(args.repeat):
+        output = output_dir / f"{name}_run{run_idx}.bin"
         command = [
             cli,
             "--no-proxy",
             fixture.url,
             str(output),
             "--connections",
-            str(connections),
+            "4",
+            "--rate-kib",
+            str(args.rate_kib),
         ]
         run = run_child(command, env, repo, args.interval)
         if run["returncode"] != 0:
-            raise RuntimeError(f"{name} failed: {run['stderr'].strip()}")
-        results.append(
-            make_result(
-                name,
-                {"connections": connections, "rate_kib": None},
-                fixture.size,
-                compute_metrics(run["samples"], fixture.size, run["wall"], run["usage"]),
-                output,
-                fixture.sha256,
-            )
-        )
-        log(f"{name}: {run['wall']:.2f}s")
+            raise RuntimeError(f"{name} run {run_idx} failed: {run['stderr'].strip()}")
+        metrics = compute_metrics(run["samples"], fixture.size, run["wall"], run["usage"])
+        all_metrics.append(metrics)
+        all_runs.append({
+            "run": run_idx,
+            "wall": run["wall"],
+            "returncode": run["returncode"],
+            "metrics": metrics,
+            "output_sha256": sha256_file(output),
+        })
+        log(f"{name} run {run_idx+1}/{args.repeat}: {run['wall']:.2f}s")
         output.unlink(missing_ok=True)
-
-
-def cli_rate_scenario(args, fixture, repo, env, output_dir, results):
-    cli = str(repo / "target" / "release" / "xdm-cli")
-    name = f"cli_{args.size_mib}MiB_c4_rate{args.rate_kib}KiB"
-    output = output_dir / f"{name}.bin"
-    command = [
-        cli,
-        "--no-proxy",
-        fixture.url,
-        str(output),
-        "--connections",
-        "4",
-        "--rate-kib",
-        str(args.rate_kib),
-    ]
-    run = run_child(command, env, repo, args.interval)
-    if run["returncode"] != 0:
-        raise RuntimeError(f"{name} failed: {run['stderr'].strip()}")
+        os.sync()
+    aggregated = aggregate_metrics(all_metrics)
     results.append(
         make_result(
             name,
             {"connections": 4, "rate_kib": args.rate_kib},
             fixture.size,
-            compute_metrics(run["samples"], fixture.size, run["wall"], run["usage"]),
-            output,
+            aggregated,
             fixture.sha256,
+            runs=all_runs,
         )
     )
-    log(f"{name}: {run['wall']:.2f}s")
-    output.unlink(missing_ok=True)
+    log(f"{name}: median wall {aggregated['wall_seconds']['median']:.2f}s (min {aggregated['wall_seconds']['min']:.2f}s, max {aggregated['wall_seconds']['max']:.2f}s)")
 
 
 def daemon_idle_scenarios(args, fixture, repo, env, results):
-    work = Path(tempfile.mkdtemp(prefix="daemon-idle-", dir=args.tmp))
-    downloads = work / "downloads"
-    downloads.mkdir(parents=True)
-    daemon = start_daemon(repo, env, work / "state", work / "home")
-    try:
-        measure = Measure(daemon.proc.pid, args.interval).start()
-        measure.wait(args.idle_seconds)
-        measure.finish()
+    # Run each idle scenario multiple times with fresh daemon each time
+    for scenario_name, task_count in [("daemon_idle_0", 0), (f"daemon_idle_{args.queued_tasks}", args.queued_tasks)]:
+        detail = {"tasks": task_count, "idle_seconds": args.idle_seconds}
+        if task_count > 0:
+            detail["stopped"] = True
+        all_runs = []
+        all_metrics = []
+        for run_idx in range(args.repeat):
+            work = Path(tempfile.mkdtemp(prefix=f"{scenario_name}-", dir=args.tmp))
+            downloads = work / "downloads"
+            downloads.mkdir(parents=True)
+            daemon = start_daemon(repo, env, work / "state", work / "home")
+            try:
+                if task_count > 0:
+                    stopped = daemon.command({"type": "queue_stop"})
+                    if not stopped.get("ok"):
+                        raise RuntimeError(f"queue_stop failed: {stopped}")
+                    for index in range(task_count):
+                        reply = daemon.command(
+                            {
+                                "type": "submit",
+                                "payload": {
+                                    "request_id": f"idle-{index}",
+                                    "url": fixture.url,
+                                    "output": str(downloads / f"idle-{index}.bin"),
+                                    "headers": [],
+                                    "priority": 1,
+                                    "connections": 1,
+                                },
+                            }
+                        )
+                        if not reply.get("ok"):
+                            raise RuntimeError(f"submit {index} failed: {reply}")
+                    # Let the queued submissions and scheduler wakeups settle before sampling.
+                    time.sleep(0.5)
+                measure = Measure(daemon.proc.pid, args.interval).start()
+                measure.wait(args.idle_seconds)
+                measure.finish()
+                metrics = compute_metrics(measure.samples, 0, measure.wall)
+                all_metrics.append(metrics)
+                all_runs.append({
+                    "run": run_idx,
+                    "wall": measure.wall,
+                    "metrics": metrics,
+                })
+                log(f"{scenario_name} run {run_idx+1}/{args.repeat}: {measure.wall:.2f}s")
+            finally:
+                daemon.close()
+                shutil.rmtree(work, ignore_errors=True)
+            os.sync()
+        aggregated = aggregate_metrics(all_metrics)
         results.append(
             make_result(
-                "daemon_idle_0",
-                {"tasks": 0, "idle_seconds": args.idle_seconds},
+                scenario_name,
+                detail,
                 0,
-                compute_metrics(measure.samples, 0, measure.wall),
+                aggregated,
                 None,
-                None,
+                runs=all_runs,
             )
         )
-
-        stopped = daemon.command({"type": "queue_stop"})
-        if not stopped.get("ok"):
-            raise RuntimeError(f"queue_stop failed: {stopped}")
-        for index in range(args.queued_tasks):
-            reply = daemon.command(
-                {
-                    "type": "submit",
-                    "payload": {
-                        "request_id": f"idle-{index}",
-                        "url": fixture.url,
-                        "output": str(downloads / f"idle-{index}.bin"),
-                        "headers": [],
-                        "priority": 1,
-                        "connections": 1,
-                    },
-                }
-            )
-            if not reply.get("ok"):
-                raise RuntimeError(f"submit {index} failed: {reply}")
-        # Let the queued submissions and scheduler wakeups settle before sampling.
-        time.sleep(0.5)
-        measure = Measure(daemon.proc.pid, args.interval).start()
-        measure.wait(args.idle_seconds)
-        measure.finish()
-        results.append(
-            make_result(
-                f"daemon_idle_{args.queued_tasks}",
-                {"tasks": args.queued_tasks, "idle_seconds": args.idle_seconds, "stopped": True},
-                0,
-                compute_metrics(measure.samples, 0, measure.wall),
-                None,
-                None,
-            )
-        )
-        log(
-            f"daemon idle: 0 tasks and {args.queued_tasks} queued tasks over "
-            f"{args.idle_seconds}s each"
-        )
-    finally:
-        daemon.close()
-        shutil.rmtree(work, ignore_errors=True)
+        log(f"{scenario_name}: median wall {aggregated['wall_seconds']['median']:.2f}s (min {aggregated['wall_seconds']['min']:.2f}s, max {aggregated['wall_seconds']['max']:.2f}s)")
 
 
 def daemon_concurrent_scenario(args, repo, env, results):
     size_mib = args.concurrent_mib
-    fixture = Fixture(Path(__file__).parent / "fixture_server.py", size_mib, env)
-    work = Path(tempfile.mkdtemp(prefix="daemon-concurrent-", dir=args.tmp))
-    downloads = work / "downloads"
-    downloads.mkdir(parents=True)
-    daemon = None
-    try:
-        daemon = start_daemon(repo, env, work / "state", work / "home")
-        concurrency = 4
-        limit = daemon.command(
-            {"type": "set_concurrency", "payload": {"limit": concurrency}}
-        )
-        if not limit.get("ok"):
-            raise RuntimeError(f"set_concurrency failed: {limit}")
-        outputs = []
-        for index in range(concurrency):
-            output = downloads / f"concurrent-{index}.bin"
-            reply = daemon.command(
-                {
-                    "type": "submit",
-                    "payload": {
-                        "request_id": f"concurrent-{index}",
-                        "url": fixture.url,
-                        "output": str(output),
-                        "headers": [],
-                        "priority": 1,
-                        "connections": 4,
-                    },
-                }
+    concurrency = 4
+    all_runs = []
+    all_metrics = []
+    
+    for run_idx in range(args.repeat):
+        fixture = Fixture(Path(__file__).parent / "fixture_server.py", size_mib, env)
+        work = Path(tempfile.mkdtemp(prefix="daemon-concurrent-", dir=args.tmp))
+        downloads = work / "downloads"
+        downloads.mkdir(parents=True)
+        daemon = None
+        try:
+            daemon = start_daemon(repo, env, work / "state", work / "home")
+            limit = daemon.command(
+                {"type": "set_concurrency", "payload": {"limit": concurrency}}
             )
-            if not reply.get("ok"):
-                raise RuntimeError(f"submit {index} failed: {reply}")
-            outputs.append(output)
+            if not limit.get("ok"):
+                raise RuntimeError(f"set_concurrency failed: {limit}")
+            outputs = []
+            for index in range(concurrency):
+                output = downloads / f"concurrent-{index}.bin"
+                reply = daemon.command(
+                    {
+                        "type": "submit",
+                        "payload": {
+                            "request_id": f"concurrent-{index}",
+                            "url": fixture.url,
+                            "output": str(output),
+                            "headers": [],
+                            "priority": 1,
+                            "connections": 4,
+                        },
+                    }
+                )
+                if not reply.get("ok"):
+                    raise RuntimeError(f"submit {index} failed: {reply}")
+                outputs.append(output)
 
-        measure = Measure(daemon.proc.pid, args.interval).start()
-        deadline = time.monotonic() + max(120, size_mib)
-        while time.monotonic() < deadline:
-            tasks = daemon.command({"type": "list"})["tasks"]
-            states = [task["status"] for task in tasks]
-            if any(state == "failed" for state in states):
-                raise RuntimeError(f"a download failed: {tasks}")
-            if len(tasks) >= concurrency and all(
-                state == "complete" for state in states
-            ):
-                break
-            time.sleep(0.1)
-        else:
-            raise RuntimeError("concurrent downloads did not finish in time")
-        measure.finish()
+            measure = Measure(daemon.proc.pid, args.interval).start()
+            deadline = time.monotonic() + max(120, size_mib)
+            while time.monotonic() < deadline:
+                tasks = daemon.command({"type": "list"})["tasks"]
+                states = [task["status"] for task in tasks]
+                if any(state == "failed" for state in states):
+                    raise RuntimeError(f"a download failed: {tasks}")
+                if len(tasks) >= concurrency and all(
+                    state == "complete" for state in states
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("concurrent downloads did not finish in time")
+            measure.finish()
 
-        transferred = fixture.size * concurrency
-        metrics = compute_metrics(measure.samples, transferred, measure.wall)
-        actual_hashes = {output.name: sha256_file(output) for output in outputs}
-        hash_ok = all(value == fixture.sha256 for value in actual_hashes.values())
-        result = make_result(
+            transferred = fixture.size * concurrency
+            metrics = compute_metrics(measure.samples, transferred, measure.wall)
+            actual_hashes = {output.name: sha256_file(output) for output in outputs}
+            hash_ok = all(value == fixture.sha256 for value in actual_hashes.values())
+            all_metrics.append(metrics)
+            all_runs.append({
+                "run": run_idx,
+                "wall": measure.wall,
+                "metrics": metrics,
+                "hash_ok": hash_ok,
+                "hashes": actual_hashes,
+            })
+            log(f"daemon_concurrent_{concurrency}x{size_mib}MiB run {run_idx+1}/{args.repeat}: {measure.wall:.2f}s, hash {'ok' if hash_ok else 'MISMATCH'}")
+        finally:
+            if daemon is not None:
+                daemon.close()
+            fixture.close()
+            shutil.rmtree(work, ignore_errors=True)
+        os.sync()
+    
+    aggregated = aggregate_metrics(all_metrics)
+    # Use the last run's hashes for the main result
+    last_run = all_runs[-1]
+    results.append(
+        make_result(
             f"daemon_concurrent_{concurrency}x{size_mib}MiB",
             {
                 "concurrency": concurrency,
@@ -667,22 +766,12 @@ def daemon_concurrent_scenario(args, repo, env, results):
                 "connections": 4,
             },
             transferred,
-            metrics,
-            outputs[0],
+            aggregated,
             fixture.sha256,
+            runs=all_runs,
         )
-        result["hash_ok"] = hash_ok
-        result["hashes"] = actual_hashes
-        results.append(result)
-        log(
-            f"daemon {concurrency}x{size_mib}MiB: {measure.wall:.2f}s, hash "
-            f"{'ok' if hash_ok else 'MISMATCH'}"
-        )
-    finally:
-        if daemon is not None:
-            daemon.close()
-        fixture.close()
-        shutil.rmtree(work, ignore_errors=True)
+    )
+    log(f"daemon_concurrent_{concurrency}x{size_mib}MiB: median wall {aggregated['wall_seconds']['median']:.2f}s (min {aggregated['wall_seconds']['min']:.2f}s, max {aggregated['wall_seconds']['max']:.2f}s)")
 
 
 # --------------------------------------------------------------------------- #
@@ -718,30 +807,45 @@ def write_results(results, args, out_dir):
 
 def render_table(results):
     lines = [
-        "| scenario | bytes (MiB) | wall (s) | throughput (MiB/s) | peak RSS (MiB) | mean RSS (MiB) | CPU (s) | CPU s/GiB | ctx vol | ctx nonvol | hash |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| scenario | bytes (MiB) | wall median (s) | wall spread | throughput median (MiB/s) | peak RSS median (MiB) | mean RSS median (MiB) | CPU median (s) | CPU s/GiB median | ctx vol median | ctx nonvol median | hash |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for result in results:
         metrics = result["metrics"]
         transferred = result["bytes"]
-        throughput = metrics["throughput_bytes_per_sec"]
-        cpu_per_gib = metrics["cpu_seconds_per_gib"]
+        # Extract median values from aggregated metrics
+        def get_median(key):
+            val = metrics.get(key)
+            if isinstance(val, dict):
+                return val.get("median")
+            return val
+        def get_spread(key):
+            val = metrics.get(key)
+            if isinstance(val, dict):
+                mn = val.get("min")
+                mx = val.get("max")
+                if mn is not None and mx is not None:
+                    return mx - mn
+            return 0
+        throughput = get_median("throughput_bytes_per_sec")
+        cpu_per_gib = get_median("cpu_seconds_per_gib")
         if result["hash_ok"] is None:
             hash_cell = "-"
         else:
             hash_cell = "ok" if result["hash_ok"] else "MISMATCH"
         lines.append(
-            "| {name} | {mib:.1f} | {wall:.2f} | {throughput} | {peak:.1f} | {mean:.1f} | {cpu:.3f} | {cpu_gib} | {vol} | {nonvol} | {hash} |".format(
+            "| {name} | {mib:.1f} | {wall:.2f} | {wall_spread:.2f} | {throughput} | {peak:.1f} | {mean:.1f} | {cpu:.3f} | {cpu_gib} | {vol} | {nonvol} | {hash} |".format(
                 name=result["name"],
                 mib=transferred / MIB,
-                wall=metrics["wall_seconds"],
+                wall=get_median("wall_seconds") or 0,
+                wall_spread=get_spread("wall_seconds"),
                 throughput=f"{throughput / MIB:.1f}" if throughput else "-",
-                peak=metrics["peak_rss_bytes"] / MIB,
-                mean=metrics["mean_rss_bytes"] / MIB,
-                cpu=metrics["cpu_seconds"],
+                peak=get_median("peak_rss_bytes") / MIB if get_median("peak_rss_bytes") else 0,
+                mean=get_median("mean_rss_bytes") / MIB if get_median("mean_rss_bytes") else 0,
+                cpu=get_median("cpu_seconds") or 0,
                 cpu_gib=f"{cpu_per_gib:.3f}" if cpu_per_gib is not None else "-",
-                vol=metrics["context_switches_voluntary"],
-                nonvol=metrics["context_switches_nonvoluntary"],
+                vol=get_median("context_switches_voluntary") or 0,
+                nonvol=get_median("context_switches_nonvoluntary") or 0,
                 hash=hash_cell,
             )
         )
@@ -758,8 +862,57 @@ REGRESSION_DIRECTIONS = {
 }
 
 
+def get_median(metrics, key):
+    """Extract median value from aggregated metrics."""
+    val = metrics.get(key)
+    if isinstance(val, dict):
+        return val.get("median")
+    return val
+
+
+def get_spread(metrics, key):
+    """Calculate spread (max - min) from aggregated metrics."""
+    val = metrics.get(key)
+    if isinstance(val, dict):
+        mn = val.get("min")
+        mx = val.get("max")
+        if mn is not None and mx is not None:
+            return mx - mn
+    return 0
+
+
+def get_min(metrics, key):
+    """Extract min value from aggregated metrics."""
+    val = metrics.get(key)
+    if isinstance(val, dict):
+        return val.get("min")
+    return val
+
+
+def get_min(metrics, key):
+    """Extract min value from aggregated metrics."""
+    val = metrics.get(key)
+    if isinstance(val, dict):
+        return val.get("min")
+    return val
+
+
+def get_max(metrics, key):
+    """Extract max value from aggregated metrics."""
+    val = metrics.get(key)
+    if isinstance(val, dict):
+        return val.get("max")
+    return val
+
+
 def compare(old_path, new_path, threshold):
-    """Prints regressions beyond `threshold` percent and returns an exit code."""
+    """Prints regressions beyond `threshold` percent and returns an exit code.
+
+    A regression is reported only when:
+    - The new median is worse than the old median by more than the threshold, AND
+    - The new median is worse than the old extreme sample (max for "lower is better",
+      min for "higher is better") to avoid flagging noise.
+    """
     old = json.loads(Path(old_path).read_text())
     new = json.loads(Path(new_path).read_text())
     old_map = {scenario["name"]: scenario for scenario in old["scenarios"]}
@@ -768,8 +921,8 @@ def compare(old_path, new_path, threshold):
     missing = []
     checked = 0
     print(f"compare {old_path} -> {new_path} (threshold {threshold:g}%)")
-    print("| scenario | metric | old | new | change | verdict |")
-    print("| --- | --- | --- | --- | --- | --- |")
+    print("| scenario | metric | old median | new median | old spread | new spread | change | verdict |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for name in sorted(new_map):
         if name not in old_map:
             missing.append(name)
@@ -777,20 +930,24 @@ def compare(old_path, new_path, threshold):
         old_metrics = old_map[name]["metrics"]
         new_metrics = new_map[name]["metrics"]
         for metric, direction in REGRESSION_DIRECTIONS.items():
-            old_value = old_metrics.get(metric)
-            new_value = new_metrics.get(metric)
-            if old_value in (None, 0) or new_value is None:
+            old_median = get_median(old_metrics, metric)
+            new_median = get_median(new_metrics, metric)
+            old_spread = get_spread(old_metrics, metric)
+            new_spread = get_spread(new_metrics, metric)
+            old_max = get_max(old_metrics, metric)
+            old_min = get_min(old_metrics, metric)
+            if old_median in (None, 0) or new_median is None:
                 continue
             checked += 1
-            change = (new_value - old_value) / abs(old_value) * 100
+            change = (new_median - old_median) / abs(old_median) * 100
             if direction == "lower":
-                regressed = change > threshold
+                regressed = change > threshold and new_median > old_max
             else:
-                regressed = -change > threshold
+                regressed = -change > threshold and new_median < old_min
             if regressed:
-                regressions.append((name, metric, old_value, new_value, change))
+                regressions.append((name, metric, old_median, new_median, change, old_spread, new_spread))
                 print(
-                    f"| {name} | {metric} | {old_value:g} | {new_value:g} | "
+                    f"| {name} | {metric} | {old_median:g} | {new_median:g} | {old_spread:g} | {new_spread:g} | "
                     f"{change:+.2f}% | REGRESSION |"
                 )
     for name in sorted(old_map):
@@ -890,6 +1047,7 @@ def parse_args(argv=None):
     parser.add_argument("--idle-seconds", type=int, default=None)
     parser.add_argument("--queued-tasks", type=int, default=None)
     parser.add_argument("--rate-kib", type=int, default=None)
+    parser.add_argument("--repeat", type=int, default=3, help="number of repetitions per scenario (default 3)")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)
 
@@ -922,6 +1080,16 @@ def main(argv=None):
     fixture = None
     try:
         fixture = Fixture(Path(__file__).parent / "fixture_server.py", args.size_mib, env)
+        # Warm up the fixture with one small request
+        warmup_output = work / "warmup.bin"
+        cli = str(args.repo / "target" / "release" / "xdm-cli")
+        warmup_cmd = [cli, "--no-proxy", fixture.url, str(warmup_output), "--connections", "1"]
+        run = run_child(warmup_cmd, env, args.repo, args.interval)
+        if run["returncode"] != 0:
+            log(f"warning: fixture warmup failed: {run['stderr'].strip()}")
+        warmup_output.unlink(missing_ok=True)
+        os.sync()
+
         results = []
         cli_download_scenarios(args, fixture, args.repo, env, work, results)
         cli_rate_scenario(args, fixture, args.repo, env, work, results)

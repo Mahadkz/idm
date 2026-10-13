@@ -24,3 +24,6 @@
 /docs/analysis/runtime/
 /docs/analysis/runtime_final/
 /docs/analysis/browser_media/
+
+# Local benchmark runs (commit a result deliberately with git add -f)
+/bench/results/*.json

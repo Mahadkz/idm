@@ -1,0 +1,26 @@
+# Build output
+/target/
+**/__pycache__/
+*.pyc
+
+# Proprietary original software (never redistribute)
+/IDM/
+
+# Third-party reference projects (separate licenses; not part of XDM)
+/rea/
+/Motrix/
+/gopeed/
+/Ghost-Downloader-3/
+/hermes-decomp/
+
+# Raw material extracted from the original IDM build and its runtime captures.
+# Kept locally for the mapping checker; not published.
+/docs/analysis/idm_language_catalog.json
+/docs/analysis/idm_ui_resources.json
+/docs/analysis/idm_payload_inventory.json
+/docs/analysis/idm_browser_source_inventory.json
+/docs/analysis/idm_dialog_catalog.md
+/docs/analysis/core/
+/docs/analysis/runtime/
+/docs/analysis/runtime_final/
+/docs/analysis/browser_media/

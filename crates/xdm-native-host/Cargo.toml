@@ -1,0 +1,13 @@
+[package]
+name = "xdm-native-host"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+xdm-http = { path = "../xdm-http" }
+xdm-ipc = { path = "../xdm-ipc" }
+xdm-media = { path = "../xdm-media" }
+xdm-categories = { path = "../xdm-categories" }
+sha2 = "0.10"
+serde_json = "1"

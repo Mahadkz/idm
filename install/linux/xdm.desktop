@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=XDM
+GenericName=Download Manager
+Comment=Download files with parallel connections and browser integration
+Exec=xdm-gui %u
+Icon=xdm
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=download;manager;http;ftp;
+StartupNotify=true

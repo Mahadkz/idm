@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/xdm-http", "crates/xdm-cli", "crates/xdm-ipc", "crates/xdm-daemon", "crates/xdm-native-host", "crates/xdm-media", "crates/xdm-gui", "crates/xdm-categories", "crates/xdm-transfer-list", "crates/xdm-ftp", "crates/xdm-grabber"]
+resolver = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+

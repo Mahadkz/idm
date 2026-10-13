@@ -1,0 +1,12 @@
+[package]
+name = "xdm-transfer-list"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+xdm-ipc = { path = "../xdm-ipc" }
+xdm-categories = { path = "../xdm-categories" }
+serde_json = "1"
+url = "2"
+percent-encoding = "2"

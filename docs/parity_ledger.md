@@ -5,9 +5,9 @@
 | Document | Implemented | Partial | Different | Missing | Unknown | Total |
 |---|---:|---:|---:|---:|---:|---:|
 | idm_core_queue_contracts.md | 10 | 41 | 5 | 13 | 0 | 69 |
-| idm_browser_behavior_contracts.md | 51 | 2 | 0 | 9 | 0 | 62 |
+| idm_browser_behavior_contracts.md | 35 | 8 | 8 | 11 | 0 | 62 |
 | idm_behavior_review.md | 0 | 27 | 0 | 12 | 0 | 39 |
-| **Total** | **61** | **70** | **5** | **34** | **0** | **170** |
+| **Total** | **45** | **76** | **13** | **36** | **0** | **170** |
 
 ## Contract Details
 
@@ -82,68 +82,68 @@
 | Q19 | Schedule/order/settings durability | partial | Partial: SQLite WAL immediate command persistence and queue flags/limits; no sch… | — |
 | Q20 | Pause/resume/redownload state semantics | partial | Partial: pause queued/running; resume paused/failed; redownload fresh destinatio… | — |
 | Q21 | Queue exports and durable submission | different | Independent JSON/URL list import atomic/idempotent receipts; exports omit header… | — |
-| B01 | B initialization (134–136) rejects non-Windows; C initial gu… | implemented | XDM is deliberately cross-platform; Linux Chromium was tested. Verified with moc… | tests/integration/contracts_browser.mjs |
-| B02 | Chromium MV3 worker, all HTTP(S) frames at document start; h… | implemented | XDM MV3 all-frame script runs document idle; no page helper. Verified with mocke… | tests/integration/contracts_browser.mjs |
-| B03 | B `yb/vc` stores client/version/update/silent/consent state;… | implemented | XDM stores interception toggle only; homepage identity scheme intentionally unne… | tests/integration/contracts_browser.mjs |
-| B04 | B `Ba/Na/oa`: cycle two WebSocket endpoints then native host… | implemented | XDM opens native messages per request; no proprietary WebSocket negotiation. Ver… | tests/integration/contracts_browser.mjs |
-| B05 | B `Ma`: 15 s keepalive for older negotiated versions; listen… | implemented | XDM stateless submissions avoid persistent-port keepalive. Verified with mocked … | tests/integration/contracts_browser.mjs |
-| B06 | B `R/Gb/pb`: global/per-tab integration enablement, disabled… | implemented | XDM action opens popup; global opt-in only, badge counts media. Verified with mo… | tests/integration/contracts_browser.mjs |
-| B07 | B `Bb/Nb`: host settings enable menus and listeners; optiona… | missing | XDM always observes HTTP(S), interception toggle controls handoff; no shelf supp… | tests/integration/contracts_browser.mjs |
-| B08 | W startup/update/error/private-access/Firefox-consent panels… | implemented | XDM lacks onboarding/repair UX. Commercial prompts need an independent substitut… | tests/integration/contracts_browser.mjs |
-| B09 | B `Oc` checks competing packaged extension IDs and can disab… | implemented | XDM does not disable other extensions; no duplicate-host diagnostic. Verified wi… | tests/integration/contracts_browser.mjs |
-| B10 | R registration redirect forwards hash command44, strips hash… | missing | XDM has no custom registration URL or capture page. | tests/integration/contracts_browser.mjs |
-| B11 | B `Nb/cb`: before-request observes GET/POST, request body, s… | implemented | XB observes before-send-headers only; stores method; rejects observed non-GET. V… | tests/integration/contracts_browser.mjs |
-| B12 | B `Rb`: before-send-headers captures headers, correlates pag… | implemented | XB retains only Referer/User-Agent, keyed by URL, maximum300. Authorization and … | tests/integration/contracts_browser.mjs |
-| B13 | B `Ub/Hc`: response status, MIME, Content-Disposition, chars… | implemented | XB records MIME/media kind only; filename comes browser item. Verified with mock… | tests/integration/contracts_browser.mjs |
-| B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | implemented | XDM HTTP redirects are handled by engine with origin-scoped credentials, but ext… | tests/integration/contracts_browser.mjs |
-| B15 | B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path ex… | implemented | XDM basic HTTP/MIME/extension classification and global opt-in only. Verified wi… | tests/integration/contracts_browser.mjs |
-| B16 | B `qb`: onCreated correlates recent request by URL/time (obs… | implemented | XDM pauses inside onDeterminingFilename; requires observed GET. Verified with mo… | tests/integration/contracts_browser.mjs |
-| B17 | B `rb/lc/X`: filename listener filters then submits type13, … | implemented | XDM submits independent JSON; daemon durable acceptance precedes browser cancel.… | tests/integration/contracts_browser.mjs |
-| B18 | B `$a` reply13 maps action and status3 to `kc/O`; accepted C… | implemented | XDM accepts friendly `accepted` response. Verified with mocked browser APIs only… | tests/integration/contracts_browser.mjs |
-| B19 | B `oa` removes integration listeners; P disconnect-after-sen… | implemented | XDM 10 s fallback timer exists. Late durable acceptance can still mean duplicate… | tests/integration/contracts_browser.mjs |
-| B20 | B `Sb/Tb/O`: completion/error release correlated request; he… | implemented | XB recent map bounded300, but no age expiry or per-navigation cleanup. Verified … | tests/integration/contracts_browser.mjs |
-| B21 | B `U/V/Dc`: cookies per requested URL, original URL cookies … | implemented | XDM getAllURL serializes name=value; no partition/store/private context fidelity… | tests/integration/contracts_browser.mjs |
-| B22 | B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-enc… | implemented | XDM GET-only bridge and header subset. Verified with mocked browser APIs only, n… | tests/integration/contracts_browser.mjs |
-| B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | implemented | XDM initiator/documentURL/referrer fallback can lose full page URL and frame anc… | tests/integration/contracts_browser.mjs |
-| B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | implemented | XDM does not transfer browser proxy context. Verified with mocked browser APIs o… | tests/integration/contracts_browser.mjs |
-| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | missing | XDM lacks keyboard force/bypass capture. | tests/integration/contracts_browser.mjs |
-| B26 | B `Nb/Mb`, R: configured main-frame registration redirect us… | implemented | XDM does not redirect navigation. Verified with mocked browser APIs only, not a … | tests/integration/contracts_browser.mjs |
-| B27 | B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/… | implemented | XDM only HTTP(S), retains URLs according to fresh schema. Verified with mocked b… | tests/integration/contracts_browser.mjs |
-| B28 | B `Cb/Ea/pa`: link,image,video context download; page/frame/… | implemented | XDM context link/video/audio; image/page/frame menu absent. Verified with mocked… | tests/integration/contracts_browser.mjs |
-| B29 | B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor loo… | implemented | XDM direct context submission lacks DOM label lookup. Verified with mocked brows… | tests/integration/contracts_browser.mjs |
-| B30 | B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links c… | missing | XDM lacks browser batch-link collection; desktop text/JSON import exists. | tests/integration/contracts_browser.mjs |
-| B31 | B `ec`: multi-link type15 initialization, count and batch id… | implemented | XDM desktop atomic batch imports use independent schema, not browser batch conte… | tests/integration/contracts_browser.mjs |
-| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | missing | XDM lacks selection panel. | tests/integration/contracts_browser.mjs |
-| B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | implemented | XDM no downloads-page carry-over menu. Verified with mocked browser APIs only, n… | tests/integration/contracts_browser.mjs |
-| B34 | B `fc`: no host/no links produces browser-side error notific… | implemented | XDM context action logs errors to console; popup supplies feedback. Verified wit… | tests/integration/contracts_browser.mjs |
-| B35 | B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, su… | implemented | XDM narrower MIME/extensions including HLS/DASH; no F4M, ad/site rules or subtit… | tests/integration/contracts_browser.mjs |
-| B36 | B `X`: media detection type13 action discriminator differs p… | implemented | XDM stores popup item, later media.inspect; no host-driven body request. Verifie… | tests/integration/contracts_browser.mjs |
-| B37 | B reply13→content19; C `bc`: browser-context fetch with URL/… | implemented | XDM daemon fetches manifests itself; media.inspect/media.submit payloads contain… | tests/integration/contracts_browser.mjs |
-| B38 | D `ua/Ka/La/Ja`: configured XHR open/header/send/loadend wra… | implemented | XDM no page-context XHR hooks. Verified with mocked browser APIs only, not a rea… | tests/integration/contracts_browser.mjs |
-| B39 | D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arra… | implemented | XDM no fetch/Response/stream capture. Verified with mocked browser APIs only, no… | tests/integration/contracts_browser.mjs |
-| B40 | D message1229212978 config dynamically installs/restores wra… | implemented | XDM no negotiation of hook ability. Verified with mocked browser APIs only, not … | tests/integration/contracts_browser.mjs |
-| B41 | D message1229212981 property/selector extraction→1229212982;… | missing | XDM no page metadata query helper. | tests/integration/contracts_browser.mjs |
-| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | missing | XDM no site adapters or signed/expired URL refresh. Existing original rule confi… | tests/integration/contracts_browser.mjs |
-| B43 | C `Tb/H/ib`: video/audio/object/embed/source-child associati… | implemented | XC scans video/audio currentSrc/src/source on initial/added nodes; attribute/src… | tests/integration/contracts_browser.mjs |
-| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | missing | XDM set of URLs, no player identity lifecycle. | tests/integration/contracts_browser.mjs |
-| B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | implemented | XDM no overlay geometry. Verified with mocked browser APIs only, not a real brow… | tests/integration/contracts_browser.mjs |
-| B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | implemented | XDM all-frame URL collection only. Verified with mocked browser APIs only, not a… | tests/integration/contracts_browser.mjs |
-| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | XDM mutation added-node observer only. | tests/integration/contracts_browser.mjs |
-| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | XDM popup only; no floating player panel. | tests/integration/contracts_browser.mjs |
-| B49 | B window listeners and `U/sc/pc/Oa`: window registration6, c… | missing | XDM no native browser-window tracking. | tests/integration/contracts_browser.mjs |
-| B50 | B `ab/xb/Ob/xa`: navigation and history changes refresh site… | implemented | XDM deletes media on tab close only; navigation leaves previous-page items. Veri… | tests/integration/contracts_browser.mjs |
-| B51 | C `C/$b/ob` + B `ec`: title from top page/og:title, source c… | implemented | XDM popup shows raw URL; no title/thumbnail/player mapping. Verified with mocked… | tests/integration/contracts_browser.mjs |
-| B52 | L21130 instructs selecting desired quality in player before … | implemented | XDM public clear manifest inspection enumerates FFprobe tracks, popup sorts reso… | tests/integration/contracts_browser.mjs |
-| B53 | L21005/21006 audio-only/video-only; mux exports establish se… | implemented | XDM video plus selectable audio/noaudio; popup requires video and cannot submit … | tests/integration/contracts_browser.mjs |
-| B54 | L21192 incompatible audio/video can leave audio separately; … | implemented | XDM stream-copy MP4 only when compatible; limited fallback behavior. Verified wi… | tests/integration/contracts_browser.mjs |
-| B55 | L21000/21001 live stop/save and no same-position resume; sub… | implemented | XDM clear finite media fixture succeeds; live/subtitles/refresh pending, encrypt… | tests/integration/contracts_browser.mjs |
-| B56 | B `$a`12/`Ac/mc`: host resource asks browser to locate assoc… | implemented | XDM no desktop→browser player query. Verified with mocked browser APIs only, not… | tests/integration/contracts_browser.mjs |
-| B57 | B `$a`24/`Dc`: host explicitly requests cookies for URL; res… | implemented | XDM only submission-time cookie gathering. Verified with mocked browser APIs onl… | tests/integration/contracts_browser.mjs |
-| B58 | B `$a`20: host asks proxy comparison/context; reply121/122 a… | implemented | XDM no proxy handshake. Verified with mocked browser APIs only, not a real brows… | tests/integration/contracts_browser.mjs |
-| B59 | B `$a`22/`Ec`: optional notification permission, desktop-sup… | implemented | XDM no native notification bridge. Verified with mocked browser APIs only, not a… | tests/integration/contracts_browser.mjs |
-| B60 | B `$a`100: echo family when acknowledgment requested; defaul… | implemented | XDM versioned allowlisted JSON operations rather than legacy echo. Verified with… | tests/integration/contracts_browser.mjs |
-| B61 | Native host `00402830` startup discovers Windows session/pro… | implemented | Rust host independent per-user Unix socket/named pipe, installation token; origi… | tests/integration/contracts_browser.mjs |
-| B62 | Standard four-byte native-endian UTF-8 JSON length, outer JS… | implemented | XDM JSON objects, 1 MiB framing bound, schema/version validation. Native fixture… | tests/integration/contracts_browser.mjs |
+| B01 | B initialization (134–136) rejects non-Windows; C initial gu… | implemented | Implemented: Extension initialization is cross-platform without Windows-only pla… | tests/integration/contracts_browser.mjs |
+| B02 | Chromium MV3 worker, all HTTP(S) frames at document start; h… | implemented | Implemented: Content scripts run at document_start with all_frames enabled, decl… | tests/integration/contracts_browser.mjs |
+| B03 | B `yb/vc` stores client/version/update/silent/consent state;… | implemented | Implemented: Persists settings (interception toggle, site exclusions, private mo… | tests/integration/contracts_browser.mjs |
+| B04 | B `Ba/Na/oa`: cycle two WebSocket endpoints then native host… | different | Different: Uses per-request native messaging and resumes browser downloads on da… | tests/integration/contracts_browser.mjs |
+| B05 | B `Ma`: 15 s keepalive for older negotiated versions; listen… | different | Different: Employs stateless per-request messaging avoiding persistent keepalive… | tests/integration/contracts_browser.mjs |
+| B06 | B `R/Gb/pb`: global/per-tab integration enablement, disabled… | implemented | Implemented: Provides global interception toggle in storage, per-tab toggle via … | tests/integration/contracts_browser.mjs |
+| B07 | B `Bb/Nb`: host settings enable menus and listeners; optiona… | missing | Missing: Observes HTTP(S) and uses storage toggles, but lacks browser download s… | tests/integration/contracts_browser.mjs |
+| B08 | W startup/update/error/private-access/Firefox-consent panels… | different | Different: Provides a standard options page (options_ui) documenting settings an… | tests/integration/contracts_browser.mjs |
+| B09 | B `Oc` checks competing packaged extension IDs and can disab… | partial | Partial: Manifest declares management permission, but background script does not… | tests/integration/contracts_browser.mjs |
+| B10 | R registration redirect forwards hash command44, strips hash… | missing | Missing: Does not implement proprietary registration URL redirects (#command44) … | tests/integration/contracts_browser.mjs |
+| B11 | B `Nb/cb`: before-request observes GET/POST, request body, s… | implemented | Implemented: Observes request bodies via webRequest.onBeforeRequest; file upload… | tests/integration/contracts_browser.mjs |
+| B12 | B `Rb`: before-send-headers captures headers, correlates pag… | implemented | Implemented: Request context is keyed by tab ID and URL; Referer and User-Agent … | tests/integration/contracts_browser.mjs |
+| B13 | B `Ub/Hc`: response status, MIME, Content-Disposition, chars… | implemented | Implemented: Captures Content-Type from response headers and preserves UTF-8 fil… | tests/integration/contracts_browser.mjs |
+| B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | partial | Partial: Tracks redirects via webRequest.onBeforeRedirect to propagate request c… | tests/integration/contracts_browser.mjs |
+| B15 | B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path ex… | partial | Partial: Implements wildcard site exclusion rules (*.domain) and storage setting… | tests/integration/contracts_browser.mjs |
+| B16 | B `qb`: onCreated correlates recent request by URL/time (obs… | implemented | Implemented: Correlates downloads using composite tab ID and URL keys with a 60s… | tests/integration/contracts_browser.mjs |
+| B17 | B `rb/lc/X`: filename listener filters then submits type13, … | implemented | Implemented: Defers filename determination via asynchronous handoff, releases th… | tests/integration/contracts_browser.mjs |
+| B18 | B `$a` reply13 maps action and status3 to `kc/O`; accepted C… | implemented | Implemented: Explicitly cancels the browser download upon durable daemon accepta… | tests/integration/contracts_browser.mjs |
+| B19 | B `oa` removes integration listeners; P disconnect-after-sen… | implemented | Implemented: A 10-second timeout resumes browser downloads and releases the sugg… | tests/integration/contracts_browser.mjs |
+| B20 | B `Sb/Tb/O`: completion/error release correlated request; he… | implemented | Implemented: Enforces a 60-second TTL (REQUEST_TTL_MS) and a bounded cache (MAX_… | tests/integration/contracts_browser.mjs |
+| B21 | B `U/V/Dc`: cookies per requested URL, original URL cookies … | implemented | Implemented: Queries URL cookies matching the request context; Firefox queries c… | tests/integration/contracts_browser.mjs |
+| B22 | B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-enc… | implemented | Implemented: Captures URL-encoded form POST bodies up to 1 MiB with repeated fie… | tests/integration/contracts_browser.mjs |
+| B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | partial | Partial: Declares webNavigation permission and collects initiator/documentUrl ac… | tests/integration/contracts_browser.mjs |
+| B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | partial | Partial: Declares proxy permission and provides a basic proxy diagnostic handsha… | tests/integration/contracts_browser.mjs |
+| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | missing | Missing: Content script does not attach keyboard or mouse modifier listeners to … | tests/integration/contracts_browser.mjs |
+| B26 | B `Nb/Mb`, R: configured main-frame registration redirect us… | different | Different: Manifest declares declarativeNetRequest permission, but XDM intention… | tests/integration/contracts_browser.mjs |
+| B27 | B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/… | implemented | Implemented: Restricts interception strictly to valid HTTP(S) protocols; unsuppo… | tests/integration/contracts_browser.mjs |
+| B28 | B `Cb/Ea/pa`: link,image,video context download; page/frame/… | implemented | Implemented: Registers context menus for link, image, media (video/audio), and p… | tests/integration/contracts_browser.mjs |
+| B29 | B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor loo… | implemented | Implemented: Context menu link downloads query the DOM content script via page.g… | tests/integration/contracts_browser.mjs |
+| B30 | B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links c… | missing | Missing: Browser-side batch link collection across frames and selected text is n… | tests/integration/contracts_browser.mjs |
+| B31 | B `ec`: multi-link type15 initialization, count and batch id… | different | Different: Implements batch.submit native messaging with UUID request IDs and it… | tests/integration/contracts_browser.mjs |
+| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | missing | Missing: Does not implement selected-text tracking, coordinate calculation, or f… | tests/integration/contracts_browser.mjs |
+| B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | partial | Partial: Registers a context menu entry for page downloads (xdm-downloads), but … | tests/integration/contracts_browser.mjs |
+| B34 | B `fc`: no host/no links produces browser-side error notific… | implemented | Implemented: Displays a browser notification via chrome.notifications.create whe… | tests/integration/contracts_browser.mjs |
+| B35 | B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, su… | implemented | Implemented: Classifies direct media (MP4, WebM, MP3, etc.) and streaming manife… | tests/integration/contracts_browser.mjs |
+| B36 | B `X`: media detection type13 action discriminator differs p… | implemented | Implemented: Distinguishes streaming manifests (HLS/DASH) from plain file downlo… | tests/integration/contracts_browser.mjs |
+| B37 | B reply13→content19; C `bc`: browser-context fetch with URL/… | implemented | Implemented: Supports in-browser manifest fetching via manifest.fetch message ha… | tests/integration/contracts_browser.mjs |
+| B38 | D `ua/Ka/La/Ja`: configured XHR open/header/send/loadend wra… | implemented | Implemented: Injects page_xhr.js at document_start to intercept streaming media … | tests/integration/contracts_browser.mjs |
+| B39 | D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arra… | implemented | Implemented: Injects page_fetch.js at document_start to monitor window.fetch for… | tests/integration/contracts_browser.mjs |
+| B40 | D message1229212978 config dynamically installs/restores wra… | implemented | Implemented: Reports installed hook capabilities and status via hook.status runt… | tests/integration/contracts_browser.mjs |
+| B41 | D message1229212981 property/selector extraction→1229212982;… | missing | Missing: Content script does not provide DOM property or selector query helpers … | tests/integration/contracts_browser.mjs |
+| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | missing | Missing: Does not implement per-site video adapters, player-specific decoders, o… | tests/integration/contracts_browser.mjs |
+| B43 | C `Tb/H/ib`: video/audio/object/embed/source-child associati… | implemented | Implemented: Scans video, audio, and source elements on initial load and observe… | tests/integration/contracts_browser.mjs |
+| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | missing | Missing: Content script tracks only URLs in a Set without WeakRef player identit… | tests/integration/contracts_browser.mjs |
+| B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | partial | Partial: Suppresses 1x1 tracking pixels using getBoundingClientRect, but lacks f… | tests/integration/contracts_browser.mjs |
+| B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | Partial: Runs content scripts in all frames (all_frames: true), but does not tra… | tests/integration/contracts_browser.mjs |
+| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | missing | Missing: Content script lacks 200ms debouncing, resize observers, intersection o… | tests/integration/contracts_browser.mjs |
+| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | missing | Missing: Does not inject an in-page floating video download panel overlay; media… | tests/integration/contracts_browser.mjs |
+| B49 | B window listeners and `U/sc/pc/Oa`: window registration6, c… | missing | Missing: Does not register browser window listeners for geometry, fullscreen, DP… | tests/integration/contracts_browser.mjs |
+| B50 | B `ab/xb/Ob/xa`: navigation and history changes refresh site… | implemented | Implemented: Clears tab media catalogs and resets badge counts on navigation via… | tests/integration/contracts_browser.mjs |
+| B51 | C `C/$b/ob` + B `ec`: title from top page/og:title, source c… | implemented | Implemented: Derives human-readable media titles from player element titles, doc… | tests/integration/contracts_browser.mjs |
+| B52 | L21130 instructs selecting desired quality in player before … | implemented | Implemented: Manifests are inspected via media.inspect native messaging, enumera… | tests/integration/contracts_browser.mjs |
+| B53 | L21005/21006 audio-only/video-only; mux exports establish se… | implemented | Implemented: Supports audio-only selection via media.submit with videoIndex: -1 … | tests/integration/contracts_browser.mjs |
+| B54 | L21192 incompatible audio/video can leave audio separately; … | implemented | Implemented: Forwards container format choices (e.g. MKV) via media.submit paylo… | tests/integration/contracts_browser.mjs |
+| B55 | L21000/21001 live stop/save and no same-position resume; sub… | implemented | Implemented: Submits stream capture requests via media.submit with task tracking… | tests/integration/contracts_browser.mjs |
+| B56 | B `$a`12/`Ac/mc`: host resource asks browser to locate assoc… | implemented | Implemented: Handles host queries via handleHostPlayerQuery to locate stored med… | tests/integration/contracts_browser.mjs |
+| B57 | B `$a`24/`Dc`: host explicitly requests cookies for URL; res… | implemented | Implemented: Handles host cookie queries via handleHostCookieQuery, returning do… | tests/integration/contracts_browser.mjs |
+| B58 | B `$a`20: host asks proxy comparison/context; reply121/122 a… | implemented | Implemented: Implements handleProxyHandshake to exchange platform and browser id… | tests/integration/contracts_browser.mjs |
+| B59 | B `$a`22/`Ec`: optional notification permission, desktop-sup… | implemented | Implemented: Declares the notifications permission and provides desktop notifica… | tests/integration/contracts_browser.mjs |
+| B60 | B `$a`100: echo family when acknowledgment requested; defaul… | different | Different: Uses versioned, allowlisted JSON operations (version: 1, type: 'downl… | tests/integration/contracts_browser.mjs |
+| B61 | Native host `00402830` startup discovers Windows session/pro… | different | Different: Independent native host registered as org.xdm.browser communicating o… | tests/integration/contracts_browser.mjs |
+| B62 | Standard four-byte native-endian UTF-8 JSON length, outer JS… | different | Different: Uses standard native-messaging JSON framing with a 1 MiB bound and sc… | tests/integration/contracts_browser.mjs |
 | address-refresh | Expired task enters a wait-for-new-session/address flow; one… | partial | task.properties: partial; task.resume: partial; task.wait: partial | — |
 | all-links-and-clipboard | All-link collection can hide HTML/images/duplicates and use … | partial | browser.all_links: pending; settings.general: partial | — |
 | appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | gui.appearance: pending; task.progress: partial | — |
@@ -290,7 +290,13 @@
 | Q08 | One-time start/stop | partial | tests/integration/scheduler.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q09 | Daily/weekday recurrence | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q14 | Completion success/failure/manual-stop rules | partial | tests/integration/completion_actions.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
-| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
-| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B09 | B `Oc` checks competing packaged extension IDs and can disab… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B15 | B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path ex… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 
-**Count: 35**
+**Count: 41**

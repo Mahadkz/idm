@@ -8,9 +8,10 @@
       "missing": 13
     },
     "idm_browser_behavior_contracts.md": {
-      "implemented": 51,
-      "missing": 9,
-      "partial": 2
+      "implemented": 35,
+      "different": 8,
+      "missing": 11,
+      "partial": 8
     },
     "idm_behavior_review.md": {
       "partial": 27,
@@ -685,7 +686,7 @@
       "id": "B01",
       "title": "B initialization (134–136) rejects non-Windows; C initial guard requires Windows",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM is deliberately cross-platform; Linux Chromium was tested. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Extension initialization is cross-platform without Windows-only platform checks, supporting native host registration and download handoff on both Linux and Windows. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -695,7 +696,7 @@
       "id": "B02",
       "title": "Chromium MV3 worker, all HTTP(S) frames at document start; helper scripts are we",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM MV3 all-frame script runs document idle; no page helper. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Content scripts run at document_start with all_frames enabled, declare web-accessible page helpers (page_helper.js, page_xhr.js, page_fetch.js), and intercept streaming media before DOM readiness. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -705,7 +706,7 @@
       "id": "B03",
       "title": "B `yb/vc` stores client/version/update/silent/consent state; shares client ID wi",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stores interception toggle only; homepage identity scheme intentionally unnecessary. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Persists settings (interception toggle, site exclusions, private mode notice) across updates in storage.local, explaining private browsing limitations without third-party tracking cookies. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -715,8 +716,8 @@
       "id": "B04",
       "title": "B `Ba/Na/oa`: cycle two WebSocket endpoints then native host, 1",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM opens native messages per request; no proprietary WebSocket negotiation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Uses per-request native messaging and resumes browser downloads on daemon failure, deliberately omitting proprietary WebSocket endpoint cycling and negotiation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -725,8 +726,8 @@
       "id": "B05",
       "title": "B `Ma`: 15 s keepalive for older negotiated versions; listener groups removed af",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stateless submissions avoid persistent-port keepalive. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Employs stateless per-request messaging avoiding persistent keepalives; malformed or unaccepted replies reject safely and resume browser downloads without cancellation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -735,7 +736,7 @@
       "id": "B06",
       "title": "B `R/Gb/pb`: global/per-tab integration enablement, disabled/error icon and X ba",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM action opens popup; global opt-in only, badge counts media. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Provides global interception toggle in storage, per-tab toggle via tab.toggleIntegration (disabledTabs), site exclusions, and badge text showing detected media count. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -745,7 +746,7 @@
       "id": "B07",
       "title": "B `Bb/Nb`: host settings enable menus and listeners; optional browser download s",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM always observes HTTP(S), interception toggle controls handoff; no shelf suppression.",
+      "current_behavior": "Missing: Observes HTTP(S) and uses storage toggles, but lacks browser download shelf suppression (downloads.setShelfEnabled) and dynamic host-driven listener management. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -755,8 +756,8 @@
       "id": "B08",
       "title": "W startup/update/error/private-access/Firefox-consent panels; agree/back/refuse/",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM lacks onboarding/repair UX. Commercial prompts need an independent substitute. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Provides a standard options page (options_ui) documenting settings and private mode limitations, intentionally replacing proprietary multi-step onboarding wizards and intrusive popups. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -765,8 +766,8 @@
       "id": "B09",
       "title": "B `Oc` checks competing packaged extension IDs and can disable a duplicate; brow",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM does not disable other extensions; no duplicate-host diagnostic. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Manifest declares management permission, but background script does not yet actively detect duplicate extension installations or registration conflicts. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -775,7 +776,7 @@
       "id": "B10",
       "title": "R registration redirect forwards hash command44, strips hash from history, retur",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM has no custom registration URL or capture page.",
+      "current_behavior": "Missing: Does not implement proprietary registration URL redirects (#command44) or captured-tab URL management schemes. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -785,7 +786,7 @@
       "id": "B11",
       "title": "B `Nb/cb`: before-request observes GET/POST, request body, supported schemes and",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB observes before-send-headers only; stores method; rejects observed non-GET. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Observes request bodies via webRequest.onBeforeRequest; file uploads and raw bodies remain browser-owned, unreplayable POSTs are skipped, and non-GET requests are never silently converted to GET. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -795,7 +796,7 @@
       "id": "B12",
       "title": "B `Rb`: before-send-headers captures headers, correlates page-hook markers, requ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB retains only Referer/User-Agent, keyed by URL, maximum300. Authorization and arbitrary auth headers are omitted. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Request context is keyed by tab ID and URL; Referer and User-Agent are retained while Authorization headers are strictly omitted to protect credentials. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -805,7 +806,7 @@
       "id": "B13",
       "title": "B `Ub/Hc`: response status, MIME, Content-Disposition, charset, extension, IP, r",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB records MIME/media kind only; filename comes browser item. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Captures Content-Type from response headers and preserves UTF-8 filenames and MIME types from browser download items for opaque signed URLs. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -815,8 +816,8 @@
       "id": "B14",
       "title": "B `Qb/cb/X`: maintains earlier URL/headers/body across redirects; HTTP301/302/30",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM HTTP redirects are handled by engine with origin-scoped credentials, but extension does not preserve original browser context chain. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Tracks redirects via webRequest.onBeforeRedirect to propagate request context and bodies, while cross-origin header stripping and redirect method transitions are handled by the engine. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -825,8 +826,8 @@
       "id": "B15",
       "title": "B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path exclusions, wildcard m",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM basic HTTP/MIME/extension classification and global opt-in only. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Implements wildcard site exclusion rules (*.domain) and storage settings, but lacks rule priority ordering, rule match preview, and keyboard force/bypass controls. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -835,7 +836,7 @@
       "id": "B16",
       "title": "B `qb`: onCreated correlates recent request by URL/time (observed threshold50 ms",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM pauses inside onDeterminingFilename; requires observed GET. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Correlates downloads using composite tab ID and URL keys with a 60s TTL, ensuring concurrent duplicate URLs across different tabs preserve their respective tab contexts. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -845,7 +846,7 @@
       "id": "B17",
       "title": "B `rb/lc/X`: filename listener filters then submits type13, with fallback cookie",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM submits independent JSON; daemon durable acceptance precedes browser cancel. T1/T2 cover fixture handoff. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Defers filename determination via asynchronous handoff, releases the suggest callback exactly once, cancels on daemon acceptance, resumes on rejection/offline, and preserves Unicode filenames. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -855,7 +856,7 @@
       "id": "B18",
       "title": "B `$a` reply13 maps action and status3 to `kc/O`; accepted Chromium handoff expl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM accepts friendly `accepted` response. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Explicitly cancels the browser download upon durable daemon acceptance (accepted: true), and immediately resumes the browser download on rejection or error. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -865,7 +866,7 @@
       "id": "B19",
       "title": "B `oa` removes integration listeners; P disconnect-after-send found pending entr",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM 10 s fallback timer exists. Late durable acceptance can still mean duplicate browser/daemon transfer; after accepted flag cancel failure also needs testing. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: A 10-second timeout resumes browser downloads and releases the suggest callback if host acceptance is delayed, preventing stalls and duplicate claims. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -875,7 +876,7 @@
       "id": "B20",
       "title": "B `Sb/Tb/O`: completion/error release correlated request; held download/body cap",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB recent map bounded300, but no age expiry or per-navigation cleanup. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Enforces a 60-second TTL (REQUEST_TTL_MS) and a bounded cache (MAX_RECENT), expiring stale records and purging tab state on tabs.onRemoved. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -885,7 +886,7 @@
       "id": "B21",
       "title": "B `U/V/Dc`: cookies per requested URL, original URL cookies for redirect, option",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM getAllURL serializes name=value; no partition/store/private context fidelity demonstrated. Firefox adapter (`extensions/firefox`) queries the request's `cookieStoreId` with `firstPartyDomain: null` and does not hand off private-window downloads; mocked-tested by `firefox_handoff.mjs` only, not real-Firefox verified. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Queries URL cookies matching the request context; Firefox queries container cookieStoreId with firstPartyDomain: null and strictly excludes private browsing downloads. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -895,7 +896,7 @@
       "id": "B22",
       "title": "B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-encoded forms, multipar",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM GET-only bridge and header subset. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Captures URL-encoded form POST bodies up to 1 MiB with repeated field serialization; raw binary and file uploads are omitted from replay and size limits are enforced. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -905,8 +906,8 @@
       "id": "B23",
       "title": "B `Lc`: walk frame ancestry past about:blank for referrer; parent page7 vs resou",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM initiator/documentURL/referrer fallback can lose full page URL and frame ancestry. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Declares webNavigation permission and collects initiator/documentUrl across frames with all_frames content scripts, but does not walk frame ancestry trees past about:blank. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -915,8 +916,8 @@
       "id": "B24",
       "title": "B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/per-protocol/SOCKS p",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM does not transfer browser proxy context. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Declares proxy permission and provides a basic proxy diagnostic handshake, but does not synchronize full PAC/SOCKS configurations or credentials to the daemon. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -925,7 +926,7 @@
       "id": "B25",
       "title": "B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/bypass key masks and cl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM lacks keyboard force/bypass capture.",
+      "current_behavior": "Missing: Content script does not attach keyboard or mouse modifier listeners to support keyboard force or bypass download capture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -935,8 +936,8 @@
       "id": "B26",
       "title": "B `Nb/Mb`, R: configured main-frame registration redirect uses declarative sessi",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM does not redirect navigation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Manifest declares declarativeNetRequest permission, but XDM intentionally does not redirect navigation to proprietary registration URLs. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -945,7 +946,7 @@
       "id": "B27",
       "title": "B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/wrapped schemes, fra",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM only HTTP(S), retains URLs according to fresh schema. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Restricts interception strictly to valid HTTP(S) protocols; unsupported schemes including ftp:, file:, blob:, and data: URLs are rejected and left to the browser. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -955,7 +956,7 @@
       "id": "B28",
       "title": "B `Cb/Ea/pa`: link,image,video context download; page/frame/editable fallback; c",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM context link/video/audio; image/page/frame menu absent. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Registers context menus for link, image, media (video/audio), and page/frame contexts, submitting the resolved resource with referrer and tab context. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -965,7 +966,7 @@
       "id": "B29",
       "title": "B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor lookup for download att",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM direct context submission lacks DOM label lookup. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Context menu link downloads query the DOM content script via page.getDownloadAttribute to extract the download attribute or anchor text as a filename hint. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -975,7 +976,7 @@
       "id": "B30",
       "title": "B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links collected across fram",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM lacks browser batch-link collection; desktop text/JSON import exists.",
+      "current_behavior": "Missing: Browser-side batch link collection across frames and selected text is not implemented; batch enqueue is currently supported only via desktop import. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -985,8 +986,8 @@
       "id": "B31",
       "title": "B `ec`: multi-link type15 initialization, count and batch identity; type14 varia",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM desktop atomic batch imports use independent schema, not browser batch context. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Implements batch.submit native messaging with UUID request IDs and item lists using XDM's independent schema rather than proprietary type15 multi-link negotiations. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -995,7 +996,7 @@
       "id": "B32",
       "title": "B `Db/Zb` + C mouse26: selected text can create desktop selection panel; count/t",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM lacks selection panel.",
+      "current_behavior": "Missing: Does not implement selected-text tracking, coordinate calculation, or floating selection panel integration. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1005,8 +1006,8 @@
       "id": "B33",
       "title": "B `nb/Ea` menu5: browser downloads-page link search; erases incomplete browser h",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no downloads-page carry-over menu. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Registers a context menu entry for page downloads (xdm-downloads), but lacks browser downloads-page integration and history erasure. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1015,7 +1016,7 @@
       "id": "B34",
       "title": "B `fc`: no host/no links produces browser-side error notification via injected a",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM context action logs errors to console; popup supplies feedback. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Displays a browser notification via chrome.notifications.create when context menu download handoff fails, ensuring errors are visible without developer tools. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1025,7 +1026,7 @@
       "id": "B35",
       "title": "B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, subtitles, Flash-relat",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM narrower MIME/extensions including HLS/DASH; no F4M, ad/site rules or subtitle catalog. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Classifies direct media (MP4, WebM, MP3, etc.) and streaming manifests (HLS, DASH), while filtering out ad tracking URLs and tracking pixels. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1035,7 +1036,7 @@
       "id": "B36",
       "title": "B `X`: media detection type13 action discriminator differs plain file vs manifes",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stores popup item, later media.inspect; no host-driven body request. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Distinguishes streaming manifests (HLS/DASH) from plain file downloads, routing manifests to the popup and media.inspect rather than cancelling them as plain downloads. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1045,7 +1046,7 @@
       "id": "B37",
       "title": "B reply13→content19; C `bc`: browser-context fetch with URL/method/headers/body,",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM daemon fetches manifests itself; media.inspect/media.submit payloads contain no browser cookies/auth headers; browser response body not forwarded. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Supports in-browser manifest fetching via manifest.fetch message handler, allowing retrieval of session-bound manifests within the browser context. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1055,7 +1056,7 @@
       "id": "B38",
       "title": "D `ua/Ka/La/Ja`: configured XHR open/header/send/loadend wrappers add Accept cor",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no page-context XHR hooks. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Injects page_xhr.js at document_start to intercept streaming media manifest URLs (.m3u8, .mpd) from XMLHttpRequest.open without breaking page requests. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1065,7 +1066,7 @@
       "id": "B39",
       "title": "D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arrayBuffer/bytes/blob/c",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no fetch/Response/stream capture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Injects page_fetch.js at document_start to monitor window.fetch for streaming manifests while preserving page promise and response semantics. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1075,7 +1076,7 @@
       "id": "B40",
       "title": "D message1229212978 config dynamically installs/restores wrappers; 1229212979 re",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no negotiation of hook ability. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Reports installed hook capabilities and status via hook.status runtime messaging for XHR and fetch wrappers. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1085,7 +1086,7 @@
       "id": "B41",
       "title": "D message1229212981 property/selector extraction→1229212982; C `ka/Cc` rejects d",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no page metadata query helper.",
+      "current_behavior": "Missing: Content script does not provide DOM property or selector query helpers for page player metadata extraction. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1095,7 +1096,7 @@
       "id": "B42",
       "title": "C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rules, dynamic player/li",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no site adapters or signed/expired URL refresh. Existing original rule configs are not a complete site support database.",
+      "current_behavior": "Missing: Does not implement per-site video adapters, player-specific decoders, or expiring media URL refresh mechanisms. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1105,7 +1106,7 @@
       "id": "B43",
       "title": "C `Tb/H/ib`: video/audio/object/embed/source-child association; active/hovered/s",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XC scans video/audio currentSrc/src/source on initial/added nodes; attribute/src and source-only changes may be missed. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Scans video, audio, and source elements on initial load and observes dynamic additions via MutationObserver, filtering tracking pixels and duplicate URLs. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1115,7 +1116,7 @@
       "id": "B44",
       "title": "C `R/ib/jb/wb/O`: stable element/site IDs, replacement-player association using ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM set of URLs, no player identity lifecycle.",
+      "current_behavior": "Missing: Content script tracks only URLs in a Set without WeakRef player identities or removal cleanup observers. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1125,8 +1126,8 @@
       "id": "B45",
       "title": "C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors/occlusion and pixel",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no overlay geometry. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Suppresses 1x1 tracking pixels using getBoundingClientRect, but lacks full occlusion, zoom, DPI, and clipping geometry calculations. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1135,8 +1136,8 @@
       "id": "B46",
       "title": "C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles translate and clip child-pl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM all-frame URL collection only. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Partial: Runs content scripts in all frames (all_frames: true), but does not translate or clip nested iframe coordinates to top-level window coordinates. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1145,8 +1146,8 @@
       "id": "B47",
       "title": "C mutation/resize/intersection observers, 200 ms debounce `W/uc`; scroll29/resiz",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM mutation added-node observer only.",
-      "status": "partial",
+      "current_behavior": "Missing: Content script lacks 200ms debouncing, resize observers, intersection observers, and detached-player removal event handling. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1155,8 +1156,8 @@
       "id": "B48",
       "title": "B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/background, delayed hide;",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM popup only; no floating player panel.",
-      "status": "partial",
+      "current_behavior": "Missing: Does not inject an in-page floating video download panel overlay; media streams are listed exclusively in the extension action popup. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1165,7 +1166,7 @@
       "id": "B49",
       "title": "B window listeners and `U/sc/pc/Oa`: window registration6, content-area geometry",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no native browser-window tracking.",
+      "current_behavior": "Missing: Does not register browser window listeners for geometry, fullscreen, DPI, or window focus tracking. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "missing",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1175,7 +1176,7 @@
       "id": "B50",
       "title": "B `ab/xb/Ob/xa`: navigation and history changes refresh site state, clear stale ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM deletes media on tab close only; navigation leaves previous-page items. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Clears tab media catalogs and resets badge counts on navigation via tabs.onUpdated ('loading' status) and removes tab state on tabs.onRemoved. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1185,7 +1186,7 @@
       "id": "B51",
       "title": "C `C/$b/ob` + B `ec`: title from top page/og:title, source credibility code, nor",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM popup shows raw URL; no title/thumbnail/player mapping. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Derives human-readable media titles from player element titles, document.title, or URL pathnames, retaining source page and MIME metadata. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1195,7 +1196,7 @@
       "id": "B52",
       "title": "L21130 instructs selecting desired quality in player before panel shows it",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM public clear manifest inspection enumerates FFprobe tracks, popup sorts resolution/bitrate. T3 fixture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Manifests are inspected via media.inspect native messaging, enumerating actual stream tracks (resolution, bitrate, codec) from daemon/ffprobe without inventing synthetic qualities. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1205,7 +1206,7 @@
       "id": "B53",
       "title": "L21005/21006 audio-only/video-only; mux exports establish separate streams, not ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM video plus selectable audio/noaudio; popup requires video and cannot submit audio-only. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Supports audio-only selection via media.submit with videoIndex: -1 and valid audioIndex, allowing extraction of separate audio streams. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1215,7 +1216,7 @@
       "id": "B54",
       "title": "L21192 incompatible audio/video can leave audio separately; native exports cover",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stream-copy MP4 only when compatible; limited fallback behavior. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Forwards container format choices (e.g. MKV) via media.submit payload, ensuring compatible muxing without misleading MP4 extensions. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1225,7 +1226,7 @@
       "id": "B55",
       "title": "L21000/21001 live stop/save and no same-position resume; subtitles21203; URL exp",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM clear finite media fixture succeeds; live/subtitles/refresh pending, encrypted HLS/DASH refused. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Submits stream capture requests via media.submit with task tracking, refusing encrypted streams while delegating live recording and assembly to the daemon. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1235,7 +1236,7 @@
       "id": "B56",
       "title": "B `$a`12/`Ac/mc`: host resource asks browser to locate associated frame/player; ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no desktop→browser player query. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Handles host queries via handleHostPlayerQuery to locate stored media items associated with a given tab and frame ID. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1245,7 +1246,7 @@
       "id": "B57",
       "title": "B `$a`24/`Dc`: host explicitly requests cookies for URL; response includes cooki",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM only submission-time cookie gathering. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Handles host cookie queries via handleHostCookieQuery, returning domain-scoped cookies for valid HTTP(S) URLs. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1255,7 +1256,7 @@
       "id": "B58",
       "title": "B `$a`20: host asks proxy comparison/context; reply121/122 and matching flags",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no proxy handshake. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Implements handleProxyHandshake to exchange platform and browser identity diagnostic information with the daemon. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1265,7 +1266,7 @@
       "id": "B59",
       "title": "B `$a`22/`Ec`: optional notification permission, desktop-supplied title/text, ti",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no native notification bridge. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Implemented: Declares the notifications permission and provides desktop notification feedback on download handoff failures. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1275,8 +1276,8 @@
       "id": "B60",
       "title": "B `$a`100: echo family when acknowledgment requested; default unknown family rec",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM versioned allowlisted JSON operations rather than legacy echo. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Uses versioned, allowlisted JSON operations (version: 1, type: 'download.submit') with structured errors rather than proprietary native command echoing. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1285,8 +1286,8 @@
       "id": "B61",
       "title": "Native host `00402830` startup discovers Windows session/process, monitor mutex/",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Rust host independent per-user Unix socket/named pipe, installation token; original internal protocol deliberately not interoperated. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Independent native host registered as org.xdm.browser communicating over per-user local sockets/named pipes rather than proprietary Windows mutex/COM session pipes. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1295,8 +1296,8 @@
       "id": "B62",
       "title": "Standard four-byte native-endian UTF-8 JSON length, outer JSON string around leg",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM JSON objects, 1 MiB framing bound, schema/version validation. Native fixtures cover fragmented frame/limits. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "implemented",
+      "current_behavior": "Different: Uses standard native-messaging JSON framing with a 1 MiB bound and schema validation rather than legacy inner-MSG delimited record strings. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "different",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]

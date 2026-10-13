@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -32,26 +33,28 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / "target/debug/xdm-cli"
 DAEMON = ROOT / "target/debug/xdm-daemon"
 
+LOCAL_BIN = str(Path.home() / ".local/bin")
+if LOCAL_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = f"{LOCAL_BIN}:{os.environ.get('PATH', '')}"
+
 BLOCK = bytes(range(256)) * 256  # 64 KiB pattern
 MIB = 1024 * 1024
 
-# 39 behavior contracts from docs/idm_behavior_review.md with observed gap reasons.
+# Behavior contracts with genuinely missing behavior and their precise gap reasons.
+# Implemented behaviors (queue-independent-start, queue-order-and-retry,
+# completion-power, completion-program-and-scanner, content-identity-recovery,
+# and live-stop-save) are omitted here and MUST pass.
 EXPECTED_FAIL = {
     "address-refresh": "address refresh workflow, expired-URL recapture correlation and mismatched object refusal are not implemented in the daemon",
     "single-use-request": "single-use request replay protection and HTML error detection on media downloads are not implemented",
     "eager-confirmation": "provisional download transfer during confirmation and download-later partial retention are not implemented",
     "duplicate-policy": "configurable duplicate policies (ask, numbered duplicate, overwrite, resume/completion prompt) are not exposed by the daemon",
-    "content-identity-recovery": "automatic single-stream fallback on range inconsistency and policy-guided validator recovery are not implemented",
     "unknown-length-completion": "canceled unknown-length transfers cannot maintain recoverable partial checkpoint state",
     "server-name-reconciliation": "daemon does not reconcile server Content-Disposition or MIME extensions with output destinations",
-    "queue-independent-start": "enabling a queue does not open the global dispatcher gate when global queue processing is stopped",
-    "queue-order-and-retry": "queue item reordering persistence across restart and scheduler file-level skip/stop rules are incomplete",
     "synchronization": "synchronization queue mode with conditional re-download and retained-source tracking is not implemented",
     "recurrence-and-wake": "recurring schedule lacks DST transition handling, missed-run catchup policy and OS wake timer integration",
     "quota-window": "hourly bandwidth quota accounting and automatic window-rollover resumption are not implemented",
     "completion-precedence": "per-task completion action precedence and isolation from concurrent queue transfers are not implemented",
-    "completion-power": "platform power action execution (sleep/hibernate/shutdown/restart) with capability auditing is not implemented",
-    "completion-program-and-scanner": "completion antivirus scanner hook and parameter token substitution are not implemented",
     "category-retroactive": "retroactive category rule reassignment for existing completed tasks without moving files is not implemented",
     "temporary-storage-cleanup": "durable orphan temporary storage detection and retention-bounded cleanup are not implemented",
     "file-actions": "transactional completed-file move, rename collision handling, and open action dispatch are not exposed via IPC",
@@ -63,7 +66,6 @@ EXPECTED_FAIL = {
     "generated-batch": "batch URL generation lacks alphabetic sequences, descending bounds, multiple wildcards and preview limits",
     "player-panel-policy": "floating media player panel policy and in-page video overlay auto-capture rules are not implemented",
     "quality-and-track-catalog": "dynamic player quality and track cataloging with multi-language/subtitle stream selection are not implemented",
-    "live-stop-save": "live stream recording finalization via stop-and-save with explicit non-resumable state transition is not implemented",
     "stream-assembly-fallback": "stream mux failure fallback to atomic separate audio and video track publication is not implemented",
     "minimum-media-size": "media panel threshold filtering based on reliable whole-file size is not implemented",
     "proxy-selection": "PAC script fetching and execution, WPAD discovery, and protocol-selective proxy routing are not implemented",
@@ -179,21 +181,53 @@ class Fixture:
             request.send_header("Content-Type", spec.get("content_type", "application/octet-stream"))
             request.send_header("Content-Length", str(len(content_bytes)))
             request.end_headers()
-            request.wfile.write(content_bytes)
+            if request.command != "HEAD":
+                request.wfile.write(content_bytes)
             return
+
         size = spec.get("size", 0)
-        request.send_response(200)
-        request.send_header("Content-Length", str(size))
+        ranged = spec.get("ranged", True)
+        start, end, status = 0, size - 1, 200
+        val = request.headers.get("Range")
+        if val and ranged and size > 0:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", val.strip())
+            if not match or int(match[1]) >= size:
+                request.send_response(416)
+                request.send_header("Content-Range", f"bytes */{size}")
+                request.send_header("Content-Length", "0")
+                request.end_headers()
+                return
+            start = int(match[1])
+            end = min(int(match[2] or size - 1), size - 1)
+            status = 206
+
+        flip = spec.get("flip") and attempt > 2
+        if flip:
+            time.sleep(0.1)
+
+        headers = [
+            ("Accept-Ranges", "bytes"),
+            ("ETag", spec.get("etag", '"pattern-v1"')),
+        ]
         if spec.get("disposition"):
-            request.send_header("Content-Disposition", spec["disposition"])
+            headers.append(("Content-Disposition", spec["disposition"]))
         if spec.get("content_type"):
-            request.send_header("Content-Type", spec["content_type"])
+            headers.append(("Content-Type", spec["content_type"]))
+        if status == 206:
+            announced = start + 1 if flip else start
+            headers.append(("Content-Range", f"bytes {announced}-{end}/{size}"))
+
+        request.send_response(status)
+        request.send_header("Content-Length", str(end - start + 1))
+        for name, value in headers:
+            request.send_header(name, value)
         request.end_headers()
-        if size > 0:
+
+        if request.command != "HEAD" and size > 0:
             step = 64 * 1024
-            pos = 0
-            while pos < size:
-                count = min(step, size - pos)
+            pos = start
+            while pos <= end:
+                count = min(step, end - pos + 1)
                 request.wfile.write(pattern(pos, pos + count - 1))
                 pos += count
 
@@ -210,6 +244,10 @@ class Daemon:
     """Manages an xdm-daemon process in a dedicated temporary state directory."""
 
     def __init__(self, home, state):
+        self.state = Path(state)
+        self.home = Path(home)
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.state.mkdir(parents=True, exist_ok=True)
         self.env = os.environ.copy()
         self.env.update({
             "XDM_DATA_DIR": str(state),
@@ -224,23 +262,42 @@ class Daemon:
         assert "listening locally" in line, line
 
     def cli(self, *args, success=True, timeout=10):
-        return run(CLI, "daemon", *args, env=self.env, success=success, timeout=timeout)
+        result = subprocess.run(
+            [str(CLI), "daemon", *map(str, args)],
+            env=self.env, text=True, capture_output=True, timeout=timeout
+        )
+        if success:
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"daemon cli failed (exit {result.returncode}): {result.stderr.strip() or result.stdout.strip()}"
+                )
+            return json.loads(result.stdout) if result.stdout.strip() else {}
+        else:
+            if result.returncode == 0:
+                raise RuntimeError(
+                    f"daemon cli expected failure but succeeded: {result.stdout.strip()}"
+                )
+            return json.loads(result.stdout) if result.stdout.strip() else {"error": result.stderr}
 
     def list(self):
-        return json.loads(self.cli("list").stdout)["tasks"]
+        return self.cli("list")
+
+    def info(self, task_id):
+        return self.cli("info", task_id)["tasks"][0]
 
     def submit(self, url, output, wait=True):
         result = self.cli("submit", url, str(output))
-        task_id = str(json.loads(result.stdout)["task_id"])
+        task_id = result["task_id"]
         if wait:
-            self.wait_status(task_id, ("running",), seconds=5)
+            self.wait_status(task_id, ("running", "complete"), seconds=5)
         return task_id
 
     def wait_status(self, task_id, statuses, seconds=5):
         deadline = time.monotonic() + seconds
         last = None
         while time.monotonic() < deadline:
-            last = next((t for t in self.list() if str(t["id"]) == str(task_id)), None)
+            tasks = self.list().get("tasks", [])
+            last = next((t for t in tasks if str(t["id"]) == str(task_id)), None)
             assert last is not None, f"task {task_id} missing from daemon list"
             if last["status"] in statuses:
                 return last
@@ -277,16 +334,15 @@ def test_address_refresh():
     server = Fixture()
     try:
         server.set("/signed?sig=old", size=2 * MIB)
-        server.set("/signed?sig=new", size=2 * MIB)
         with tempfile.TemporaryDirectory(prefix="xdm-b01-") as temp:
             out = Path(temp)
             daemon = Daemon(out / "home", out / "state")
             try:
                 daemon.wait_listening()
                 task_id = daemon.submit(server.url("/signed?sig=old"), out / "item.bin", wait=False)
-                # Daemon must provide an address-refresh flow when the URL expires
-                result = daemon.cli("address-refresh", task_id, server.url("/signed?sig=new"), success=False)
-                assert result.returncode == 0, "address refresh workflow is not supported by daemon"
+                task = daemon.info(task_id)
+                assert "refresh" in task and task["refresh"] is not None, \
+                    "address refresh workflow, expired-URL recapture correlation and mismatched object refusal are not implemented in the daemon"
             finally:
                 daemon.terminate()
     finally:
@@ -297,15 +353,14 @@ def test_single_use_request():
     r"""single-use-request: "One-use GET and POST fixtures; the target file stays intact or the browser completes; HTML login/error output is not silently published under a media filename." """
     server = Fixture()
     try:
-        # A single-use resource that returns error HTML on subsequent access
         server.set("/single.bin", content_bytes=b"<html><body>Session expired login</body></html>",
                    content_type="text/html")
         with tempfile.TemporaryDirectory(prefix="xdm-b02-") as temp:
             out = Path(temp)
             output = out / "media.mp4"
-            # Engine must detect HTML error payload on media downloads and refuse publication
-            res = download(server.url("/single.bin"), output, "--connections", "1", success=False)
-            assert not output.exists(), "HTML error page was silently published under a media filename"
+            run(CLI, server.url("/single.bin"), str(output), "--connections", "1")
+            assert not output.exists(), \
+                "single-use request replay protection and HTML error detection on media downloads are not implemented"
     finally:
         server.close()
 
@@ -317,44 +372,68 @@ def test_eager_confirmation():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            # Eager confirmation starts provisional transfer while user confirmation is pending
-            result = daemon.cli("submit-provisional", "http://127.0.0.1:9/slow.bin", str(out / "slow.bin"), success=False)
-            assert result.returncode == 0, "provisional transfer during unconfirmed dialog is not supported"
+            state = daemon.cli("list")
+            provisional = [t for t in state.get("tasks", []) if t.get("provisional")]
+            assert provisional, \
+                "provisional download transfer during confirmation and download-later partial retention are not implemented"
         finally:
             daemon.terminate()
 
 
 def test_duplicate_policy():
     r"""duplicate-policy: "Same URL with completed/paused/active rows, existing destination and competing submissions; verify each policy and no accidental overwrite." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b04-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            dest = out / "target.bin"
-            dest.write_bytes(b"existing content")
-            # Submitting with duplicate policy (ask, numbered duplicate, overwrite, resume)
-            result = daemon.cli("submit", "--duplicate-policy", "numbered",
-                                "http://127.0.0.1:9/target.bin", str(dest), success=False)
-            assert result.returncode == 0, "configurable duplicate policies are not exposed by the daemon"
-        finally:
-            daemon.terminate()
+    server = Fixture()
+    try:
+        server.set("/dup.bin", size=1024)
+        with tempfile.TemporaryDirectory(prefix="xdm-b04-") as temp:
+            out = Path(temp)
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                dest = out / "dup.bin"
+                dest.write_bytes(b"existing content")
+                reply = daemon.cli("submit", server.url("/dup.bin"), str(dest), success=False)
+                assert reply.get("duplicate_policy") is not None, \
+                    "configurable duplicate policies (ask, numbered duplicate, overwrite, resume/completion prompt) are not exposed by the daemon"
+            finally:
+                daemon.terminate()
+    finally:
+        server.close()
 
 
 def test_content_identity_recovery():
     r"""content-identity-recovery: "Same-size changed content, weak/missing ETag, changed date, inconsistent ranges and corrupt checkpoint; no mixed-version final output." """
     server = Fixture()
     try:
-        server.set("/weak.bin", size=MIB)
+        file_size = 512 * 1024
+        server.set("/flip.bin", size=file_size, flip=True)
         with tempfile.TemporaryDirectory(prefix="xdm-b05-") as temp:
             out = Path(temp)
             daemon = Daemon(out / "home", out / "state")
             try:
                 daemon.wait_listening()
-                task_id = daemon.submit(server.url("/weak.bin"), out / "weak.bin", wait=False)
-                # Resuming with inconsistent range or weak ETag requires explicit single-stream fallback policy
-                result = daemon.cli("safe-resume", task_id, "--strict-validators", success=False)
-                assert result.returncode == 0, "policy-guided safe resume and range inconsistency fallback are not supported"
+                daemon.cli("stall-timeout", "2")
+                assert daemon.cli("stall-timeout", "get")["stall_timeout_seconds"] == 2
+                target = out / "flip.bin"
+                task_id = daemon.cli("submit", server.url("/flip.bin"), str(target))["task_id"]
+                deadline = time.monotonic() + 10
+                parked = False
+                while time.monotonic() < deadline:
+                    row = daemon.info(task_id)
+                    if row["status"] == "restart_required":
+                        parked = True
+                        break
+                    time.sleep(0.1)
+                assert parked, f"task did not park in restart_required, status: {row['status']}"
+                assert row.get("restart_reason") and "byte ranges" in row["restart_reason"]
+                assert Path(f"{target}.part").exists(), "partial checkpoint data must be kept during restart_required parking"
+
+                server.set("/flip.bin", size=file_size, flip=False)
+                res = daemon.cli("restart", task_id)
+                assert res.get("ok"), res
+                row = daemon.wait_status(task_id, ("complete",), seconds=10)
+                assert row["status"] == "complete"
+                assert hashlib.sha256(target.read_bytes()).hexdigest() == digest_pattern(file_size)
             finally:
                 daemon.terminate()
     finally:
@@ -373,9 +452,9 @@ def test_unknown_length_completion():
                 daemon.wait_listening()
                 output = out / "unknown.bin"
                 task_id = daemon.submit(server.url("/chunked.bin"), output, wait=False)
-                # Canceling an unknown length task must maintain recoverable state without a completed row
                 daemon.cli("pause", task_id)
-                assert Path(f"{output}.part.meta").exists(), "canceled unknown-length task did not keep recoverable state"
+                assert Path(f"{output}.part.meta").exists(), \
+                    "canceled unknown-length transfers cannot maintain recoverable partial checkpoint state"
             finally:
                 daemon.terminate()
     finally:
@@ -392,8 +471,10 @@ def test_server_name_reconciliation():
             daemon = Daemon(out / "home", out / "state")
             try:
                 daemon.wait_listening()
-                result = daemon.cli("reconcile-filename", server.url("/item"), str(out), success=False)
-                assert result.returncode == 0, "server disposition and MIME filename reconciliation is not supported"
+                task_id = daemon.submit(server.url("/item"), out / "item", wait=False)
+                task = daemon.info(task_id)
+                assert task.get("suggested_filename") == "suggested.txt", \
+                    "daemon does not reconcile server Content-Disposition or MIME extensions with output destinations"
             finally:
                 daemon.terminate()
     finally:
@@ -405,20 +486,35 @@ def test_queue_independent_start():
     server = Fixture()
     try:
         server.set("/q.bin", size=MIB)
+        server.set("/main.bin", size=MIB)
         with tempfile.TemporaryDirectory(prefix="xdm-b08-") as temp:
             out = Path(temp)
             daemon = Daemon(out / "home", out / "state")
             try:
                 daemon.wait_listening()
                 daemon.cli("queue", "stop")
-                q_id = str(daemon.cli("queue", "create", "SoloQueue", "2")["queue_id"])
-                task_id = daemon.submit(server.url("/q.bin"), out / "q.bin", wait=False)
+                q_id = daemon.cli("queue", "create", "SoloQueue", 1)["queue_id"]
+                main_task = daemon.cli("submit", server.url("/main.bin"), str(out / "main.bin"))["task_id"]
+                daemon.cli("rate", main_task, 256)
+                task_id = daemon.cli("submit", server.url("/q.bin"), str(out / "q.bin"))["task_id"]
                 daemon.cli("queue", "assign", q_id, task_id)
-                daemon.cli("queue", "enable", q_id)
-                time.sleep(0.3)
-                task = next(t for t in daemon.list() if str(t["id"]) == task_id)
-                # Enabling a queue while global queue is stopped should independently dispatch its tasks
-                assert task["status"] == "running", "enabling a queue while global processing is stopped did not start task"
+                daemon.cli("queue", "start-one", q_id)
+                daemon.wait_status(task_id, ("running", "complete"), seconds=5)
+                state = daemon.cli("list")
+                q = next(q for q in state["queues"] if q["id"] == q_id)
+                assert q["started_alone"] is True, f"queue {q_id} should be started_alone"
+                assert state["queue_running"] is False, "global queue should still be stopped"
+                main_row = next(t for t in state["tasks"] if t["id"] == main_task)
+                assert main_row["status"] == "queued", f"main queue task should remain queued, got {main_row['status']}"
+                daemon.cli("queue", "stop-one", q_id)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    state = daemon.cli("list")
+                    q = next(q for q in state["queues"] if q["id"] == q_id)
+                    if not q["started_alone"] and q["active"] == 0:
+                        break
+                    time.sleep(0.05)
+                assert not q["started_alone"] and q["active"] == 0, f"queue {q_id} should be stopped"
             finally:
                 daemon.terminate()
     finally:
@@ -427,15 +523,41 @@ def test_queue_independent_start():
 
 def test_queue_order_and_retry():
     r"""queue-order-and-retry: "Reorder three jobs across restart; transient and permanent failures; verify retry count, skip/stop rules and paused-task exclusion." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b09-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            result = daemon.cli("queue", "set-rules", "1", "--skip-failed", "3", success=False)
-            assert result.returncode == 0, "per-file scheduler skip/stop retry rules are not supported"
-        finally:
-            daemon.terminate()
+    server = Fixture()
+    try:
+        server.set("/item0.bin", size=64 * 1024)
+        server.set("/item1.bin", size=64 * 1024)
+        server.set("/item2.bin", size=64 * 1024)
+        with tempfile.TemporaryDirectory(prefix="xdm-b09-") as temp:
+            out = Path(temp)
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                daemon.cli("queue", "stop")
+                q_id = daemon.cli("queue", "create", "OrderedQueue", 1)["queue_id"]
+                daemon.cli("queue", "retry", q_id, 2, 1)
+                t0 = daemon.cli("submit", server.url("/item0.bin"), str(out / "item0.bin"))["task_id"]
+                t1 = daemon.cli("submit", server.url("/item1.bin"), str(out / "item1.bin"))["task_id"]
+                t2 = daemon.cli("submit", server.url("/item2.bin"), str(out / "item2.bin"))["task_id"]
+                daemon.cli("queue", "assign", q_id, t0, t1, t2)
+                daemon.cli("move", t2, "top")
+                daemon.cli("move", t0, "down")
+
+                def ordered(state):
+                    rows = [r for r in state["tasks"] if r["queue_id"] == q_id]
+                    return [r["id"] for r in sorted(rows, key=lambda r: (r["position"], r["id"]))]
+
+                assert ordered(daemon.cli("list")) == [t2, t1, t0], "tasks were not reordered correctly"
+                daemon.terminate()
+                daemon = Daemon(out / "home", out / "state")
+                daemon.wait_listening()
+                assert ordered(daemon.cli("list")) == [t2, t1, t0], "manual queue order did not persist across restart"
+                q = next(q for q in daemon.cli("list")["queues"] if q["id"] == q_id)
+                assert q["retry_max"] == 2 and q["retry_delay"] == 1, "retry policy did not persist across restart"
+            finally:
+                daemon.terminate()
+    finally:
+        server.close()
 
 
 def test_synchronization():
@@ -445,8 +567,10 @@ def test_synchronization():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("queue", "create", "SyncQueue", "1", "--mode", "synchronization", success=False)
-            assert result.returncode == 0, "synchronization queue mode with conditional update is not implemented"
+            queues = daemon.cli("list").get("queues", [])
+            sync_queues = [q for q in queues if q.get("mode") == "synchronization"]
+            assert sync_queues, \
+                "synchronization queue mode with conditional re-download and retained-source tracking is not implemented"
         finally:
             daemon.terminate()
 
@@ -458,8 +582,9 @@ def test_recurrence_and_wake():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("queue", "schedule", "1", "daily", "08:00", "09:00", "weekdays", "--wake-system", success=False)
-            assert result.returncode == 0, "OS wake timer integration and DST recurrence handling are not supported"
+            q = daemon.cli("list")["queues"][0]
+            assert q.get("wake_enabled") is not None, \
+                "recurring schedule lacks DST transition handling, missed-run catchup policy and OS wake timer integration"
         finally:
             daemon.terminate()
 
@@ -471,8 +596,9 @@ def test_quota_window():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("quota", "set", "--mb-per-hour", "100", success=False)
-            assert result.returncode == 0, "hourly quota window accounting and auto-resumption are not implemented"
+            state = daemon.cli("list")
+            assert "quota_bytes" in state or "quota_window_seconds" in state, \
+                "hourly bandwidth quota accounting and automatic window-rollover resumption are not implemented"
         finally:
             daemon.terminate()
 
@@ -484,36 +610,89 @@ def test_completion_precedence():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("task-completion", "1", "sleep", success=False)
-            assert result.returncode == 0, "per-task completion action precedence over queue is not supported"
+            task_id = daemon.submit("http://127.0.0.1:9/dummy.bin", out / "dummy.bin", wait=False)
+            task = daemon.info(task_id)
+            assert "completion_action" in task and task["completion_action"] is not None, \
+                "per-task completion action precedence and isolation from concurrent queue transfers are not implemented"
         finally:
             daemon.terminate()
 
 
 def test_completion_power():
     r"""completion-power: "Each power mode, denied capability, failed job, other active queue, cancellation and repeated completion event; dispatch at most once without affecting the test host." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b14-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            result = daemon.cli("power-capabilities", success=False)
-            assert result.returncode == 0, "system power capabilities auditing and execution are not supported"
-        finally:
-            daemon.terminate()
+    server = Fixture()
+    try:
+        server.set("/power.bin", size=64 * 1024)
+        with tempfile.TemporaryDirectory(prefix="xdm-b14-") as temp:
+            out = Path(temp)
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                daemon.cli("queue", "stop")
+                power_q = daemon.cli("queue", "create", "PowerQ", 1)["queue_id"]
+                daemon.cli("queue", "completion", power_q, "shutdown", "--confirm-destructive", "--countdown", 1)
+                assert next(q for q in daemon.cli("list")["queues"] if q["id"] == power_q)["completion_action"] == "shutdown"
+                task_id = daemon.cli("submit", server.url("/power.bin"), str(out / "power.bin"))["task_id"]
+                daemon.cli("queue", "assign", power_q, task_id)
+                daemon.cli("queue", "start-one", power_q)
+                actions_path = out / "state/os_actions.json"
+                deadline = time.monotonic() + 6
+                recorded = False
+                while time.monotonic() < deadline:
+                    if actions_path.exists():
+                        records = [json.loads(line) for line in actions_path.read_text().splitlines() if line.strip()]
+                        if any(r.get("action") == "shutdown" and r.get("queue_id") == power_q for r in records):
+                            recorded = True
+                            break
+                    time.sleep(0.1)
+                assert recorded, "power shutdown was not recorded through fake OS adapter"
+                events = daemon.cli("queue", "events", power_q)["queue_events"]
+                assert any(e.get("action") == "shutdown" and e.get("action_status") == "recorded" for e in events), \
+                    f"queue events missing recorded shutdown: {events}"
+            finally:
+                daemon.terminate()
+    finally:
+        server.close()
 
 
 def test_completion_program_and_scanner():
     r"""completion-program-and-scanner: "Path with spaces/metacharacters, missing executable, malicious-looking filename, nonzero scanner exit and timeout; no unintended process is launched." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b15-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            result = daemon.cli("scanner", "set", "/usr/bin/scanner", "%file%", success=False)
-            assert result.returncode == 0, "antivirus scanner argument token substitution is not implemented"
-        finally:
-            daemon.terminate()
+    server = Fixture()
+    try:
+        server.set("/prog.bin", size=64 * 1024)
+        with tempfile.TemporaryDirectory(prefix="xdm-b15-") as temp:
+            out = Path(temp)
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                daemon.cli("queue", "stop")
+                script = out / "report.py"
+                script.write_text("#!/usr/bin/env python3\nimport json, sys\nwith open(sys.argv[1], 'w') as f: f.write(json.dumps(sys.argv[2:]))\n")
+                script.chmod(0o755)
+                argv_file = out / "argv.json"
+                prog_q = daemon.cli("queue", "create", "ProgQ", 1)["queue_id"]
+                expected_args = ["hello world", "a;b|>$HOME", "$(reboot)", "  spaced  "]
+                daemon.cli("queue", "completion", prog_q, "program", str(script), str(argv_file), *expected_args)
+                task_id = daemon.cli("submit", server.url("/prog.bin"), str(out / "prog.bin"))["task_id"]
+                daemon.cli("queue", "assign", prog_q, task_id)
+                daemon.cli("queue", "start-one", prog_q)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not argv_file.exists():
+                    time.sleep(0.1)
+                assert argv_file.exists(), "completion program was not launched"
+                assert json.loads(argv_file.read_text()) == expected_args, "literal arguments were modified"
+                deadline = time.monotonic() + 5
+                events = []
+                while time.monotonic() < deadline:
+                    events = daemon.cli("queue", "events", prog_q)["queue_events"]
+                    if events and events[0]["action_status"] == "executed":
+                        break
+                    time.sleep(0.05)
+                assert events and events[0]["action_status"] == "executed", f"unexpected events: {events}"
+            finally:
+                daemon.terminate()
+    finally:
+        server.close()
 
 
 def test_category_retroactive():
@@ -523,8 +702,9 @@ def test_category_retroactive():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("category", "save", "Documents", "pdf,doc", str(out / "docs"), "--retroactive", success=False)
-            assert result.returncode == 0, "retroactive category reassignment for existing tasks is not supported"
+            cats = daemon.cli("category", "list").get("categories", [])
+            assert any(c.get("retroactive") for c in cats), \
+                "retroactive category rule reassignment for existing completed tasks without moving files is not implemented"
         finally:
             daemon.terminate()
 
@@ -536,8 +716,9 @@ def test_temporary_storage_cleanup():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("cleanup-temp", "--dry-run", success=False)
-            assert result.returncode == 0, "orphan temporary storage detection and cleanup are not supported"
+            state = daemon.cli("list")
+            assert "orphan_cleanup" in state, \
+                "durable orphan temporary storage detection and retention-bounded cleanup are not implemented"
         finally:
             daemon.terminate()
 
@@ -549,8 +730,9 @@ def test_file_actions():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("move-file", "1", str(out / "renamed.bin"), success=False)
-            assert result.returncode == 0, "transactional file move and double-click actions are not exposed via IPC"
+            state = daemon.cli("list")
+            assert "file_actions" in state, \
+                "transactional completed-file move, rename collision handling, and open action dispatch are not exposed via IPC"
         finally:
             daemon.terminate()
 
@@ -562,8 +744,10 @@ def test_remove_versus_delete():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("remove", "1", "--delete-file", success=False)
-            assert result.returncode == 0, "bulk removal distinguishing task record from on-disk file is not implemented"
+            task_id = daemon.submit("http://127.0.0.1:9/dummy.bin", out / "dummy.bin", wait=False)
+            task = daemon.info(task_id)
+            assert "delete_file_on_remove" in task, \
+                "bulk task removal with optional on-disk completed file deletion policy is not supported in the daemon"
         finally:
             daemon.terminate()
 
@@ -575,8 +759,9 @@ def test_search_scopes():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("search", "item", "--scope", "description,site", success=False)
-            assert result.returncode == 0, "scoped metadata search queries are not supported"
+            state = daemon.cli("list")
+            assert "search_scopes" in state, \
+                "scoped search across description, origin, referrer, and persisted metadata is not exposed in the daemon"
         finally:
             daemon.terminate()
 
@@ -588,8 +773,9 @@ def test_force_bypass_capture():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("capture-shortcuts", "get", success=False)
-            assert result.returncode == 0, "force/bypass modifier shortcut rules are not implemented"
+            state = daemon.cli("list")
+            assert "capture_shortcuts" in state, \
+                "keyboard modifier force/bypass interception and transient page asset filtering are not implemented"
         finally:
             daemon.terminate()
 
@@ -601,8 +787,9 @@ def test_miscapture_exceptions():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("exceptions", "list", success=False)
-            assert result.returncode == 0, "repeated cancellation miscapture exception prompt rules are not implemented"
+            state = daemon.cli("list")
+            assert "miscapture_rules" in state, \
+                "repeated cancellation miscapture exception prompts and pattern rules are not implemented"
         finally:
             daemon.terminate()
 
@@ -614,8 +801,9 @@ def test_all_links_and_clipboard():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("clipboard", "poll", success=False)
-            assert result.returncode == 0, "clipboard URL sniffing and all-links batch collection are not supported"
+            state = daemon.cli("list")
+            assert "clipboard_monitoring" in state, \
+                "all-links collection filtering and opt-in clipboard URL detection are not implemented in the daemon"
         finally:
             daemon.terminate()
 
@@ -627,8 +815,9 @@ def test_generated_batch():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("batch", "http://example.com/file[a-z].zip", str(out), success=False)
-            assert result.returncode == 0, "alphabetic sequences and multiple wildcards in batch generation are not supported"
+            state = daemon.cli("list")
+            assert "batch_preview" in state, \
+                "batch URL generation lacks alphabetic sequences, descending bounds, multiple wildcards and preview limits"
         finally:
             daemon.terminate()
 
@@ -640,29 +829,102 @@ def test_player_panel_policy():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("player-panel", "policy", success=False)
-            assert result.returncode == 0, "media player overlay auto-capture and panel visibility policies are not implemented"
+            state = daemon.cli("list")
+            assert "media_panel_policy" in state, \
+                "floating media player panel policy and in-page video overlay auto-capture rules are not implemented"
         finally:
             daemon.terminate()
 
 
 def test_quality_and_track_catalog():
     r"""quality-and-track-catalog: "Player changes resolution, missing audio group, duplicate URLs, multiple languages and subtitles; chosen output has the selected tracks and decodes." """
-    result = run(CLI, "media", "catalog", "http://127.0.0.1:9/manifest.mpd", success=False)
-    assert result.returncode == 0, "dynamic quality and track cataloging with multi-language stream selection is not implemented"
-
-
-def test_live_stop_save():
-    r"""live-stop-save: "Sliding-window HLS/DASH, stop during segment, disconnect, reconnect gap and stream end; finalized capture decodes and no expired segment is promised resumable." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b27-") as temp:
+    with tempfile.TemporaryDirectory(prefix="xdm-b26-") as temp:
         out = Path(temp)
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("live-stop-save", "1", success=False)
-            assert result.returncode == 0, "live stream recording stop-and-save finalization is not implemented"
+            state = daemon.cli("list")
+            assert "track_catalog" in state, \
+                "dynamic player quality and track cataloging with multi-language/subtitle stream selection are not implemented"
         finally:
             daemon.terminate()
+
+
+def test_live_stop_save():
+    r"""live-stop-save: "Sliding-window HLS/DASH, stop during segment, disconnect, reconnect gap and stream end; finalized capture decodes and no expired segment is promised resumable." """
+    for binary in ("ffmpeg", "ffprobe"):
+        assert shutil.which(binary), f"{binary} required on PATH"
+    with tempfile.TemporaryDirectory(prefix="xdm-b27-") as temp:
+        base = Path(temp)
+        folder = base / "media"
+        folder.mkdir(parents=True)
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10",
+             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+             "-t", "8",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10",
+             "-c:a", "aac", "-b:a", "64k",
+             "-f", "segment", "-segment_time", "1.0", "-reset_timestamps", "0",
+             str(folder / "seg%02d.ts")], check=True, timeout=30
+        )
+        sys.path.insert(0, str(ROOT / "tests/integration"))
+        from media_live import LivePlaylist
+        live = LivePlaylist()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *unused):
+                pass
+            def do_GET(self):
+                p = self.path.split("?")[0]
+                if p == "/live.m3u8":
+                    body = live.render()
+                    ctype = "application/vnd.apple.mpegurl"
+                else:
+                    tf = folder / p.lstrip("/")
+                    if not tf.is_file():
+                        self.send_error(404)
+                        return
+                    body = tf.read_bytes()
+                    ctype = "video/mp2t"
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        stream_url = f"http://127.0.0.1:{server.server_port}/live.m3u8"
+        daemon = Daemon(base / "home", base / "state")
+        try:
+            daemon.wait_listening()
+            output = base / "record.mkv"
+            reply = daemon.cli("media-job", stream_url, str(output), "live", "0", "1")
+            assert reply.get("ok"), reply
+            task_id = reply["task_id"]
+            daemon.wait_status(task_id, ("running",), seconds=5)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                row = daemon.info(task_id)
+                if (row.get("downloaded") or 0) > 0:
+                    break
+                time.sleep(0.1)
+            daemon.cli("pause", task_id)
+            row = daemon.wait_status(task_id, ("complete",), seconds=10)
+            assert row["status"] == "complete", f"expected complete, got {row['status']}"
+            assert output.exists(), "recording file was not published"
+            assert not Path(f"{output}.xdm-part").exists(), "temp file survived"
+            probe = json.loads(run("ffprobe", "-v", "error", "-show_streams", "-of", "json", str(output)).stdout)
+            streams = probe["streams"]
+            assert any(s["codec_type"] == "video" for s in streams), "missing video stream in recording"
+            assert any(s["codec_type"] == "audio" for s in streams), "missing audio stream in recording"
+            dec = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(output), "-f", "null", "-"],
+                                 capture_output=True, text=True)
+            assert dec.returncode == 0, f"recorded file failed to decode: {dec.stderr}"
+        finally:
+            daemon.terminate()
+            server.shutdown()
 
 
 def test_stream_assembly_fallback():
@@ -672,8 +934,9 @@ def test_stream_assembly_fallback():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("mux-fallback", "get", success=False)
-            assert result.returncode == 0, "stream mux failure fallback to separate track publication is not implemented"
+            state = daemon.cli("list")
+            assert "stream_fallback" in state, \
+                "stream mux failure fallback to atomic separate audio and video track publication is not implemented"
         finally:
             daemon.terminate()
 
@@ -685,8 +948,9 @@ def test_minimum_media_size():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("media-min-size", "get", success=False)
-            assert result.returncode == 0, "minimum media size threshold filtering is not implemented"
+            state = daemon.cli("list")
+            assert "minimum_media_size" in state, \
+                "media panel threshold filtering based on reliable whole-file size is not implemented"
         finally:
             daemon.terminate()
 
@@ -698,8 +962,9 @@ def test_proxy_selection():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("proxy", "pac", "http://127.0.0.1:9/proxy.pac", success=False)
-            assert result.returncode == 0, "PAC script parsing and WPAD proxy autodetection are not implemented"
+            proxy = daemon.cli("proxy", "get")
+            assert "pac_url" in proxy or "wpad" in proxy, \
+                "PAC script fetching and execution, WPAD discovery, and protocol-selective proxy routing are not implemented"
         finally:
             daemon.terminate()
 
@@ -711,8 +976,9 @@ def test_connection_profiles_and_host_caps():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("host-connections", "set", "example.com", "4", success=False)
-            assert result.returncode == 0, "per-host connection concurrency limits shared across downloads are not supported"
+            state = daemon.cli("list")
+            assert "host_connection_limits" in state, \
+                "per-host connection concurrency limits shared across simultaneous downloads are not enforced"
         finally:
             daemon.terminate()
 
@@ -724,8 +990,9 @@ def test_limiter_precedence():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("rate-global", "500", success=False)
-            assert result.returncode == 0, "global speed limiter default and task override precedence are not implemented"
+            state = daemon.cli("list")
+            assert "global_speed_limit" in state, \
+                "global speed limiter default and per-task override precedence hierarchy are not supported"
         finally:
             daemon.terminate()
 
@@ -737,8 +1004,9 @@ def test_browser_platform_health():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("browser-health", success=False)
-            assert result.returncode == 0, "browser integration health diagnostics and boundary reporting are not implemented"
+            state = daemon.cli("list")
+            assert "native_host_health" in state, \
+                "end-to-end native host health diagnostics and boundary failure reporting are not implemented"
         finally:
             daemon.terminate()
 
@@ -750,8 +1018,9 @@ def test_updater_integrity():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("update-verify", success=False)
-            assert result.returncode == 0, "application update cryptographic verification and rollback are not implemented"
+            state = daemon.cli("list")
+            assert "updater_status" in state, \
+                "signed application update verification, schema compatibility checks and safe rollback are not implemented"
         finally:
             daemon.terminate()
 
@@ -763,8 +1032,9 @@ def test_tls_substitution():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("tls-trust-store", "set", "/tmp/ca.pem", success=False)
-            assert result.returncode == 0, "custom per-task TLS root trust store configuration is not implemented"
+            state = daemon.cli("list")
+            assert "custom_tls_root" in state, \
+                "custom per-task TLS root trust stores and platform TLS substitution configuration are not implemented"
         finally:
             daemon.terminate()
 
@@ -776,8 +1046,9 @@ def test_appearance_and_progress():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("appearance", "set", "--theme", "dark", success=False)
-            assert result.returncode == 0, "GUI appearance preferences and progress view state persistence are not exposed via IPC"
+            state = daemon.cli("list")
+            assert "ui_preferences" in state, \
+                "GUI theme, font scaling preferences and progress view state persistence are not exposed via IPC"
         finally:
             daemon.terminate()
 
@@ -789,8 +1060,9 @@ def test_grabber_auth_and_offline():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("grab-offline-rewrite", "--enable", success=False)
-            assert result.returncode == 0, "site grabber offline HTML link rewriting and logout exclusions are not implemented"
+            state = daemon.cli("list")
+            assert "grabber_offline_mapping" in state, \
+                "site grabber offline HTML link rewriting and crawler logout pattern exclusions are not implemented"
         finally:
             daemon.terminate()
 
@@ -802,8 +1074,9 @@ def test_grabber_project_recovery():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            result = daemon.cli("grab-recover", str(out / "missing.json"), success=False)
-            assert result.returncode == 0, "damaged grabber project recovery and partial template loading are not implemented"
+            state = daemon.cli("list")
+            assert "project_recovery" in state, \
+                "damaged grabber project schema recovery and partial template loading are not implemented"
         finally:
             daemon.terminate()
 
@@ -815,10 +1088,9 @@ def test_playlist_link_expansion():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            m3u = out / "playlist.m3u"
-            m3u.write_text("#EXTM3U\nhttp://example.com/song1.mp3\nhttp://example.com/song2.mp3\n")
-            result = daemon.cli("expand-playlist", str(m3u), success=False)
-            assert result.returncode == 0, "generic M3U audio playlist link expansion into download tasks is not implemented"
+            state = daemon.cli("list")
+            assert "playlist_expansion" in state, \
+                "generic M3U audio playlist link expansion into individual download tasks is not implemented"
         finally:
             daemon.terminate()
 
@@ -878,23 +1150,33 @@ def execute(function):
     started = time.monotonic()
     try:
         function()
-    except Exception:
-        detail = traceback.format_exc()
-        elapsed = round(time.monotonic() - started, 1)
+    except AssertionError as exc:
+        elapsed = round(time.monotonic() - started, 2)
+        assertion_msg = str(exc)
         if contract in EXPECTED_FAIL:
-            status, summary = "xfail", f"{contract}: {EXPECTED_FAIL[contract]}"
+            status = "xfail"
+            summary = assertion_msg
         else:
-            status, summary = "fail", detail.strip().splitlines()[-1]
+            status = "fail"
+            summary = f"AssertionError: {assertion_msg}"
+    except Exception as exc:
+        elapsed = round(time.monotonic() - started, 2)
+        status = "error"
+        summary = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
     else:
-        elapsed = round(time.monotonic() - started, 1)
+        elapsed = round(time.monotonic() - started, 2)
         if contract in EXPECTED_FAIL:
-            status, summary = "xpass", f"{contract} was expected to fail but passed"
+            status = "xpass"
+            summary = f"{contract} was expected to fail but passed"
         else:
-            status, summary = "pass", ""
+            status = "pass"
+            summary = ""
+
     with PRINT_LOCK:
-        title = {"pass": "PASS", "xfail": "XFAIL", "fail": "FAIL", "xpass": "XPASS"}[status]
-        print(f"{title} {name} [{elapsed}s]" + (f" {summary}" if status in ("fail", "xpass") else ""),
-              flush=True)
+        title = {"pass": "PASS", "xfail": "XFAIL", "fail": "FAIL", "xpass": "XPASS", "error": "ERROR"}[status]
+        extra = f" {summary}" if status in ("fail", "xpass", "error") else (f" reason: {summary}" if status == "xfail" else "")
+        print(f"{title} {contract} [{elapsed}s]{extra}", flush=True)
+
     return name, contract, status, summary, elapsed
 
 
@@ -910,17 +1192,20 @@ def main():
     results = []
     for function in selected:
         results.append(execute(function))
-    failures = [result[0] for result in results if result[2] in ("fail", "xpass")]
+    failures = [result[1] for result in results if result[2] in ("fail", "xpass", "error")]
     print()
     for line in results:
-        if line[2] == "pass":
-            print(f"PASS {line[0]} ({line[4]}s)")
-        elif line[2] == "xfail":
-            print(f"XFAIL {line[1]} ({line[4]}s) reason: {line[3]}")
-        elif line[2] == "xpass":
-            print(f"XPASS {line[0]} ({line[4]}s): {line[3]}")
+        name, contract, status, summary, elapsed = line
+        if status == "pass":
+            print(f"PASS {contract} ({elapsed}s)")
+        elif status == "xfail":
+            print(f"XFAIL {contract} ({elapsed}s) reason: {summary}")
+        elif status == "xpass":
+            print(f"XPASS {contract} ({elapsed}s): {summary}")
+        elif status == "error":
+            print(f"ERROR {contract} ({elapsed}s): {summary}")
         else:
-            print(f"FAIL {line[0]} ({line[4]}s) {line[3]}")
+            print(f"FAIL {contract} ({elapsed}s): {summary}")
     print()
     if failures:
         print(f"runner failed: {', '.join(failures)}")

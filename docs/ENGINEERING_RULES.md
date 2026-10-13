@@ -28,7 +28,7 @@ Binding conventions for every contributor and coding agent. When a review finds 
 13. Every behavior change ships with a test that **fails without the change**. End-to-end tests use disposable local servers on 127.0.0.1 and temporary data directories.
 14. GUI tests run only under their own Xvfb display (`SLINT_BACKEND=winit-software`); nothing is launched on the user's desktop.
 15. Reports state exactly what was run and what was not. "Untested on Windows/real browser" is stated, not omitted. Docs rows describe tested behavior only; a status cell may not claim more than its cited test exercises.
-16. Expected-failure (XFAIL) runners count a gap only when the test fails on an assertion; any other exception is a harness error that fails the run. Crashing tests must never be reported as known gaps.
+16. Expected-failure (XFAIL) runners count a gap only when the test fails on an assertion; any other exception is a harness error that fails the run. Crashing tests must never be reported as known gaps, and a gap test must exercise the real behavior: asserting on invented fields or outputs is forbidden. Behavior that cannot be exercised headlessly is reported as UNTESTED, never as a pass or a known gap.
 17. Builds and tests must be warning-free: `cargo build --workspace --offline` and `cargo test --workspace --offline`.
 
 ## Style

@@ -57,6 +57,29 @@ def main():
                 time.sleep(0.15)
             assert state["queue_running"] is True and state["queue_start_at"] is None
             assert state["tasks"][0]["status"] == "complete" and output.stat().st_size == 8 * 1024 * 1024
+            # Arming a future start must not stop running downloads: IDM arms
+            # the timer and leaves active transfers alone, so a task that is
+            # already downloading keeps running through `queue at`. The old
+            # stop-everything-now behavior is deliberately no longer asserted.
+            armed = base / "armed.bin"
+            command(env, "submit", f"http://127.0.0.1:{port}/queue-armed.bin", str(armed))
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and command(env, "list")["tasks"][0]["status"] != "running":
+                time.sleep(0.1)
+            assert command(env, "list")["tasks"][0]["status"] == "running"
+            at = int(time.time()) + 2
+            command(env, "queue", "at", str(at))
+            state = command(env, "list")
+            assert state["queue_start_at"] == at and state["queue_running"] is True
+            assert state["tasks"][0]["status"] == "running", state
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                state = command(env, "list")
+                if state["tasks"][0]["status"] == "complete":
+                    break
+                time.sleep(0.1)
+            assert state["tasks"][0]["status"] == "complete" and armed.stat().st_size == 8 * 1024 * 1024
+            assert state["queue_start_at"] is None and state["queue_running"] is True
             command(env, "queue", "stop")
             assert command(env, "list")["queue_running"] is False
             command(env, "queue", "start")

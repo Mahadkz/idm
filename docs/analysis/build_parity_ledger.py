@@ -166,6 +166,9 @@ def parse_core_queue_contracts(md_text: str) -> list[dict]:
 
 def infer_browser_status(behavior: str) -> str:
     """Infer status from browser contract XDM state text."""
+    norm = normalize_status(behavior)
+    if norm != 'unknown':
+        return norm
     b = behavior.lower()
     # Explicit positive indicators
     if any(w in b for w in ['implemented', 'verified', 'passes', 'works', 'fixture succeeds']):

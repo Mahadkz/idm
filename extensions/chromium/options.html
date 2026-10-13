@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>XDM Settings &amp; Diagnostics</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; max-width: 650px; line-height: 1.5; color: #333; }
+    h1 { font-size: 1.4rem; border-bottom: 1px solid #ddd; padding-bottom: 0.5rem; }
+    .card { background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .note { font-size: 0.9rem; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>XDM Browser Integration</h1>
+  <div class="card">
+    <h3>Private Window Interception</h3>
+    <p>By default, private and incognito window downloads are kept inside your browser to protect session privacy.</p>
+    <p class="note">To allow private interception, toggle "Allow in incognito / private windows" in your browser's extension management page.</p>
+  </div>
+  <div class="card">
+    <h3>Site Rules &amp; Exclusions</h3>
+    <p>Domains excluded from interception bypass XDM and download directly through your browser.</p>
+    <ul id="exclusions">
+      <li>*.bank.example</li>
+      <li>*.internal.local</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Repair &amp; Native Host Status</h3>
+    <p>If downloads fail to hand off to the XDM desktop application, ensure the XDM daemon is running and the native messaging manifest <code>org.xdm.browser</code> is registered.</p>
+  </div>
+</body>
+</html>

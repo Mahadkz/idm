@@ -3,9 +3,36 @@
   "name": "XDM Browser Bridge",
   "version": "0.1.0",
   "description": "Send eligible browser downloads and clear media URLs to XDM.",
-  "permissions": ["downloads", "nativeMessaging", "contextMenus", "storage", "cookies", "webRequest", "tabs"],
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "contextMenus",
+    "storage",
+    "cookies",
+    "webRequest",
+    "tabs",
+    "notifications",
+    "management",
+    "webNavigation",
+    "proxy",
+    "declarativeNetRequest"
+  ],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {"service_worker": "background.js"},
   "action": {"default_popup": "popup.html"},
-  "content_scripts": [{"matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_idle", "all_frames": true}]
+  "options_ui": {"page": "options.html", "open_in_tab": true},
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js", "page_xhr.js", "page_fetch.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page_helper.js"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
 }

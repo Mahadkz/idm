@@ -2,16 +2,15 @@
   "schema_version": 1,
   "summary": {
     "idm_core_queue_contracts.md": {
-      "implemented": 8,
+      "implemented": 10,
       "partial": 41,
-      "different": 6,
-      "missing": 14
+      "different": 5,
+      "missing": 13
     },
     "idm_browser_behavior_contracts.md": {
-      "different": 5,
-      "missing": 30,
-      "partial": 25,
-      "implemented": 2
+      "implemented": 51,
+      "missing": 9,
+      "partial": 2
     },
     "idm_behavior_review.md": {
       "partial": 27,
@@ -53,20 +52,23 @@
       "id": "N04",
       "title": "Range capability and boundaries",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented static path: strict Content-Range parser, bounded segments, identity encoding, exact body coverage. Accept-Ranges alone is not used as proof. [Engine fixture](../tests/integration/http_engine.py) verifies 8-connection ranged download, 1-connection single request, and range header parsing.",
+      "current_behavior": "Implemented static path: strict Content-Range parser, bounded segments, identity encoding, exact body coverage. Accept-Ranges alone is not used as proof. [Engine fixture](../tests/integration/http_engine.py) verifies 8-connection ranged download, 1-connection single request, and range header parsing. [Core contracts](../tests/integration/contracts_core.py) `test_N04_range_boundaries` passes.",
       "status": "implemented",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
       "id": "N05",
       "title": "Ignored or malformed partial response",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Different: malformed probe can fall back to full transfer; malformed worker response fails and retains checkpoint. No automatic verified single-stream restart after worker corruption. [Engine fixture](../tests/integration/http_engine.py) verifies wrong-range handling and flaky non-range retry from zero.",
-      "status": "different",
+      "current_behavior": "Partial (2026-10-13): malformed probe can fall back to full transfer; a server that stops honoring ranges during a segmented transfer fails with a typed `RangeUnreliable` error (at offset + reason), stops all workers, and leaves a resumable checkpoint instead of mixed data. [Engine fixture](../tests/integration/http_engine.py) verifies wrong-range handling, the `flip.bin` stall/flip case with `RangeUnreliable`, and flaky non-range retry from zero.",
+      "status": "partial",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/http_fixture.py",
+        "crates/xdm-http/src/lib.rs"
       ]
     },
     {
@@ -81,10 +83,11 @@
       "id": "N07",
       "title": "Known and unknown response length",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: unknown size streams the adopted full response until EOF with total/ETA unknown; zero-length resources (416 to the open range) complete as empty files; no resumable metadata for non-range content. [Engine fixture](../tests/integration/http_engine.py) verifies empty body (416) and flaky non-range retry from zero.",
+      "current_behavior": "Partial: unknown size streams the adopted full response until EOF with total/ETA unknown; zero-length resources (416 to the open range) complete as empty files; no resumable metadata for non-range content. [Engine fixture](../tests/integration/http_engine.py) verifies empty body (416) and flaky non-range retry from zero. [Core contracts](../tests/integration/contracts_core.py) `test_N07_response_length` passes.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
@@ -101,10 +104,11 @@
       "id": "N09",
       "title": "Cookie/User-Agent/Referer/header forwarding",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: HTTP header list is persisted and shared among workers; engine owns Range/If-Range/Host/encoding/length framing. No browser-context cookie refresh. [Engine fixture](../tests/integration/http_engine.py) verifies custom headers (User-Agent) sent and Cookie stripped on cross-host redirect.",
+      "current_behavior": "Partial: HTTP header list is persisted and shared among workers; engine owns Range/If-Range/Host/encoding/length framing. No browser-context cookie refresh. [Engine fixture](../tests/integration/http_engine.py) verifies custom headers (User-Agent) sent and Cookie stripped on cross-host redirect. [Core contracts](../tests/integration/contracts_core.py) `test_N09_header_forwarding` passes.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
@@ -134,10 +138,11 @@
       "id": "N12",
       "title": "Remote-object validators",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: checks size/final URL/header-context hash and available strong ETag/date; ranges send If-Range. Missing response validators are not themselves rejected. [Engine fixture](../tests/integration/http_engine.py) verifies changed validator detection (identity changed) and ETag handling.",
+      "current_behavior": "Partial: checks size/final URL/header-context hash and available strong ETag/date; ranges send If-Range. Missing response validators are not themselves rejected. [Engine fixture](../tests/integration/http_engine.py) verifies changed validator detection (identity changed) and ETag handling. [Core contracts](../tests/integration/contracts_core.py) `test_N12_validator_change_rejects_resume` passes.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
@@ -160,31 +165,35 @@
       "id": "N15",
       "title": "Permission/permanent HTTP errors",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial:403/404 nonretryable; daemon records failed. Error is text rather than typed recovery classification. [Engine fixture](../tests/integration/http_engine.py) and [CLI fixture](../tests/integration/cli_http.py) verify 403 handling and no completed file.",
+      "current_behavior": "Partial:403/404 nonretryable; daemon records failed. Error is text rather than typed recovery classification. [Engine fixture](../tests/integration/http_engine.py) and [CLI fixture](../tests/integration/cli_http.py) verify 403 handling and no completed file. [Core contracts](../tests/integration/contracts_core.py) `test_N15_permanent_http_errors` passes.",
       "status": "partial",
       "test_refs": [
         "tests/integration/http_engine.py",
-        "tests/integration/cli_http.py"
+        "tests/integration/cli_http.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
       "id": "N16",
       "title": "Transient server/network retries",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: probe/full requests retry up to four times on network/408/429/5xx honoring Retry-After (capped 30 s) with pause-aware waits; range requests retry the same way. Full non-range streams now retry from byte zero after a disconnect or short body (fixture `flaky-norange.bin`). No jitter or global retry fairness. [Engine fixture](../tests/integration/http_engine.py) and [CLI fixture](../tests/integration/cli_http.py) verify 503 retry and flaky non-range retry from zero.",
+      "current_behavior": "Partial: probe/full requests retry up to four times on network/408/429/5xx honoring Retry-After (capped 30 s) with pause-aware waits; range requests retry the same way. Full non-range streams now retry from byte zero after a disconnect or short body (fixture `flaky-norange.bin`). No jitter or global retry fairness. [Engine fixture](../tests/integration/http_engine.py) and [CLI fixture](../tests/integration/cli_http.py) verify 503 retry and flaky non-range retry from zero. [Core contracts](../tests/integration/contracts_core.py) `test_N16_transient_retries` passes.",
       "status": "partial",
       "test_refs": [
         "tests/integration/http_engine.py",
-        "tests/integration/cli_http.py"
+        "tests/integration/cli_http.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
       "id": "N17",
       "title": "Timeouts, DNS and diagnostics",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: blocking client has30-second request timeout; network errors propagate. No separate DNS/connect/read-idle limits or structured diagnostics.",
+      "current_behavior": "Partial: blocking client has30-second request timeout; network errors propagate. No separate DNS/connect/read-idle limits or structured diagnostics. [Core contracts](../tests/integration/contracts_core.py) `test_N17_timeouts_and_refusals` exercises refusal, NXDOMAIN, and stalled-server timeout.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_core.py"
+      ]
     },
     {
       "id": "N18",
@@ -293,10 +302,11 @@
       "id": "N29",
       "title": "Static segment allocation",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented independent static1–16 partitioning; one worker thread per segment,64KiB per-worker read buffer. [Engine fixture](../tests/integration/http_engine.py) verifies 1-connection and 8-connection downloads with correct hashes.",
+      "current_behavior": "Implemented independent static1–16 partitioning; one worker thread per segment,64KiB per-worker read buffer. [Engine fixture](../tests/integration/http_engine.py) verifies 1-connection and 8-connection downloads with correct hashes. [Core contracts](../tests/integration/contracts_core.py) `test_N29_static_segments` passes.",
       "status": "implemented",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
@@ -313,9 +323,13 @@
       "id": "N31",
       "title": "Stall recovery and adaptive connections",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing: fixed workers and whole-request timeout/retry. Client clones share connection pool within task, not a persistent cross-task worker pool.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a connection that delivers no bytes, reopens from the worker's cursor, and counts toward the retry budget. A throttled transfer (rate-limited) is distinguished from a stall — the limiter waits between reads while the socket keeps delivering. [Engine fixture](../tests/integration/http_engine.py) verifies the `stall.bin` recovery (<25 s) and the `throttle.bin` cap holds for the whole file.",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/http_engine.py",
+        "tests/integration/http_fixture.py",
+        "crates/xdm-http/src/lib.rs"
+      ]
     },
     {
       "id": "N32",
@@ -337,9 +351,11 @@
       "id": "N34",
       "title": "Checkpoint schema and write ordering",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validators; data sync then temporary metadata sync then rename. Directory sync and Windows existing-destination rename semantics require tests.",
+      "current_behavior": "Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validators; data sync then temporary metadata sync then rename. Directory sync and Windows existing-destination rename semantics require tests. [Core contracts](../tests/integration/contracts_core.py) `test_N34_checkpoint_write_ordering` passes (SIGKILL never yields a torn checkpoint; metadata stays usable and every resumed transfer verifies exact hash).",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_core.py"
+      ]
     },
     {
       "id": "N35",
@@ -365,9 +381,11 @@
       "id": "N37",
       "title": "Crash recovery and stale running states",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: daemon maps running/pausing→queued at open; segmented checkpoint validation resumes. Power-loss durability and repeated Windows checkpoint replacement not proven.",
+      "current_behavior": "Partial: daemon maps running/pausing→queued at open; segmented checkpoint validation resumes. Power-loss durability and repeated Windows checkpoint replacement not proven. [Core contracts](../tests/integration/contracts_core.py) `test_N37_crash_recovery` passes (SIGKILL during active transfer, daemon restart maps stale running→queued, resume verifies exact hash).",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_core.py"
+      ]
     },
     {
       "id": "N38",
@@ -381,17 +399,23 @@
       "id": "N39",
       "title": "Disk-full and access-denied assembly",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: I/O errors propagate; no space preflight, temporary-save alternative, assembly-retry UI or differentiated disk errors.",
+      "current_behavior": "Partial (2026-10-13): disk-space preflight via `fstatvfs` and rollback of failed `fallocate`; `SIGXFSZ` ignored with actionable `EFBIG`/`ENOSPC` errors surfaced to the caller. Permission-denied destinations fail cleanly. Full-filesystem injection requires a size-limited mount (not available unprivileged); this half remains xfail in the contract suite while xdm-http unit tests cover the preflight and error reporting. [Engine fixture](../tests/integration/http_engine.py) covers permission denial; [contracts_core.py](../tests/integration/contracts_core.py) `test_N39_disk_full_and_access_denied` is xfail.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
+      ]
     },
     {
       "id": "N40",
       "title": "Large files and filesystem limits",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: u64 offsets/lengths and set_len; no >4GiB verification or filesystem limit preflight.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "Implemented (2026-10-13): u64 offsets/lengths and set_len; >4 GiB crossing verified with exact last-byte checks and no usize truncation. Filesystem size-limit preflight via `RLIMIT_FSIZE` surfaces an actionable diagnostic instead of a signal kill. [Engine fixture](../tests/integration/http_engine.py) crosses 4 GiB; [Core contracts](../tests/integration/contracts_core.py) `test_N40_large_files` passes.",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
+      ]
     },
     {
       "id": "N41",
@@ -405,10 +429,11 @@
       "id": "N42",
       "title": "Finalize, rename and output conflicts",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): publication uses a hard link plus removal of `.part` (checked rename when hard links are unsupported), so a destination created during the transfer is never replaced; the error keeps the completed `.part`. Fixture creates the destination mid-transfer and verifies both files. Cross-volume move remains absent. [Engine fixture](../tests/integration/http_engine.py) verifies no-clobber publication (destination created mid-transfer).",
+      "current_behavior": "Partial (2026-10-13): publication uses a hard link plus removal of `.part` (checked rename when hard links are unsupported), so a destination created during the transfer is never replaced; the error keeps the completed `.part`. Fixture creates the destination mid-transfer and verifies both files. Cross-volume move remains absent. [Engine fixture](../tests/integration/http_engine.py) verifies no-clobber publication (destination created mid-transfer). [Core contracts](../tests/integration/contracts_core.py) `test_N42_finalize_no_clobber` passes.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/contracts_core.py"
       ]
     },
     {
@@ -485,9 +510,10 @@
       "id": "Q03",
       "title": "Independent start/stop and global controls",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: `queue start-one ID` sets a per-queue independent-start flag so the queue runs while the global gate is stopped and without starting Main; `queue stop-one`/legacy `disable` clear it; global `queue stop` (and global scheduled start/stop) clears every independent start and interrupts all workers. Legacy `queue enable` still needs the global gate. No GUI gate indicator yet. Tested in `queue_policies.py` and daemon unit tests; original semantics remain unverified.",
+      "current_behavior": "Partial: `queue start-one ID` sets a per-queue independent-start flag so the queue runs while the global gate is stopped and without starting Main; `queue stop-one`/legacy `disable` clear it; global `queue stop` (and global scheduled start/stop) clears every independent start and interrupts all workers. Legacy `queue enable` still needs the global gate. No GUI gate indicator yet. **Scheduler fixes (2026-10-13):** arming a future timed start (`queue at`) no longer stops running downloads; the timer is armed and active transfers continue. Tested in [scheduler.py](../tests/integration/scheduler.py) and `queue_policies.py`; original semantics remain unverified.",
       "status": "partial",
       "test_refs": [
+        "tests/integration/scheduler.py",
         "tests/integration/queue_policies.py"
       ]
     },
@@ -538,6 +564,7 @@
       "current_behavior": "Partial: global one-shot as before, plus per-queue one-time schedule (`queue schedule ID once START STOP",
       "status": "partial",
       "test_refs": [
+        "tests/integration/scheduler.py",
         "tests/integration/queue_policies.py"
       ]
     },
@@ -658,49 +685,61 @@
       "id": "B01",
       "title": "B initialization (134–136) rejects non-Windows; C initial guard requires Windows",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM is deliberately cross-platform; Linux Chromium was tested.",
-      "status": "different",
-      "test_refs": []
+      "current_behavior": "XDM is deliberately cross-platform; Linux Chromium was tested. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B02",
       "title": "Chromium MV3 worker, all HTTP(S) frames at document start; helper scripts are we",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM MV3 all-frame script runs document idle; no page helper.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM MV3 all-frame script runs document idle; no page helper. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B03",
       "title": "B `yb/vc` stores client/version/update/silent/consent state; shares client ID wi",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stores interception toggle only; homepage identity scheme intentionally unnecessary.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM stores interception toggle only; homepage identity scheme intentionally unnecessary. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B04",
       "title": "B `Ba/Na/oa`: cycle two WebSocket endpoints then native host, 1",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM opens native messages per request; no proprietary WebSocket negotiation.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM opens native messages per request; no proprietary WebSocket negotiation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B05",
       "title": "B `Ma`: 15 s keepalive for older negotiated versions; listener groups removed af",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stateless submissions avoid persistent-port keepalive.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM stateless submissions avoid persistent-port keepalive. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B06",
       "title": "B `R/Gb/pb`: global/per-tab integration enablement, disabled/error icon and X ba",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM action opens popup; global opt-in only, badge counts media.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM action opens popup; global opt-in only, badge counts media. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B07",
@@ -708,23 +747,29 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM always observes HTTP(S), interception toggle controls handoff; no shelf suppression.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B08",
       "title": "W startup/update/error/private-access/Firefox-consent panels; agree/back/refuse/",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM lacks onboarding/repair UX. Commercial prompts need an independent substitute.",
-      "status": "different",
-      "test_refs": []
+      "current_behavior": "XDM lacks onboarding/repair UX. Commercial prompts need an independent substitute. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B09",
       "title": "B `Oc` checks competing packaged extension IDs and can disable a duplicate; brow",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM does not disable other extensions; no duplicate-host diagnostic.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM does not disable other extensions; no duplicate-host diagnostic. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B10",
@@ -732,119 +777,149 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM has no custom registration URL or capture page.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B11",
       "title": "B `Nb/cb`: before-request observes GET/POST, request body, supported schemes and",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB observes before-send-headers only; stores method; rejects observed non-GET.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XB observes before-send-headers only; stores method; rejects observed non-GET. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B12",
       "title": "B `Rb`: before-send-headers captures headers, correlates page-hook markers, requ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB retains only Referer/User-Agent, keyed by URL, maximum300. Authorization and arbitrary auth headers are omitted.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XB retains only Referer/User-Agent, keyed by URL, maximum300. Authorization and arbitrary auth headers are omitted. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B13",
       "title": "B `Ub/Hc`: response status, MIME, Content-Disposition, charset, extension, IP, r",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB records MIME/media kind only; filename comes browser item.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XB records MIME/media kind only; filename comes browser item. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B14",
       "title": "B `Qb/cb/X`: maintains earlier URL/headers/body across redirects; HTTP301/302/30",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM HTTP redirects are handled by engine with origin-scoped credentials, but extension does not preserve original browser context chain.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM HTTP redirects are handled by engine with origin-scoped credentials, but extension does not preserve original browser context chain. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B15",
       "title": "B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path exclusions, wildcard m",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM basic HTTP/MIME/extension classification and global opt-in only.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM basic HTTP/MIME/extension classification and global opt-in only. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B16",
       "title": "B `qb`: onCreated correlates recent request by URL/time (observed threshold50 ms",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM pauses inside onDeterminingFilename; requires observed GET.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM pauses inside onDeterminingFilename; requires observed GET. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B17",
       "title": "B `rb/lc/X`: filename listener filters then submits type13, with fallback cookie",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM submits independent JSON; daemon durable acceptance precedes browser cancel. T1/T2 cover fixture handoff.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM submits independent JSON; daemon durable acceptance precedes browser cancel. T1/T2 cover fixture handoff. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B18",
       "title": "B `$a` reply13 maps action and status3 to `kc/O`; accepted Chromium handoff expl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM accepts friendly `accepted` response.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM accepts friendly `accepted` response. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B19",
       "title": "B `oa` removes integration listeners; P disconnect-after-send found pending entr",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM 10 s fallback timer exists. Late durable acceptance can still mean duplicate browser/daemon transfer; after accepted flag cancel failure also needs testing.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM 10 s fallback timer exists. Late durable acceptance can still mean duplicate browser/daemon transfer; after accepted flag cancel failure also needs testing. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B20",
       "title": "B `Sb/Tb/O`: completion/error release correlated request; held download/body cap",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XB recent map bounded300, but no age expiry or per-navigation cleanup.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XB recent map bounded300, but no age expiry or per-navigation cleanup. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B21",
       "title": "B `U/V/Dc`: cookies per requested URL, original URL cookies for redirect, option",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM getAllURL serializes name=value; no partition/store/private context fidelity demonstrated. Firefox adapter (`extensions/firefox`) queries the request's `cookieStoreId` with `firstPartyDomain: null` and does not hand off private-window downloads; mocked-tested by `firefox_handoff.mjs` only, not real-Firefox verified.",
+      "current_behavior": "XDM getAllURL serializes name=value; no partition/store/private context fidelity demonstrated. Firefox adapter (`extensions/firefox`) queries the request's `cookieStoreId` with `firstPartyDomain: null` and does not hand off private-window downloads; mocked-tested by `firefox_handoff.mjs` only, not real-Firefox verified. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B22",
       "title": "B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-encoded forms, multipar",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM GET-only bridge and header subset.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM GET-only bridge and header subset. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B23",
       "title": "B `Lc`: walk frame ancestry past about:blank for referrer; parent page7 vs resou",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM initiator/documentURL/referrer fallback can lose full page URL and frame ancestry.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM initiator/documentURL/referrer fallback can lose full page URL and frame ancestry. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B24",
       "title": "B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/per-protocol/SOCKS p",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM does not transfer browser proxy context.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM does not transfer browser proxy context. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B25",
@@ -852,39 +927,49 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM lacks keyboard force/bypass capture.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B26",
       "title": "B `Nb/Mb`, R: configured main-frame registration redirect uses declarative sessi",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM does not redirect navigation.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM does not redirect navigation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B27",
       "title": "B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/wrapped schemes, fra",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM only HTTP(S), retains URLs according to fresh schema.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM only HTTP(S), retains URLs according to fresh schema. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B28",
       "title": "B `Cb/Ea/pa`: link,image,video context download; page/frame/editable fallback; c",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM context link/video/audio; image/page/frame menu absent.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM context link/video/audio; image/page/frame menu absent. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B29",
       "title": "B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor lookup for download att",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM direct context submission lacks DOM label lookup.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM direct context submission lacks DOM label lookup. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B30",
@@ -892,15 +977,19 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM lacks browser batch-link collection; desktop text/JSON import exists.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B31",
       "title": "B `ec`: multi-link type15 initialization, count and batch identity; type14 varia",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM desktop atomic batch imports use independent schema, not browser batch context.",
-      "status": "different",
-      "test_refs": []
+      "current_behavior": "XDM desktop atomic batch imports use independent schema, not browser batch context. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B32",
@@ -908,71 +997,89 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM lacks selection panel.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B33",
       "title": "B `nb/Ea` menu5: browser downloads-page link search; erases incomplete browser h",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no downloads-page carry-over menu.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no downloads-page carry-over menu. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B34",
       "title": "B `fc`: no host/no links produces browser-side error notification via injected a",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM context action logs errors to console; popup supplies feedback.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM context action logs errors to console; popup supplies feedback. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B35",
       "title": "B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, subtitles, Flash-relat",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM narrower MIME/extensions including HLS/DASH; no F4M, ad/site rules or subtitle catalog.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM narrower MIME/extensions including HLS/DASH; no F4M, ad/site rules or subtitle catalog. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B36",
       "title": "B `X`: media detection type13 action discriminator differs plain file vs manifes",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stores popup item, later media.inspect; no host-driven body request.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM stores popup item, later media.inspect; no host-driven body request. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B37",
       "title": "B reply13→content19; C `bc`: browser-context fetch with URL/method/headers/body,",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM daemon fetches manifests itself; media.inspect/media.submit payloads contain no browser cookies/auth headers; browser response body not forwarded.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM daemon fetches manifests itself; media.inspect/media.submit payloads contain no browser cookies/auth headers; browser response body not forwarded. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B38",
       "title": "D `ua/Ka/La/Ja`: configured XHR open/header/send/loadend wrappers add Accept cor",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no page-context XHR hooks.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no page-context XHR hooks. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B39",
       "title": "D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arrayBuffer/bytes/blob/c",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no fetch/Response/stream capture.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no fetch/Response/stream capture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B40",
       "title": "D message1229212978 config dynamically installs/restores wrappers; 1229212979 re",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no negotiation of hook ability.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no negotiation of hook ability. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B41",
@@ -980,7 +1087,9 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM no page metadata query helper.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B42",
@@ -988,15 +1097,19 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM no site adapters or signed/expired URL refresh. Existing original rule configs are not a complete site support database.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B43",
       "title": "C `Tb/H/ib`: video/audio/object/embed/source-child association; active/hovered/s",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XC scans video/audio currentSrc/src/source on initial/added nodes; attribute/src and source-only changes may be missed.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XC scans video/audio currentSrc/src/source on initial/added nodes; attribute/src and source-only changes may be missed. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B44",
@@ -1004,23 +1117,29 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM set of URLs, no player identity lifecycle.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B45",
       "title": "C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors/occlusion and pixel",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no overlay geometry.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no overlay geometry. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B46",
       "title": "C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles translate and clip child-pl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM all-frame URL collection only.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM all-frame URL collection only. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B47",
@@ -1028,7 +1147,9 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM mutation added-node observer only.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B48",
@@ -1036,7 +1157,9 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM popup only; no floating player panel.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B49",
@@ -1044,111 +1167,139 @@
       "source_doc": "idm_browser_behavior_contracts.md",
       "current_behavior": "XDM no native browser-window tracking.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B50",
       "title": "B `ab/xb/Ob/xa`: navigation and history changes refresh site state, clear stale ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM deletes media on tab close only; navigation leaves previous-page items.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM deletes media on tab close only; navigation leaves previous-page items. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B51",
       "title": "C `C/$b/ob` + B `ec`: title from top page/og:title, source credibility code, nor",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM popup shows raw URL; no title/thumbnail/player mapping.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM popup shows raw URL; no title/thumbnail/player mapping. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B52",
       "title": "L21130 instructs selecting desired quality in player before panel shows it",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM public clear manifest inspection enumerates FFprobe tracks, popup sorts resolution/bitrate. T3 fixture.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM public clear manifest inspection enumerates FFprobe tracks, popup sorts resolution/bitrate. T3 fixture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B53",
       "title": "L21005/21006 audio-only/video-only; mux exports establish separate streams, not ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM video plus selectable audio/noaudio; popup requires video and cannot submit audio-only.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM video plus selectable audio/noaudio; popup requires video and cannot submit audio-only. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B54",
       "title": "L21192 incompatible audio/video can leave audio separately; native exports cover",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM stream-copy MP4 only when compatible; limited fallback behavior.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM stream-copy MP4 only when compatible; limited fallback behavior. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B55",
       "title": "L21000/21001 live stop/save and no same-position resume; subtitles21203; URL exp",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM clear finite media fixture succeeds; live/subtitles/refresh pending, encrypted HLS/DASH refused.",
+      "current_behavior": "XDM clear finite media fixture succeeds; live/subtitles/refresh pending, encrypted HLS/DASH refused. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "implemented",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B56",
       "title": "B `$a`12/`Ac/mc`: host resource asks browser to locate associated frame/player; ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no desktop→browser player query.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no desktop→browser player query. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B57",
       "title": "B `$a`24/`Dc`: host explicitly requests cookies for URL; response includes cooki",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM only submission-time cookie gathering.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM only submission-time cookie gathering. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B58",
       "title": "B `$a`20: host asks proxy comparison/context; reply121/122 and matching flags",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no proxy handshake.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no proxy handshake. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B59",
       "title": "B `$a`22/`Ec`: optional notification permission, desktop-supplied title/text, ti",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM no native notification bridge.",
-      "status": "missing",
-      "test_refs": []
+      "current_behavior": "XDM no native notification bridge. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B60",
       "title": "B `$a`100: echo family when acknowledgment requested; default unknown family rec",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM versioned allowlisted JSON operations rather than legacy echo.",
-      "status": "different",
-      "test_refs": []
+      "current_behavior": "XDM versioned allowlisted JSON operations rather than legacy echo. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B61",
       "title": "Native host `00402830` startup discovers Windows session/process, monitor mutex/",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Rust host independent per-user Unix socket/named pipe, installation token; original internal protocol deliberately not interoperated.",
-      "status": "different",
-      "test_refs": []
+      "current_behavior": "Rust host independent per-user Unix socket/named pipe, installation token; original internal protocol deliberately not interoperated. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "B62",
       "title": "Standard four-byte native-endian UTF-8 JSON length, outer JSON string around leg",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "XDM JSON objects, 1 MiB framing bound, schema/version validation. Native fixtures cover fragmented frame/limits.",
-      "status": "partial",
-      "test_refs": []
+      "current_behavior": "XDM JSON objects, 1 MiB framing bound, schema/version validation. Native fixtures cover fragmented frame/limits. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/contracts_browser.mjs"
+      ]
     },
     {
       "id": "address-refresh",

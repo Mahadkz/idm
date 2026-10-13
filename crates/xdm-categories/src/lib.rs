@@ -84,8 +84,9 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
         pattern.trim().to_ascii_lowercase(),
         host.trim().to_ascii_lowercase(),
     );
+    // `*.example.com` also matches the bare domain; wildcards in the suffix still glob.
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        return !suffix.contains("*.") && (host == suffix || host.ends_with(&format!(".{suffix}")));
+        return glob_match(suffix, &host) || glob_match(&pattern, &host);
     }
     glob_match(&pattern, &host)
 }

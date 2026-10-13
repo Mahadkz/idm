@@ -278,6 +278,10 @@ pub const MAX_BODY: usize = 1024 * 1024;
 /// A running segment is split only if its unclaimed remainder is at least this large.
 const MIN_SPLIT: u64 = 1024 * 1024;
 const RETRIES: usize = 4;
+/// Per-worker receive buffer flushed with one positional write.
+const WRITE_BUFFER: usize = 256 * 1024;
+/// Minimum spacing of periodic checkpoints; pause, stop and segment ends always checkpoint.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Replayable request identity shared by the probe and every transfer request.
 #[derive(Debug, Clone)]
@@ -445,6 +449,9 @@ pub fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn split_segments(length: u64, workers: usize) -> Vec<Segment> {
+    if length == 0 {
+        return Vec::new();
+    }
     let count = workers.max(1).min(16).min(length as usize);
     let base = length / count as u64;
     let extra = length % count as u64;
@@ -516,6 +523,21 @@ fn validators_match(saved: &Checkpoint, current: &Probe) -> bool {
         return false;
     }
     etag.is_none_or(|(a, b)| a == b) && modified.is_none_or(|(a, b)| a == b)
+}
+
+/// Sizes the partial file. Linux allocates real blocks so concurrent range writes do not
+/// allocate under the file lock; other systems, or filesystems without fallocate, get a
+/// plain (possibly sparse) length.
+fn preallocate(file: &File, length: u64) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fallocate only reads the descriptor and sizes we pass.
+        if unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, length as libc::off_t) } == 0 {
+            return Ok(());
+        }
+    }
+    file.set_len(length)
 }
 
 fn write_at(file: &File, offset: u64, mut data: &[u8]) -> std::io::Result<()> {
@@ -773,6 +795,8 @@ struct Shared {
     adopted: Mutex<Option<(u64, Response)>>,
     /// Set when the server refuses extra connections; no new requests are opened afterward.
     refused: Mutex<Option<StatusCode>>,
+    /// Last periodic checkpoint; bounds disk syncs for all workers together.
+    checkpointed: Mutex<Instant>,
 }
 
 enum Outcome {
@@ -794,6 +818,19 @@ impl Shared {
         let index = find(&guard, start)?;
         guard.segments[index].cursor = cursor;
         store_checkpoint(&self.file, &self.meta, &guard)
+    }
+
+    /// Whether a periodic checkpoint may run now. Each checkpoint syncs the whole file,
+    /// so workers share one interval instead of syncing per megabyte each.
+    fn checkpoint_due(&self) -> bool {
+        let Ok(mut last) = self.checkpointed.lock() else {
+            return true;
+        };
+        if last.elapsed() < CHECKPOINT_INTERVAL {
+            return false;
+        }
+        *last = Instant::now();
+        true
     }
 
     fn release(&self, start: u64) -> Result<()> {
@@ -984,9 +1021,11 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 (response, false)
             }
         };
+        // `position` counts received bytes; `written` trails it until the buffer is flushed.
         let mut position = cursor;
+        let mut written = cursor;
         let mut persisted = cursor;
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = vec![0u8; WRITE_BUFFER];
         let mut failed = false;
         let mut shrunk = false;
         loop {
@@ -1020,7 +1059,8 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 if position > segment.end {
                     0
                 } else {
-                    let want = buffer.len().min((segment.end - position + 1) as usize);
+                    let room = buffer.len() - (position - written) as usize;
+                    let want = room.min((segment.end - position + 1) as usize);
                     segment.claimed = position + want as u64;
                     want
                 }
@@ -1028,14 +1068,14 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
             if want == 0 {
                 break;
             }
-            match response.read(&mut buffer[..want]) {
+            let filled = (position - written) as usize;
+            match response.read(&mut buffer[filled..filled + want]) {
                 Ok(0) => {
                     failed = true;
                     break;
                 }
                 Ok(n) => {
                     shared.control.wait(n, &shared.stop)?;
-                    write_at(&shared.file, position, &buffer[..n])?;
                     shared
                         .control
                         .downloaded
@@ -1048,13 +1088,22 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                     break;
                 }
             }
-            if position - persisted >= 1024 * 1024 {
-                shared.persist(start, position)?;
-                persisted = position;
+            // Large positional writes keep concurrent workers off the file lock.
+            if (position - written) as usize == buffer.len() {
+                write_at(&shared.file, written, &buffer[..buffer.len()])?;
+                written = position;
+            }
+            if written - persisted >= 1024 * 1024 && shared.checkpoint_due() {
+                shared.persist(start, written)?;
+                persisted = written;
             }
         }
-        if position > persisted {
-            shared.persist(start, position)?;
+        if position > written {
+            write_at(&shared.file, written, &buffer[..(position - written) as usize])?;
+            written = position;
+        }
+        if written > persisted {
+            shared.persist(start, written)?;
         }
         if shared.stop.load(Ordering::Relaxed) {
             return Err(err("paused"));
@@ -1091,12 +1140,13 @@ fn stream_body(
     control: &TransferControl,
 ) -> Result<bool> {
     control.initialize(0, length);
-    let mut output = File::create(part)?;
+    let mut output = std::io::BufWriter::with_capacity(WRITE_BUFFER, File::create(part)?);
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
         if options.stop.load(Ordering::Relaxed) {
-            output.sync_all()?;
+            output.flush()?;
+            output.get_ref().sync_all()?;
             return Err(err(
                 "paused; this server requires restarting from byte zero",
             ));
@@ -1114,7 +1164,8 @@ fn stream_body(
     if length.is_some_and(|length| length != total) {
         return Ok(false);
     }
-    output.sync_all()?;
+    output.flush()?;
+    output.get_ref().sync_all()?;
     Ok(true)
 }
 
@@ -1267,7 +1318,7 @@ pub fn download_with_control(options: Options, control: Arc<TransferControl>) ->
         .read(true)
         .write(true)
         .open(&part)?;
-    file.set_len(length)?;
+    preallocate(&file, length)?;
     store_checkpoint(&file, &meta, &state)?;
     let shared = Arc::new(Shared {
         client,
@@ -1279,6 +1330,7 @@ pub fn download_with_control(options: Options, control: Arc<TransferControl>) ->
         control,
         adopted: Mutex::new(probe.response.take().map(|r| (probe.offset, r))),
         refused: Mutex::new(None),
+        checkpointed: Mutex::new(Instant::now()),
     });
     let handles: Vec<_> = (0..options.connections)
         .map(|_| {
@@ -1457,5 +1509,169 @@ mod tests {
             .to_string(),
             "authentication required: HTTP 401 Basic realm \"xdm-test\""
         );
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    /// Deterministic xorshift64 PRNG: reproducible property runs without deps.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            if bound == 0 { 0 } else { self.next_u64() % bound }
+        }
+
+        fn string(&mut self, alphabet: &[u8], max_len: usize) -> String {
+            let len = self.below(max_len as u64 + 1) as usize;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| alphabet[self.below(alphabet.len() as u64) as usize])
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    #[test]
+    fn parse_content_range_never_panics_on_arbitrary_input() {
+        let mut rng = Rng::new(0x11c0_0001);
+        let mut alphabet: Vec<u8> = (0x20u8..0x7f).collect();
+        alphabet.extend_from_slice(&[0, b'\n', b'\t', 0xff]);
+        for _ in 0..20_000 {
+            let text = rng.string(&alphabet, 40);
+            let _ = parse_content_range(&text);
+        }
+    }
+
+    #[test]
+    fn parse_content_range_round_trips_every_valid_range() {
+        let mut rng = Rng::new(0x11c0_0002);
+        for _ in 0..20_000 {
+            let total = 1 + rng.below(u64::from(u32::MAX));
+            let start = rng.below(total);
+            let end = start + rng.below(total - start);
+            let value = format!("bytes {start}-{end}/{total}");
+            assert_eq!(parse_content_range(&value), Some((start, end, total)), "{value}");
+            assert_eq!(
+                parse_content_range(&format!("\t {value} \n")),
+                Some((start, end, total)),
+                "whitespace around {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_segments_is_a_contiguous_partition_matching_the_count_formula() {
+        let mut rng = Rng::new(0x11c0_0003);
+        for _ in 0..5_000 {
+            let length = 1 + rng.below(1 << 40);
+            let workers = rng.below(70) as usize;
+            let segments = split_segments(length, workers);
+            let expected = workers.max(1).min(16).min(length as usize);
+            assert_eq!(segments.len(), expected);
+            assert!(segments.iter().all(|s| s.start <= s.end));
+            assert_eq!(segments.first().unwrap().start, 0);
+            assert_eq!(segments.last().unwrap().end, length - 1);
+            assert!(segments.windows(2).all(|w| w[0].end + 1 == w[1].start));
+            assert_eq!(
+                segments.iter().map(|s| s.end - s.start + 1).sum::<u64>(),
+                length
+            );
+            assert!(segments.iter().all(|s| s.cursor == s.start && s.claimed == s.start));
+        }
+    }
+
+    /// `split_segments` computes `length / count` after clamping `count` to
+    /// `length`, so a zero length divides by zero. The download path only calls
+    /// it for a range-capable object with `length > 0`, so it is latent today.
+    #[test]
+    fn split_segments_of_zero_length_is_empty() {
+        assert!(split_segments(0, 8).is_empty());
+    }
+
+    fn claim_shared(length: u64, connections: usize, dir: &Path) -> Shared {
+        let meta = dir.join("task.part.meta");
+        let file = File::create(dir.join("task.part")).unwrap();
+        let state = Checkpoint {
+            version: 2,
+            url: "http://example.invalid/f".into(),
+            effective_url: "http://example.invalid/f".into(),
+            context_sha256: "0".repeat(64),
+            length,
+            etag: None,
+            last_modified: None,
+            segments: split_segments(length, connections),
+        };
+        Shared {
+            client: Client::builder().build().unwrap(),
+            request: Request {
+                url: "http://example.invalid/f".into(),
+                method: Method::GET,
+                body: None,
+            },
+            file,
+            meta,
+            state: Mutex::new(state),
+            stop: Arc::new(AtomicBool::new(false)),
+            control: Arc::new(TransferControl::new(None).unwrap()),
+            adopted: Mutex::new(None),
+            refused: Mutex::new(None),
+            checkpointed: Mutex::new(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn claim_keeps_the_segments_a_contiguous_partition() {
+        let mut rng = Rng::new(0x11c0_0004);
+        for case in 0..80u64 {
+            let length = 1 + rng.below(4 * 1024 * 1024);
+            let connections = 1 + rng.below(16) as usize;
+            let dir = std::env::temp_dir().join(format!(
+                "xdm-http-claim-{}-{case}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+
+            let shared = claim_shared(length, connections, &dir);
+            let mut claims = 0usize;
+            while let Some(start) = shared.claim().unwrap() {
+                claims += 1;
+                assert!(claims < 10_000, "claim never terminated");
+                let guard = shared.state.lock().unwrap();
+                assert_eq!(guard.segments.first().unwrap().start, 0);
+                assert_eq!(guard.segments.last().unwrap().end, length - 1);
+                assert!(guard.segments.iter().all(|s| s.start <= s.end));
+                assert!(guard.segments.windows(2).all(|w| w[0].end + 1 == w[1].start));
+                assert_eq!(
+                    guard.segments.iter().map(|s| s.end - s.start + 1).sum::<u64>(),
+                    length
+                );
+                assert!(guard.segments.iter().all(|s| {
+                    s.cursor >= s.start && s.cursor <= s.end + 1 && s.claimed <= s.end + 1
+                }));
+                for (index, segment) in guard.segments.iter().enumerate() {
+                    assert_eq!(find(&guard, segment.start).unwrap(), index);
+                }
+                assert!(guard.segments.iter().any(|s| s.start == start));
+                drop(guard);
+            }
+            assert!(claims >= connections.min(16).min(length as usize));
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }

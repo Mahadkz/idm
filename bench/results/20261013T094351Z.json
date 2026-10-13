@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-13T09:43:51Z",
+  "quick": false,
+  "interval_seconds": 0.1,
+  "config": {
+    "size_mib": 256,
+    "concurrent_mib": 64,
+    "idle_seconds": 30,
+    "queued_tasks": 1000,
+    "rate_kib": 32768
+  },
+  "scenarios": [
+    {
+      "name": "cli_256MiB_c1",
+      "detail": {
+        "connections": 1,
+        "rate_kib": null
+      },
+      "bytes": 268435456,
+      "metrics": {
+        "peak_rss_bytes": 5971968,
+        "mean_rss_bytes": 4200448,
+        "cpu_seconds": 0.4685,
+        "cpu_seconds_per_gib": 1.87409,
+        "wall_seconds": 0.4904,
+        "throughput_bytes_per_sec": 547431938.3,
+        "context_switches_voluntary": 1151,
+        "context_switches_nonvoluntary": 19,
+        "samples": 6
+      },
+      "output_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "expected_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "hash_ok": true
+    },
+    {
+      "name": "cli_256MiB_c4",
+      "detail": {
+        "connections": 4,
+        "rate_kib": null
+      },
+      "bytes": 268435456,
+      "metrics": {
+        "peak_rss_bytes": 9986048,
+        "mean_rss_bytes": 6828032,
+        "cpu_seconds": 1.0307,
+        "cpu_seconds_per_gib": 4.12262,
+        "wall_seconds": 0.4813,
+        "throughput_bytes_per_sec": 557732682.1,
+        "context_switches_voluntary": 780,
+        "context_switches_nonvoluntary": 25,
+        "samples": 6
+      },
+      "output_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "expected_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "hash_ok": true
+    },
+    {
+      "name": "cli_256MiB_c8",
+      "detail": {
+        "connections": 8,
+        "rate_kib": null
+      },
+      "bytes": 268435456,
+      "metrics": {
+        "peak_rss_bytes": 14766080,
+        "mean_rss_bytes": 10180900,
+        "cpu_seconds": 1.8988,
+        "cpu_seconds_per_gib": 7.59511,
+        "wall_seconds": 0.5657,
+        "throughput_bytes_per_sec": 474489086.0,
+        "context_switches_voluntary": 1386,
+        "context_switches_nonvoluntary": 35,
+        "samples": 7
+      },
+      "output_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "expected_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "hash_ok": true
+    },
+    {
+      "name": "cli_256MiB_c16",
+      "detail": {
+        "connections": 16,
+        "rate_kib": null
+      },
+      "bytes": 268435456,
+      "metrics": {
+        "peak_rss_bytes": 27824128,
+        "mean_rss_bytes": 21763413,
+        "cpu_seconds": 1.6915,
+        "cpu_seconds_per_gib": 6.76604,
+        "wall_seconds": 1.3984,
+        "throughput_bytes_per_sec": 191954574.0,
+        "context_switches_voluntary": 2078,
+        "context_switches_nonvoluntary": 119,
+        "samples": 15
+      },
+      "output_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "expected_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "hash_ok": true
+    },
+    {
+      "name": "cli_256MiB_c4_rate32768KiB",
+      "detail": {
+        "connections": 4,
+        "rate_kib": 32768
+      },
+      "bytes": 268435456,
+      "metrics": {
+        "peak_rss_bytes": 9924608,
+        "mean_rss_bytes": 9207990,
+        "cpu_seconds": 1.0027,
+        "cpu_seconds_per_gib": 4.01084,
+        "wall_seconds": 9.0259,
+        "throughput_bytes_per_sec": 29740508.3,
+        "context_switches_voluntary": 8061,
+        "context_switches_nonvoluntary": 75,
+        "samples": 90
+      },
+      "output_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "expected_sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "hash_ok": true
+    },
+    {
+      "name": "daemon_idle_0",
+      "detail": {
+        "tasks": 0,
+        "idle_seconds": 30
+      },
+      "bytes": 0,
+      "metrics": {
+        "peak_rss_bytes": 7143424,
+        "mean_rss_bytes": 7143424,
+        "cpu_seconds": 0.0,
+        "cpu_seconds_per_gib": null,
+        "wall_seconds": 30.0028,
+        "throughput_bytes_per_sec": 0.0,
+        "context_switches_voluntary": 0,
+        "context_switches_nonvoluntary": 0,
+        "samples": 299
+      },
+      "output_sha256": null,
+      "expected_sha256": null,
+      "hash_ok": null
+    },
+    {
+      "name": "daemon_idle_1000",
+      "detail": {
+        "tasks": 1000,
+        "idle_seconds": 30,
+        "stopped": true
+      },
+      "bytes": 0,
+      "metrics": {
+        "peak_rss_bytes": 7929856,
+        "mean_rss_bytes": 7929856,
+        "cpu_seconds": 0.0,
+        "cpu_seconds_per_gib": null,
+        "wall_seconds": 30.0025,
+        "throughput_bytes_per_sec": 0.0,
+        "context_switches_voluntary": 0,
+        "context_switches_nonvoluntary": 0,
+        "samples": 299
+      },
+      "output_sha256": null,
+      "expected_sha256": null,
+      "hash_ok": null
+    },
+    {
+      "name": "daemon_concurrent_4x64MiB",
+      "detail": {
+        "concurrency": 4,
+        "per_task_bytes": 67108864,
+        "connections": 4
+      },
+      "bytes": 268435456,
+      "metrics": {
+        "peak_rss_bytes": 27807744,
+        "mean_rss_bytes": 20566016,
+        "cpu_seconds": 1.04,
+        "cpu_seconds_per_gib": 4.16,
+        "wall_seconds": 0.4216,
+        "throughput_bytes_per_sec": 636686075.1,
+        "context_switches_voluntary": 5,
+        "context_switches_nonvoluntary": 1,
+        "samples": 6
+      },
+      "output_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "hash_ok": true,
+      "hashes": {
+        "concurrent-0.bin": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+        "concurrent-1.bin": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+        "concurrent-2.bin": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+        "concurrent-3.bin": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6"
+      }
+    }
+  ]
+}

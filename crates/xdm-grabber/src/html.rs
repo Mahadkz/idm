@@ -300,3 +300,87 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    /// Deterministic xorshift64 PRNG: reproducible property runs without deps.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            if bound == 0 { 0 } else { self.next_u64() % bound }
+        }
+
+        fn string(&mut self, alphabet: &[u8], max_len: usize) -> String {
+            let len = self.below(max_len as u64 + 1) as usize;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| alphabet[self.below(alphabet.len() as u64) as usize])
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        fn bytes(&mut self, max_len: usize) -> Vec<u8> {
+            let len = self.below(max_len as u64 + 1) as usize;
+            (0..len).map(|_| self.next_u64() as u8).collect()
+        }
+    }
+
+    #[test]
+    fn extract_never_panics_on_markup_fragments_and_bounds_output() {
+        let mut rng = Rng::new(0x4a7b_0001);
+        let alphabet = b"<>=/\"' \tabcdehgilmnoprstuvxyz&;#0123456789-!?[]%";
+        for _ in 0..20_000 {
+            let text = rng.string(alphabet, 80);
+            let extracted = extract(&text);
+            // Every extracted URL consumes at least the bytes of its attribute
+            // name, so the output stays bounded by the input size.
+            assert!(
+                extracted.urls.len() <= text.len(),
+                "{} urls from {} bytes",
+                extracted.urls.len(),
+                text.len()
+            );
+            assert!(extracted.urls.iter().all(|url| url.len() <= text.len()));
+        }
+    }
+
+    #[test]
+    fn extract_never_panics_on_arbitrary_bytes() {
+        let mut rng = Rng::new(0x4a7b_0002);
+        for _ in 0..10_000 {
+            let bytes = rng.bytes(64);
+            let text = String::from_utf8_lossy(&bytes);
+            let extracted = extract(&text);
+            assert!(extracted.base.is_none() || extracted.base.as_deref().is_some());
+        }
+    }
+
+    #[test]
+    fn decode_entities_never_expands_its_input() {
+        let mut rng = Rng::new(0x4a7b_0003);
+        let alphabet = b"&;#xX0123456789abcdefABCDEFampletgtquotaposnbspzz";
+        for _ in 0..30_000 {
+            let text = rng.string(alphabet, 40);
+            let decoded = decode_entities(&text);
+            assert!(
+                decoded.len() <= text.len(),
+                "{text:?} expanded to {decoded:?}"
+            );
+        }
+    }
+}

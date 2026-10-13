@@ -661,3 +661,163 @@ mod tests {
         assert!(read_reply(&mut malformed).is_err());
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    /// Deterministic xorshift64 PRNG: reproducible property runs without deps.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            if bound == 0 { 0 } else { self.next_u64() % bound }
+        }
+
+        fn byte(&mut self) -> u8 {
+            self.next_u64() as u8
+        }
+
+        fn bytes(&mut self, max_len: usize) -> Vec<u8> {
+            let len = self.below(max_len as u64 + 1) as usize;
+            (0..len).map(|_| self.byte()).collect()
+        }
+
+        fn string(&mut self, alphabet: &[u8], max_len: usize) -> String {
+            let len = self.below(max_len as u64 + 1) as usize;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| alphabet[self.below(alphabet.len() as u64) as usize])
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        fn token(&mut self, alphabet: &[u8], max_len: usize) -> String {
+            let len = 1 + self.below(max_len as u64) as usize;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| alphabet[self.below(alphabet.len() as u64) as usize])
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    #[test]
+    fn reply_and_reply_helpers_never_panic_on_arbitrary_bytes() {
+        let mut rng = Rng::new(0xf7b0_0001);
+        for _ in 0..20_000 {
+            let bytes = rng.bytes(80);
+            let _ = read_reply(&mut std::io::Cursor::new(bytes.clone()));
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let _ = parse_code(&text);
+            let _ = parse_epsv(&text);
+            let _ = parse_pasv(&text);
+            let _ = percent_decode(&text);
+        }
+    }
+
+    #[test]
+    fn reply_parser_bounds_continuation_lines() {
+        let mut text = String::from("220-");
+        for _ in 0..(MAX_REPLY_LINES + 10) {
+            text.push_str("220-cont\r\n");
+        }
+        let mut reader = std::io::Cursor::new(text.into_bytes());
+        assert!(read_reply(&mut reader).is_err());
+    }
+
+    #[test]
+    fn single_line_replies_round_trip_codes_and_text() {
+        let mut rng = Rng::new(0xf7b0_0002);
+        for _ in 0..10_000 {
+            let code = 100 + rng.below(500) as u16;
+            let text = rng.string(b"abc XYZ019_-", 20);
+            let line = format!("{code} {text}\r\n");
+            let mut reader = std::io::Cursor::new(line.into_bytes());
+            let reply = read_reply(&mut reader).unwrap();
+            assert_eq!(reply.code, code);
+            assert_eq!(reply.arg(), text.trim());
+        }
+    }
+
+    #[test]
+    fn epsv_and_pasv_round_trip_their_ports() {
+        let mut rng = Rng::new(0xf7b0_0003);
+        for _ in 0..20_000 {
+            let port = 1 + rng.below(65535) as u16;
+            let epsv = format!("229 Entering Extended Passive Mode (|||{port}|)");
+            assert_eq!(parse_epsv(&epsv), Some(port));
+
+            let ip = [rng.byte(), rng.byte(), rng.byte(), rng.byte()];
+            let pasv = format!(
+                "227 Entering Passive Mode ({},{},{},{},{},{})",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3],
+                port / 256,
+                port % 256
+            );
+            assert_eq!(parse_pasv(&pasv), Some((IpAddr::from(ip), port)));
+        }
+        assert_eq!(parse_epsv("(|||0|)"), None);
+        assert_eq!(parse_pasv("Entering Passive Mode (1,2,3,4,0,0)"), None);
+    }
+
+    #[test]
+    fn percent_decode_round_trips_arbitrary_encoded_bytes() {
+        let mut rng = Rng::new(0xf7b0_0004);
+        for _ in 0..10_000 {
+            let bytes = rng.bytes(16);
+            let encoded: String = bytes.iter().map(|b| format!("%{b:02X}")).collect();
+            match percent_decode(&encoded) {
+                Ok(decoded) => assert_eq!(decoded.as_bytes(), bytes.as_slice()),
+                Err(_) => assert!(std::str::from_utf8(&bytes).is_err()),
+            }
+        }
+    }
+
+    #[test]
+    fn ftp_url_parser_never_panics_on_arbitrary_text() {
+        let mut rng = Rng::new(0xf7b0_0005);
+        let alphabet = b"ftp:/%@[]:-._~?#0123456789abcXYZ \t";
+        for _ in 0..30_000 {
+            let text = rng.string(alphabet, 40);
+            let _ = FtpUrl::parse(&text);
+        }
+    }
+
+    #[test]
+    fn ftp_url_round_trips_safe_components() {
+        let mut rng = Rng::new(0xf7b0_0006);
+        let alphabet = b"abcXYZ019._-~";
+        for _ in 0..5_000 {
+            let port = 1 + rng.below(65535) as u16;
+            let user = rng.token(alphabet, 8);
+            let password = rng.string(alphabet, 8);
+            let path = format!("/{}", rng.string(alphabet, 10));
+            // The URL parser collapses the `.` and `..` path segments.
+            if path == "/." || path == "/.." {
+                continue;
+            }
+            let url = format!("ftp://{user}:{password}@127.0.0.1:{port}{path}");
+            let parsed = FtpUrl::parse(&url).unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(parsed.host, "127.0.0.1");
+            assert_eq!(parsed.port, port);
+            assert_eq!(parsed.user, user);
+            assert_eq!(parsed.password, password);
+            assert_eq!(parsed.path, path);
+        }
+    }
+}

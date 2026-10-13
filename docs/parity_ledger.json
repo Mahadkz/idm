@@ -1,0 +1,1407 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "idm_core_queue_contracts.md": {
+      "implemented": 7,
+      "partial": 37,
+      "different": 6,
+      "missing": 19
+    },
+    "idm_browser_behavior_contracts.md": {
+      "different": 5,
+      "missing": 30,
+      "partial": 25,
+      "implemented": 2
+    },
+    "idm_behavior_review.md": {
+      "partial": 27,
+      "missing": 12
+    }
+  },
+  "contracts": [
+    {
+      "id": "N01",
+      "title": "GET/HEAD discovery",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented (2026-10-13): no HEAD. One GET with `Range: bytes=OFFSET-` both verifies range support and supplies data; the validated 206 body is adopted by the segment starting at OFFSET (a resume probes from the first missing byte). A 200 body is streamed directly. Only a malformed 206 or 416 triggers one further full GET. [Engine fixture](../tests/integration/http_engine.py) counts requests: one request for a one-connection file and for no-range servers.",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/http_engine.py"
+      ]
+    },
+    {
+      "id": "N02",
+      "title": "HTTP methods and request bodies",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: `Options.method/body` and CLI `--method/--data-file` replay the method and a bounded (1 MiB) body on every probe/range request; GET with body, HEAD/CONNECT/TRACE/OPTIONS are rejected; 301/302/303 on a non-GET request fails instead of becoming GET, 307/308 preserve it. Context hash covers method/body. Fixture verifies POST-only file with 4 connections, 307 and refused 302. Daemon/browser submissions do not yet carry method/body.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N03",
+      "title": "One-shot and expiring URLs",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: request adoption means a ranged or full one-shot link is fetched by the probe response alone. If extra range connections are refused (401/403/404/410 on their first request), those ranges are released and the adopted open-ended stream absorbs adjacent untouched ranges; fixture `oneshot.bin` (8 connections) and `oneshot-norange.bin` succeed with one accepted request. No request-token lease, expiry detection or site rules.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N04",
+      "title": "Range capability and boundaries",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented static path: strict Content-Range parser, bounded segments, identity encoding, exact body coverage. Accept-Ranges alone is not used as proof.",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "N05",
+      "title": "Ignored or malformed partial response",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Different: malformed probe can fall back to full transfer; malformed worker response fails and retains checkpoint. No automatic verified single-stream restart after worker corruption.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "N06",
+      "title": "Representation compression",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Restricted: sends Accept-Encoding identity and rejects nonidentity final/range responses. Cargo has no reqwest compression feature.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "N07",
+      "title": "Known and unknown response length",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: unknown size streams the adopted full response until EOF with total/ETA unknown; zero-length resources (416 to the open range) complete as empty files; no resumable metadata for non-range content.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N08",
+      "title": "Redirect chains and credentials",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authorization/UA/Referer/Accept(-Language) may follow cross-origin redirects because the client strips Cookie/Authorization on host change (fixture verifies the redirected host receives no Cookie); any other custom header stops cross-origin redirects, and any supplied header stops an HTTPS→HTTP downgrade.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N09",
+      "title": "Cookie/User-Agent/Referer/header forwarding",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: HTTP header list is persisted and shared among workers; engine owns Range/If-Range/Host/encoding/length framing. No browser-context cookie refresh.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N10",
+      "title": "Origin/path login credentials",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Gap: no site/path credential manager or challenge UI. Explicit Authorization header can be supplied to HTTP tasks.",
+      "status": "missing",
+      "test_refs": [
+        "crates/xdm-daemon/src/credentials.rs",
+        "crates/xdm-daemon/src/main.rs"
+      ]
+    },
+    {
+      "id": "N11",
+      "title": "Authentication retries and expiry",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Gap: HTTP 401/407 become errors; no Basic/Digest/NTLM negotiation or password-expiry workflow.",
+      "status": "missing",
+      "test_refs": [
+        "crates/xdm-daemon/src/credentials.rs"
+      ]
+    },
+    {
+      "id": "N12",
+      "title": "Remote-object validators",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: checks size/final URL/header-context hash and available strong ETag/date; ranges send If-Range. Missing response validators are not themselves rejected.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N13",
+      "title": "Ignore modification-time preference",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Gap: no configurable ignore-date preference; engine refuses incompatible saved identity.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N14",
+      "title": "User-visible filename/type changes",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiation prompt. Native host has independent filename sanitation.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N15",
+      "title": "Permission/permanent HTTP errors",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial:403/404 nonretryable; daemon records failed. Error is text rather than typed recovery classification.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N16",
+      "title": "Transient server/network retries",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: probe/full requests retry up to four times on network/408/429/5xx honoring Retry-After (capped 30 s) with pause-aware waits; range requests retry the same way. Full non-range streams now retry from byte zero after a disconnect or short body (fixture `flaky-norange.bin`). No jitter or global retry fairness.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N17",
+      "title": "Timeouts, DNS and diagnostics",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: blocking client has30-second request timeout; network errors propagate. No separate DNS/connect/read-idle limits or structured diagnostics.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N18",
+      "title": "TLS/certificates and Microsoft TLS1.3 preference",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Different backend: reqwest rustls-tls. No Microsoft TLS toggle, custom trust/client certificates or detailed certificate UI. Actual protocol/cipher coverage not audited.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "N19",
+      "title": "FTP authentication/control replies",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: daemon only permits http/https; no FTP module.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N20",
+      "title": "FTP passive and active data modes",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N21",
+      "title": "FTP REST/SIZE and resume",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N22",
+      "title": "FTP optional connections/pipelining",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N23",
+      "title": "Manual per-protocol proxy",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http and https targets (HTTP proxy, HTTPS CONNECT, credentials in URL user info); CLI `--proxy`. Fixture routes a 4-connection transfer through a logging forward proxy. No daemon/GUI settings model, no FTP proxy, no 407 prompt.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N24",
+      "title": "SOCKS4/SOCKS5 and remote DNS",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial (2026-10-13): reqwest `socks` feature enabled; `socks4://`, `socks5://` and `socks5h://` (proxy-side DNS) URLs with user/password. Fixture verifies SOCKS5 user/password auth, domain-type CONNECT for socks5h and failure on wrong credentials. No settings UI.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N25",
+      "title": "Proxy exclusions and host patterns",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial (2026-10-13): manual proxies take a bypass list of host names (subdomain match), IPs and CIDR ranges via reqwest NoProxy; fixture verifies a bypassed host connects directly. Wildcard/port-specific patterns are not supported.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N26",
+      "title": "System proxy/PAC/WPAD",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: `Proxy::System` uses proxy environment variables only (fixture verifies they are honored and that `--no-proxy` ignores them). No OS settings import, PAC evaluation or WPAD.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N27",
+      "title": "Browser proxy/VPN context fallback",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: captured task has no resolved browser proxy route.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N28",
+      "title": "Windows dial-up/VPN and redial",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N29",
+      "title": "Static segment allocation",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented independent static1–16 partitioning; one worker thread per segment,64KiB per-worker read buffer.",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "N30",
+      "title": "Dynamic splitting and worker reuse",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial (2026-10-13): workers form a pool of the requested size that claims idle segments; when none remain a worker splits the largest unclaimed remainder (≥1 MiB) of a running segment at its midpoint, with per-chunk reservations so split points never overlap in-flight bytes. Splits are checkpointed. Thresholds are independent; no stall-based reassignment.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N31",
+      "title": "Stall recovery and adaptive connections",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: fixed workers and whole-request timeout/retry. Client clones share connection pool within task, not a persistent cross-task worker pool.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N32",
+      "title": "Overlap/data-corruption validation",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial safety: strict headers/body lengths/validators; no persisted interval checksums or byte-overlap comparison.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N33",
+      "title": "Preallocation and offset writes",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Independent implementation: set_len plus positional write_at; not explicit Linux fallocate or privileged Windows SetFileValidData.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "N34",
+      "title": "Checkpoint schema and write ordering",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validators; data sync then temporary metadata sync then rename. Directory sync and Windows existing-destination rename semantics require tests.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N35",
+      "title": "Pause/resume with one connection",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented (2026-10-13): connections=1 uses a single range worker with a `.part.meta` checkpoint. Saved segments are resumed by any worker count (excess segments are processed in turn, spare workers split). Fixture pauses and resumes 1→1, 1→4 and 4→1 with hash checks and verifies the resume probe starts at the saved byte.",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "N36",
+      "title": "Non-range pause/restart",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: single stream pause retains .part, no meta; next attempt restarts at zero. Disconnects during a full stream retry from zero (bounded four times). Daemon per-file automatic full retry is now governed by queue retry policy (Q07).",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N37",
+      "title": "Crash recovery and stale running states",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: daemon maps running/pausing→queued at open; segmented checkpoint validation resumes. Power-loss durability and repeated Windows checkpoint replacement not proven.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N38",
+      "title": "Separate temporary and final directories",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: .part and.meta sit beside destination; no distinct temp-root setting or cross-filesystem finalization.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N39",
+      "title": "Disk-full and access-denied assembly",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: I/O errors propagate; no space preflight, temporary-save alternative, assembly-retry UI or differentiated disk errors.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N40",
+      "title": "Large files and filesystem limits",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: u64 offsets/lengths and set_len; no >4GiB verification or filesystem limit preflight.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N41",
+      "title": "File timestamps",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: no preserve-server-date option or timestamp write.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N42",
+      "title": "Finalize, rename and output conflicts",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial (2026-10-13): publication uses a hard link plus removal of `.part` (checked rename when hard links are unsupported), so a destination created during the transfer is never replaced; the error keeps the completed `.part`. Fixture creates the destination mid-transfer and verifies both files. Cross-volume move remains absent.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N43",
+      "title": "Orphan partial cleanup",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: stopped-task remove retains files by design; no orphan inventory/cleanup.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N44",
+      "title": "Default/per-server connection caps",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget, wildcard overrides or connection profile setting.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N45",
+      "title": "Per-file limiter and remembered exceptions",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: shared token bucket across a task workers, persisted task cap, adjustable live. No app default enabled-state or per-file exception inheritance policy.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "N46",
+      "title": "Aggregate/per-host bandwidth limits",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: no aggregate/per-host bucket.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N47",
+      "title": "Usage quota and automatic resumption",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: live counters exist but no durable quota ledger/window scheduler.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "N48",
+      "title": "Resource efficiency contract",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: bounded64KiB buffers, task-limit bounded threads; per-MiB sync checkpoint and blocking worker design need measurement.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q01",
+      "title": "Queue types and default queues",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: only Main + named ordinary queues; no fixed Synchronization queue or mode.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q02",
+      "title": "Named queues and membership",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max32, names1–64bytes. Every task always has queue_id1 by default; no no-queue option or queue selector in all creation paths.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q03",
+      "title": "Independent start/stop and global controls",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: `queue start-one ID` sets a per-queue independent-start flag so the queue runs while the global gate is stopped and without starting Main; `queue stop-one`/legacy `disable` clear it; global `queue stop` (and global scheduled start/stop) clears every independent start and interrupts all workers. Legacy `queue enable` still needs the global gate. No GUI gate indicator yet. Tested in `queue_policies.py` and daemon unit tests; original semantics remain unverified.",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q04",
+      "title": "Per-queue simultaneous files",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/global2 differs observed original default4.",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "Q05",
+      "title": "Manual queue order and priority",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: `position` column (migrated; new tasks append via trigger), `daemon move ID up",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q06",
+      "title": "Completion leaves ordinary queue",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: when a task completes, `queue_id` becomes 0 (no live queue) and the origin is kept in `history_queue_id`; queue summary `complete` counts history; a queue with only completed history can be deleted (history is nulled). Existing databases are migrated. Assigning a completed task changes only its history. No synchronization queue exists, so every queue is ordinary. Unit and integration tested.",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q07",
+      "title": "Queue retry count and rotation",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: per-queue `queue retry ID COUNT",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q08",
+      "title": "One-time start/stop",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: global one-shot as before, plus per-queue one-time schedule (`queue schedule ID once START STOP",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q09",
+      "title": "Daily/weekday recurrence",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: per-queue daily schedule (`queue schedule ID daily HH:MM HH:MM",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q10",
+      "title": "Synchronization repeat/check changed objects",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: no conditional refresh/replacement or recurring validator watch.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "Q11",
+      "title": "Start queue on application startup",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Different: running flags restored; crashed active tasks requeued and eligible tasks can start. No explicit per-queue start-on-startup option.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "Q12",
+      "title": "Missed runs and daemon availability",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: per-queue missed-run policy is implemented (catch up once if the window is still open, otherwise skip; never past a stop time) and unit tested with a fake clock; global one-shot still uses overdue-trigger behavior. Sleep resume and multi-occurrence absence beyond the lookback of 7 days are untested.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q13",
+      "title": "Sleep wake timers",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Missing: no wake registration or capability warning.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "Q14",
+      "title": "Completion success/failure/manual-stop rules",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial (2026-10-13): per-queue cycle state (`idle/running/completed/completed_with_failures/stopped`) with one event per execution (`queue events ID`). Success runs the configured completion action through an injectable adapter: the real OS adapter by default, a recording adapter under `XDM_FAKE_OS_ACTIONS=1` so tests never touch the OS. Settable actions: none, notify, sleep, hibernate, shutdown, restart, exit and program (path plus literal argument list). Failures, manual stop (including global stop) and schedule cutoff record the event with action `suppressed`; an empty start produces no event; new work after completion starts a new cycle; an edited or canceled countdown records `cancelled`. Destructive actions additionally require the per-queue `--confirm-destructive` opt-in and their countdown (Q17). The [completion fixture](../tests/integration/completion_actions.py) with the recording adapter covers notify recorded, unconfirmed shutdown rejected, countdown visible then recorded, cancel prevents and manual stop suppresses; daemon unit tests cover empty-start, new-cycle, final-failure and daemon-restart suppression.",
+      "status": "partial",
+      "test_refs": [
+        "tests/integration/completion_actions.py",
+        "tests/integration/queue_policies.py"
+      ]
+    },
+    {
+      "id": "Q15",
+      "title": "Completion program/file launch",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented (2026-10-13): `queue completion ID program PATH [ARGS...]` stores the executable plus a literal argument list (IPC `CompletionAction::Program`, at most 64 arguments) and launches it without a shell after a qualifying completion, spawned without blocking the daemon while a reaper thread collects the exit status; the queue event records `started`, `executed` or the spawn error. The path is configured per queue, never browser-supplied. The completion fixture launches a real script through the recording adapter and asserts every argument arrives literally, spaces and shell metacharacters (`a;b",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "Q16",
+      "title": "Disconnect modem/VPN and app exit",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: the modem/VPN disconnect action remains missing (no dial-up or VPN adapter and no connection scoping). The application-exit action exists: `queue completion ID exit` ends the daemon about 300 ms after the queue completion event so the event insert and reply frame are written first; it needs no destructive opt-in, its configuration is unit-tested, and the recording adapter logs it instead of exiting, so no fixture terminates the daemon.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q17",
+      "title": "Shutdown/restart/sleep/hibernate",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Implemented (2026-10-13): sleep, hibernate, shutdown and restart are settable per queue but require explicit opt-in (`--confirm-destructive`, otherwise the command is rejected) plus a persistent cancelable countdown (default 60 s; the daemon accepts 1..86400 s). During the countdown the event reads `pending`, `CompletionStatus` reports queue, action and `seconds_remaining`, and `CompletionCancel` cancels it (`cancelled`); a manual stop, final failure, new cycle, action edit or daemon restart suppresses it without executing. The real adapter spawns commands directly with no shell: Linux uses `notify-send` for notify and `systemctl suspend`/`hibernate`/`poweroff`/`reboot`; the Windows path (PowerShell toast with `msg` fallback, `rundll32 powrprof.dll,SetSuspendState`, `shutdown` `/h` `/s` `/r`) is compile-structural only and untested on Windows. Tests run with `XDM_FAKE_OS_ACTIONS=1` recording adapter: the [completion fixture](../tests/integration/completion_actions.py) verifies notify recorded, unconfirmed shutdown rejected, countdown visible then recorded, cancel prevents and manual stop suppresses, and a daemon unit test proves the real adapter never executes an unarmed power action. File, queue and project completion actions remain absent.",
+      "status": "implemented",
+      "test_refs": [
+        "tests/integration/completion_actions.py"
+      ]
+    },
+    {
+      "id": "Q18",
+      "title": "Force process termination setting",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Not implemented: there is no Windows \"force close applications\" setting and no forced-termination path; ordinary completion never terminates user applications, only the configured program, notify, exit or opted-in power actions run. Whether an independent destructive option is wanted at all still needs a deliberate applicability decision.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "Q19",
+      "title": "Schedule/order/settings durability",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: SQLite WAL immediate command persistence and queue flags/limits; no scheduler editing transaction or queue-local schedule model.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q20",
+      "title": "Pause/resume/redownload state semantics",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Partial: pause queued/running; resume paused/failed; redownload fresh destination/new ID copies config/membership. No revision guard; daemon restart:false means changed-identity repair requires new destination or CLI action.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "Q21",
+      "title": "Queue exports and durable submission",
+      "source_doc": "idm_core_queue_contracts.md",
+      "current_behavior": "Independent JSON/URL list import atomic/idempotent receipts; exports omit headers/userinfo, retain signed query; queue membership/schedules not portable.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "B01",
+      "title": "B initialization (134–136) rejects non-Windows; C initial guard requires Windows",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM is deliberately cross-platform; Linux Chromium was tested.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "B02",
+      "title": "Chromium MV3 worker, all HTTP(S) frames at document start; helper scripts are we",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM MV3 all-frame script runs document idle; no page helper.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B03",
+      "title": "B `yb/vc` stores client/version/update/silent/consent state; shares client ID wi",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM stores interception toggle only; homepage identity scheme intentionally unnecessary.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B04",
+      "title": "B `Ba/Na/oa`: cycle two WebSocket endpoints then native host, 1",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM opens native messages per request; no proprietary WebSocket negotiation.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B05",
+      "title": "B `Ma`: 15 s keepalive for older negotiated versions; listener groups removed af",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM stateless submissions avoid persistent-port keepalive.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B06",
+      "title": "B `R/Gb/pb`: global/per-tab integration enablement, disabled/error icon and X ba",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM action opens popup; global opt-in only, badge counts media.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B07",
+      "title": "B `Bb/Nb`: host settings enable menus and listeners; optional browser download s",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM always observes HTTP(S), interception toggle controls handoff; no shelf suppression.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B08",
+      "title": "W startup/update/error/private-access/Firefox-consent panels; agree/back/refuse/",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM lacks onboarding/repair UX. Commercial prompts need an independent substitute.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "B09",
+      "title": "B `Oc` checks competing packaged extension IDs and can disable a duplicate; brow",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM does not disable other extensions; no duplicate-host diagnostic.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B10",
+      "title": "R registration redirect forwards hash command44, strips hash from history, retur",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM has no custom registration URL or capture page.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B11",
+      "title": "B `Nb/cb`: before-request observes GET/POST, request body, supported schemes and",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XB observes before-send-headers only; stores method; rejects observed non-GET.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B12",
+      "title": "B `Rb`: before-send-headers captures headers, correlates page-hook markers, requ",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XB retains only Referer/User-Agent, keyed by URL, maximum300. Authorization and arbitrary auth headers are omitted.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B13",
+      "title": "B `Ub/Hc`: response status, MIME, Content-Disposition, charset, extension, IP, r",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XB records MIME/media kind only; filename comes browser item.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B14",
+      "title": "B `Qb/cb/X`: maintains earlier URL/headers/body across redirects; HTTP301/302/30",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM HTTP redirects are handled by engine with origin-scoped credentials, but extension does not preserve original browser context chain.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B15",
+      "title": "B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path exclusions, wildcard m",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM basic HTTP/MIME/extension classification and global opt-in only.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B16",
+      "title": "B `qb`: onCreated correlates recent request by URL/time (observed threshold50 ms",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM pauses inside onDeterminingFilename; requires observed GET.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B17",
+      "title": "B `rb/lc/X`: filename listener filters then submits type13, with fallback cookie",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM submits independent JSON; daemon durable acceptance precedes browser cancel. T1/T2 cover fixture handoff.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B18",
+      "title": "B `$a` reply13 maps action and status3 to `kc/O`; accepted Chromium handoff expl",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM accepts friendly `accepted` response.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B19",
+      "title": "B `oa` removes integration listeners; P disconnect-after-send found pending entr",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM 10 s fallback timer exists. Late durable acceptance can still mean duplicate browser/daemon transfer; after accepted flag cancel failure also needs testing.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B20",
+      "title": "B `Sb/Tb/O`: completion/error release correlated request; held download/body cap",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XB recent map bounded300, but no age expiry or per-navigation cleanup.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B21",
+      "title": "B `U/V/Dc`: cookies per requested URL, original URL cookies for redirect, option",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM getAllURL serializes name=value; no partition/store/private context fidelity demonstrated. Firefox adapter (`extensions/firefox`) queries the request's `cookieStoreId` with `firstPartyDomain: null` and does not hand off private-window downloads; mocked-tested by `firefox_handoff.mjs` only, not real-Firefox verified.",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "B22",
+      "title": "B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-encoded forms, multipar",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM GET-only bridge and header subset.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B23",
+      "title": "B `Lc`: walk frame ancestry past about:blank for referrer; parent page7 vs resou",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM initiator/documentURL/referrer fallback can lose full page URL and frame ancestry.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B24",
+      "title": "B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/per-protocol/SOCKS p",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM does not transfer browser proxy context.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B25",
+      "title": "B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/bypass key masks and cl",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM lacks keyboard force/bypass capture.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B26",
+      "title": "B `Nb/Mb`, R: configured main-frame registration redirect uses declarative sessi",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM does not redirect navigation.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B27",
+      "title": "B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/wrapped schemes, fra",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM only HTTP(S), retains URLs according to fresh schema.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B28",
+      "title": "B `Cb/Ea/pa`: link,image,video context download; page/frame/editable fallback; c",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM context link/video/audio; image/page/frame menu absent.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B29",
+      "title": "B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor lookup for download att",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM direct context submission lacks DOM label lookup.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B30",
+      "title": "B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links collected across fram",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM lacks browser batch-link collection; desktop text/JSON import exists.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B31",
+      "title": "B `ec`: multi-link type15 initialization, count and batch identity; type14 varia",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM desktop atomic batch imports use independent schema, not browser batch context.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "B32",
+      "title": "B `Db/Zb` + C mouse26: selected text can create desktop selection panel; count/t",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM lacks selection panel.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B33",
+      "title": "B `nb/Ea` menu5: browser downloads-page link search; erases incomplete browser h",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no downloads-page carry-over menu.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B34",
+      "title": "B `fc`: no host/no links produces browser-side error notification via injected a",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM context action logs errors to console; popup supplies feedback.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B35",
+      "title": "B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, subtitles, Flash-relat",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM narrower MIME/extensions including HLS/DASH; no F4M, ad/site rules or subtitle catalog.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B36",
+      "title": "B `X`: media detection type13 action discriminator differs plain file vs manifes",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM stores popup item, later media.inspect; no host-driven body request.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B37",
+      "title": "B reply13→content19; C `bc`: browser-context fetch with URL/method/headers/body,",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM daemon fetches manifests itself; media.inspect/media.submit payloads contain no browser cookies/auth headers; browser response body not forwarded.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B38",
+      "title": "D `ua/Ka/La/Ja`: configured XHR open/header/send/loadend wrappers add Accept cor",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no page-context XHR hooks.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B39",
+      "title": "D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arrayBuffer/bytes/blob/c",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no fetch/Response/stream capture.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B40",
+      "title": "D message1229212978 config dynamically installs/restores wrappers; 1229212979 re",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no negotiation of hook ability.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B41",
+      "title": "D message1229212981 property/selector extraction→1229212982; C `ka/Cc` rejects d",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no page metadata query helper.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B42",
+      "title": "C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rules, dynamic player/li",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no site adapters or signed/expired URL refresh. Existing original rule configs are not a complete site support database.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B43",
+      "title": "C `Tb/H/ib`: video/audio/object/embed/source-child association; active/hovered/s",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XC scans video/audio currentSrc/src/source on initial/added nodes; attribute/src and source-only changes may be missed.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B44",
+      "title": "C `R/ib/jb/wb/O`: stable element/site IDs, replacement-player association using ",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM set of URLs, no player identity lifecycle.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B45",
+      "title": "C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors/occlusion and pixel",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no overlay geometry.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B46",
+      "title": "C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles translate and clip child-pl",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM all-frame URL collection only.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B47",
+      "title": "C mutation/resize/intersection observers, 200 ms debounce `W/uc`; scroll29/resiz",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM mutation added-node observer only.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B48",
+      "title": "B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/background, delayed hide;",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM popup only; no floating player panel.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B49",
+      "title": "B window listeners and `U/sc/pc/Oa`: window registration6, content-area geometry",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no native browser-window tracking.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B50",
+      "title": "B `ab/xb/Ob/xa`: navigation and history changes refresh site state, clear stale ",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM deletes media on tab close only; navigation leaves previous-page items.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B51",
+      "title": "C `C/$b/ob` + B `ec`: title from top page/og:title, source credibility code, nor",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM popup shows raw URL; no title/thumbnail/player mapping.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B52",
+      "title": "L21130 instructs selecting desired quality in player before panel shows it",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM public clear manifest inspection enumerates FFprobe tracks, popup sorts resolution/bitrate. T3 fixture.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B53",
+      "title": "L21005/21006 audio-only/video-only; mux exports establish separate streams, not ",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM video plus selectable audio/noaudio; popup requires video and cannot submit audio-only.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B54",
+      "title": "L21192 incompatible audio/video can leave audio separately; native exports cover",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM stream-copy MP4 only when compatible; limited fallback behavior.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B55",
+      "title": "L21000/21001 live stop/save and no same-position resume; subtitles21203; URL exp",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM clear finite media fixture succeeds; live/subtitles/refresh pending, encrypted HLS/DASH refused.",
+      "status": "implemented",
+      "test_refs": []
+    },
+    {
+      "id": "B56",
+      "title": "B `$a`12/`Ac/mc`: host resource asks browser to locate associated frame/player; ",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no desktop→browser player query.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B57",
+      "title": "B `$a`24/`Dc`: host explicitly requests cookies for URL; response includes cooki",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM only submission-time cookie gathering.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "B58",
+      "title": "B `$a`20: host asks proxy comparison/context; reply121/122 and matching flags",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no proxy handshake.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B59",
+      "title": "B `$a`22/`Ec`: optional notification permission, desktop-supplied title/text, ti",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM no native notification bridge.",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "B60",
+      "title": "B `$a`100: echo family when acknowledgment requested; default unknown family rec",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM versioned allowlisted JSON operations rather than legacy echo.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "B61",
+      "title": "Native host `00402830` startup discovers Windows session/process, monitor mutex/",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "Rust host independent per-user Unix socket/named pipe, installation token; original internal protocol deliberately not interoperated.",
+      "status": "different",
+      "test_refs": []
+    },
+    {
+      "id": "B62",
+      "title": "Standard four-byte native-endian UTF-8 JSON length, outer JSON string around leg",
+      "source_doc": "idm_browser_behavior_contracts.md",
+      "current_behavior": "XDM JSON objects, 1 MiB framing bound, schema/version validation. Native fixtures cover fragmented frame/limits.",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "address-refresh",
+      "title": "Expired task enters a wait-for-new-session/address flow; one refresh at a time; ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.properties: partial; task.resume: partial; task.wait: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "all-links-and-clipboard",
+      "title": "All-link collection can hide HTML/images/duplicates and use link text descriptio",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "browser.all_links: pending; settings.general: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "appearance-and-progress",
+      "title": "System dark mode, font choice/reset and progress tab/start-view settings can req",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "gui.appearance: pending; task.progress: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "browser-platform-health",
+      "title": "Original health depends on elevation, BFE, drivers/helpers and Windows updates; ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "browser.integration: partial; platform.privilege: platform-pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "category-retroactive",
+      "title": "Extension/site rules and last-used paths classify future files; old rows may be ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "settings.categories: partial; settings.paths: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "completion-power",
+      "title": "Task, queue and grabber completion can request shutdown/sleep/hibernate; reboot ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "power.shutdown: pending; power.restart: pending; task.completion: pending; grabber.schedule: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "completion-precedence",
+      "title": "Per-file settings can be unavailable during queue processing; exit warns about o",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.completion: pending; app.exit: partial; queue.schedule: partial; task.progress: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "completion-program-and-scanner",
+      "title": "Completion can open a configured file; scanner arguments accept a file token, or",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "security.scanner: pending; grabber.schedule: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "connection-profiles-and-host-caps",
+      "title": "Default profile/connection count and per-server exceptions are exposed; too many",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "settings.connections: partial; settings.host_connections: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "content-identity-recovery",
+      "title": "Changed date/size can restart a task; date checking can be disabled; mismatched ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.resume: partial; settings.downloads: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "duplicate-policy",
+      "title": "Remembered duplicate policies are ask, numbered duplicate, overwrite, or show co",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.duplicate: partial; settings.downloads: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "eager-confirmation",
+      "title": "Transfer may start while confirmation is visible, so Download Later can retain a",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.add: partial; settings.downloads: partial; queue.assignment: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "file-actions",
+      "title": "Move/rename, open-with, configurable double-click and completed-file drag are ex",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.properties: partial; task.completion: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "force-bypass-capture",
+      "title": "Force and bypass modifier sets must not conflict; force capture can require a le",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "browser.shortcuts: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "generated-batch",
+      "title": "A URL wildcard expands numeric/alphabetic sequences with width and previews; ori",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "batch.generated: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "grabber-auth-and-offline",
+      "title": "Crawler supports manual login, excludes logout patterns, uses relative folders a",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "grabber.crawl: pending; grabber.destination: pending; grabber.project: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "grabber-project-recovery",
+      "title": "Corrupt/incompatible projects/templates, partial loading and disk-space errors a",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "grabber.load: pending; grabber.save: pending; grabber.schedule: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "limiter-precedence",
+      "title": "Startup limiter default and remembered per-file exceptions/persistence can diffe",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "speed.task: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "live-stop-save",
+      "title": "Stopping live recording can finalize captured content, with a warning that the s",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "media.overlay: pending; task.resume: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "minimum-media-size",
+      "title": "Separate audio/video panel thresholds only apply when total media size is known;",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "media.minimum: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "miscapture-exceptions",
+      "title": "Two cancellations or similar mistaken captures can prompt for site/address patte",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "browser.exceptions: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "player-panel-policy",
+      "title": "Full/mini media panel, site exclusions and protected-content visibility coexist ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "media.overlay: pending; browser.types: partial; browser.exceptions: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "playlist-link-expansion",
+      "title": "Downloaded M3U can offer its MP3 links as one download or a batch, separate from",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "media.overlay: pending; browser.all_links: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "proxy-selection",
+      "title": "Manual, auto-detected, system and none modes; PAC, protocol-selective proxy/SOCK",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "settings.proxy: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "quality-and-track-catalog",
+      "title": "Other quality may appear only after player selection; separate audio/video track",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "media.overlay: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "queue-independent-start",
+      "title": "Named queues have individual start/stop commands; toolbar start/stop can choose ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "queue.manage: partial; queue.master: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "queue-order-and-retry",
+      "title": "Manual queue ordering and a scheduler retry count per failed file are exposed se",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "queue.files: partial; queue.schedule: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "quota-window",
+      "title": "A megabyte-per-hour-window budget can warn, stop downloads and automatically res",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "settings.quota: pending",
+      "status": "missing",
+      "test_refs": []
+    },
+    {
+      "id": "recurrence-and-wake",
+      "title": "Daily/weekday and periodic jobs require the application running; busy/editing gr",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "queue.schedule: partial; grabber.schedule: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "remove-versus-delete",
+      "title": "Removing rows is separate from deleting completed files; incomplete and mixed se",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.remove: partial; task.remove_completed: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "search-scopes",
+      "title": "Name/description/source/site/parent/referrer search supports case and whole-stri",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "gui.search: partial; gui.find_next: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "server-name-reconciliation",
+      "title": "Redirect/response filename and MIME-derived extension can prompt to replace the ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.properties: partial; task.add: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "single-use-request",
+      "title": "A second request may return HTML instead of the file; original guidance includes",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "stream-assembly-fallback",
+      "title": "Media part processing can seek a matching frame; muxing has its own state/errors",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "media.overlay: pending; task.progress: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "synchronization",
+      "title": "Synchronization and grabber updates revisit sources, update changed files, optio",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "queue.files: partial; grabber.schedule: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "temporary-storage-cleanup",
+      "title": "Final and temporary volumes have separate capacity/file-size limits; failed publ",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "settings.paths: partial; task.resume: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "tls-substitution",
+      "title": "Experimental original TLS mode changes a global Windows setting and has library-",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "settings.connections: partial",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "unknown-length-completion",
+      "title": "EOF completion includes a notice that a file of unknown size might be incomplete",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "task.progress: partial; task.completion: pending",
+      "status": "partial",
+      "test_refs": []
+    },
+    {
+      "id": "updater-integrity",
+      "title": "Update metadata/signature/download validation and site-rule format compatibility",
+      "source_doc": "idm_behavior_review.md",
+      "current_behavior": "app.update: pending; browser.integration: partial",
+      "status": "partial",
+      "test_refs": []
+    }
+  ]
+}

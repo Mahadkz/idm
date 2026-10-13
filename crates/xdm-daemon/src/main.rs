@@ -24,8 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 use xdm_http::{Options, Progress, Proxy, TransferControl, download_with_control};
 use schedule::{Clock, SystemClock};
@@ -80,6 +79,8 @@ pub(crate) struct Active {
     pub(crate) control: Option<Arc<TransferControl>>,
     /// Live counters for single-stream FTP transfers.
     pub(crate) ftp: Option<Arc<FtpLive>>,
+    /// Recorded-bytes/seconds progress for live media jobs.
+    pub(crate) media: Option<Arc<MediaLive>>,
 }
 
 /// Live progress for one FTP transfer, mirroring what the HTTP engine exposes.
@@ -162,6 +163,34 @@ fn ftp_checkpoint_progress(output: &Path) -> Option<(u64, Option<u64>)> {
     Some((std::fs::metadata(&part).ok()?.len(), total))
 }
 
+/// Live progress for one live-recording media job: recorded bytes with the
+/// wall-clock capture seconds, both kept in atomics so the daemon lock never
+/// waits on the recorder.
+#[derive(Debug)]
+pub(crate) struct MediaLive {
+    /// Bytes ffmpeg has written so far, sampled from the temporary file.
+    downloaded: AtomicU64,
+    started: Instant,
+}
+
+impl MediaLive {
+    fn new() -> Self {
+        Self { downloaded: AtomicU64::new(0), started: Instant::now() }
+    }
+
+    /// Called from the recorder's sampling thread while ffmpeg is running.
+    fn report(&self, downloaded: u64) {
+        self.downloaded.store(downloaded, Ordering::Relaxed);
+    }
+
+    fn progress(&self) -> (u64, u64) {
+        (
+            self.downloaded.load(Ordering::Relaxed),
+            self.started.elapsed().as_secs(),
+        )
+    }
+}
+
 pub(crate) struct Service {
     /// Shared state handle so short-lived background threads (site grabs) can
     /// be spawned from any `&self` command handler.
@@ -179,6 +208,8 @@ struct Work {
     stop: Arc<AtomicBool>,
     /// Live FTP progress holder, mirrored inside the active entry.
     ftp: Option<Arc<FtpLive>>,
+    /// Live-recording progress holder, mirrored inside the active entry.
+    media: Option<Arc<MediaLive>>,
 }
 
 #[derive(Debug)]
@@ -231,6 +262,13 @@ fn task_summaries(inner: &Inner, task_id: Option<i64>) -> Result<Vec<TaskSummary
                     (None, Some(ftp)) => Some(ftp.progress()),
                     (None, None) => None,
                 });
+            // A live recording reports its captured bytes and seconds; the
+            // recorder has no total to show, so only the counters fill in.
+            let recording = inner
+                .active
+                .get(&id)
+                .and_then(|active| active.media.as_ref())
+                .map(|media| media.progress());
             let progress: Option<(u64, Option<u64>)> = if live.is_some() {
                 None
             } else if status == "complete" {
@@ -251,10 +289,12 @@ fn task_summaries(inner: &Inner, task_id: Option<i64>) -> Result<Vec<TaskSummary
                 error: row.get(5)?,
                 downloaded: live
                     .map(|p| p.downloaded)
+                    .or(recording.map(|(bytes, _)| bytes))
                     .or_else(|| progress.map(|(done, _)| done)),
                 total: live
                     .and_then(|p| p.total)
                     .or_else(|| progress.and_then(|(_, total)| total)),
+                media_seconds: recording.map(|(_, seconds)| seconds),
                 kind: row.get(6)?,
                 category: row.get(7)?,
                 rate_limit: row.get::<_, Option<i64>>(8)?.map(|rate| rate as u64),
@@ -770,7 +810,7 @@ impl Service {
                 let id = next_task_id(&inner.db)?;
                 let rules = load_rules(&inner.db)?;
                 let category = match &mode {
-                    MediaMode::Video { .. } => "Video".to_string(),
+                    MediaMode::Video { .. } | MediaMode::Live { .. } => "Video".to_string(),
                     MediaMode::Audio { .. } => xdm_categories::classify_with(
                         &rules,
                         std::path::Path::new(&output)
@@ -784,7 +824,8 @@ impl Service {
                     MediaMode::Subtitles { .. } => "Other".to_string(),
                 };
                 let (media_video, media_audio) = match &mode {
-                    MediaMode::Video { video, audio, .. } => {
+                    MediaMode::Video { video, audio, .. }
+                    | MediaMode::Live { video, audio, .. } => {
                         (Some(*video as i64), audio.map(|index| index as i64))
                     }
                     _ => (None, None),
@@ -1214,8 +1255,10 @@ impl Service {
                     let mut headers: Vec<(String, String)> =
                         serde_json::from_str(&headers_json)?;
                     // A matching site login supplies Basic credentials for its
-                    // own origin only, unless the submitter set a header already.
-                    if kind == "http"
+                    // own origin only, unless the submitter set a header
+                    // already. Media manifests replay them the same way so
+                    // ffmpeg opens every chain document authenticated.
+                    if (kind == "http" || kind == "media")
                         && !headers
                             .iter()
                             .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
@@ -1227,10 +1270,22 @@ impl Service {
                             format!("Basic {}", credentials::basic_token(&login.username, &login.password)),
                         ));
                     }
+                    let stored_mode = if kind == "media" {
+                        Some(
+                            stored_media_mode(media_mode_json, media_video, media_audio)
+                                .ok_or("media task without a usable track selection")?,
+                        )
+                    } else {
+                        None
+                    };
+                    // Only live recordings have progress to report while they run.
+                    let media = stored_mode
+                        .as_ref()
+                        .is_some_and(|mode| matches!(mode, MediaMode::Live { .. }))
+                        .then(|| Arc::new(MediaLive::new()));
                     let kind = if kind == "media" {
                         WorkKind::Media {
-                            mode: stored_media_mode(media_mode_json, media_video, media_audio)
-                                .ok_or("media task without a usable track selection")?,
+                            mode: stored_mode.expect("resolved above"),
                             headers,
                         }
                     } else if kind == "ftp" {
@@ -1253,6 +1308,7 @@ impl Service {
                             stop: stop.clone(),
                             control,
                             ftp: ftp.clone(),
+                            media: media.clone(),
                         },
                     );
                     return Ok(Work {
@@ -1263,6 +1319,7 @@ impl Service {
                         proxy: serde_json::from_str(&inner.proxy).unwrap_or_default(),
                         stop,
                         ftp,
+                        media,
                     });
                 }
             }
@@ -1370,6 +1427,57 @@ impl Service {
                             &headers,
                             &work.stop,
                         ),
+                        MediaMode::Live {
+                            video,
+                            audio,
+                            max_seconds,
+                        } => match work.media.clone() {
+                            None => Err("live media task without a progress holder".into()),
+                            Some(live) => {
+                                // The recorder's stop-and-save publish keeps
+                                // the capture usable: pausing a live task
+                                // finishes ffmpeg gracefully and `record_live`
+                                // returns the completed file (the task
+                                // completes, not pauses). A VOD manifest keeps
+                                // the pause semantics and is the documented
+                                // fallback for Live submissions.
+                                let temporary = media::media_part_path(&work.output);
+                                // A restart re-queues interrupted jobs; like
+                                // the video mode's stale-part recovery, the
+                                // leftover recorder temporary of the same task
+                                // is removed so the capture can restart.
+                                let _ = std::fs::remove_file(&temporary);
+                                let finished = Arc::new(AtomicBool::new(false));
+                                // A sampling thread keeps the recorded-byte
+                                // counter fresh; the daemon lock reads the
+                                // atomic only.
+                                let sampler = {
+                                    let temporary = temporary.clone();
+                                    let live = live.clone();
+                                    let finished = finished.clone();
+                                    thread::spawn(move || {
+                                        while !finished.load(Ordering::Relaxed) {
+                                            if let Ok(meta) = std::fs::metadata(&temporary) {
+                                                live.report(meta.len());
+                                            }
+                                            thread::sleep(Duration::from_secs(1));
+                                        }
+                                    })
+                                };
+                                let result = xdm_media::record_live(
+                                    &work.url,
+                                    &work.output,
+                                    *video,
+                                    *audio,
+                                    &headers,
+                                    &work.stop,
+                                    max_seconds.map(|seconds| Duration::from_secs(seconds)),
+                                );
+                                finished.store(true, Ordering::Relaxed);
+                                let _ = sampler.join();
+                                result.map(|summary| live.report(summary.bytes))
+                            }
+                        },
                     },
                 };
                 if let Ok(mut inner) = service.inner.lock() {
@@ -2001,6 +2109,72 @@ mod tests {
         let work = service.next_work().unwrap();
         assert_eq!(work.id, plain);
         let WorkKind::Http { headers, .. } = work.kind else { unreachable!() };
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn media_work_injects_matching_login_and_keeps_explicit_headers() {
+        let (service, _, _) = service(1000);
+        service.command(Command::SetConcurrency { limit: 16 }).unwrap();
+        service
+            .command(Command::LoginSave {
+                pattern: "http://127.0.0.1:1/".into(),
+                username: "alice".into(),
+                password: "s3cret".into(),
+                enabled: true,
+            })
+            .unwrap();
+        let job = |request_id: &str, headers: Vec<(String, String)>| {
+            service
+                .command(Command::SubmitMediaJob {
+                    request_id: request_id.into(),
+                    url: "http://127.0.0.1:1/master.m3u8".into(),
+                    output: format!("/nonexistent-xdm-test/{request_id}.mkv"),
+                    headers,
+                    mode: MediaMode::Live {
+                        video: 0,
+                        audio: Some(1),
+                        max_seconds: Some(5),
+                    },
+                    priority: 1,
+                })
+                .unwrap()
+                .task_id
+                .unwrap()
+        };
+        // A saved login supplies the Basic credentials of the manifest origin.
+        let id = job("media-login", Vec::new());
+        let work = service.next_work().unwrap();
+        assert_eq!(work.id, id);
+        let WorkKind::Media { mode, headers } = work.kind else { unreachable!() };
+        assert!(matches!(mode, MediaMode::Live { .. }));
+        assert!(work.media.is_some());
+        assert_eq!(
+            headers,
+            vec![("Authorization".into(), format!("Basic {}", credentials::basic_token("alice", "s3cret")))]
+        );
+        // A submitter-provided Authorization header is never overridden.
+        let explicit = job(
+            "media-login-explicit",
+            vec![("Authorization".into(), "Bearer supplied".into())],
+        );
+        let work = service.next_work().unwrap();
+        assert_eq!(work.id, explicit);
+        let WorkKind::Media { headers, .. } = work.kind else { unreachable!() };
+        assert_eq!(headers, vec![("Authorization".into(), "Bearer supplied".into())]);
+        // With a disabled login the task keeps its clean headers.
+        service
+            .command(Command::LoginSave {
+                pattern: "http://127.0.0.1:1/".into(),
+                username: "alice".into(),
+                password: "s3cret".into(),
+                enabled: false,
+            })
+            .unwrap();
+        let plain = job("media-login-plain", Vec::new());
+        let work = service.next_work().unwrap();
+        assert_eq!(work.id, plain);
+        let WorkKind::Media { headers, .. } = work.kind else { unreachable!() };
         assert!(headers.is_empty());
     }
 

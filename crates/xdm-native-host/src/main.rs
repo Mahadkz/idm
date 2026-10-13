@@ -193,11 +193,24 @@ mod tests {
             media_mode(&json!({"mode": "subtitles", "track": 4})).unwrap(),
             MediaMode::Subtitles { track: 4 }
         );
+        // Live payloads carry the video/audio selection and an optional
+        // bounded catch cap.
+        assert_eq!(
+            media_mode(&json!({"mode": "live", "videoIndex": 2, "audioIndex": 3, "maxSeconds": 120}))
+                .unwrap(),
+            MediaMode::Live { video: 2, audio: Some(3), max_seconds: Some(120) }
+        );
+        assert_eq!(
+            media_mode(&json!({"mode": "live", "videoIndex": 0})).unwrap(),
+            MediaMode::Live { video: 0, audio: None, max_seconds: None }
+        );
         for payload in [
             json!({"mode": "mystery"}),
             json!({"mode": "audio", "track": 10001}),
             json!({"mode": "audio", "track": 1, "format": {"kind": "flac"}}),
             json!({"mode": "video", "subtitles": [1, 99999]}),
+            json!({"mode": "live", "maxSeconds": xdm_ipc::MAX_LIVE_SECONDS + 1}),
+            json!({"mode": "live"}),
             json!({"audioIndex": 1}),
         ] {
             assert!(media_mode(&payload).is_err(), "{payload}");
@@ -345,6 +358,22 @@ fn media_mode(payload: &Value) -> Result<MediaMode, &'static str> {
             track: required_index(payload, "track")
                 .or(required_index(payload, "audioIndex"))?,
         }),
+        Some("live") => {
+            let max_seconds = match payload.get("maxSeconds") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_u64()
+                        .filter(|seconds| (1..=xdm_ipc::MAX_LIVE_SECONDS).contains(seconds))
+                        .ok_or("invalid media selection")?,
+                ),
+            };
+            Ok(MediaMode::Live {
+                video: required_index(payload, "videoIndex")?,
+                audio: optional_index(payload, "audioIndex")?,
+                max_seconds,
+            })
+        }
         None => Ok(MediaMode::Video {
             video: required_index(payload, "videoIndex")?,
             audio: optional_index(payload, "audioIndex")?,
@@ -393,11 +422,15 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
         .unwrap_or("video");
     let digest = format!("{:x}", Sha256::digest(request_id.as_bytes()));
     // Legacy payloads keep their historical name shape; typed jobs name the
-    // mode so video, audio and sidecar outputs of one stream never collide.
+    // mode so video, audio, sidecar and live outputs of one stream never
+    // collide.
     let output = match &mode {
         MediaMode::Video { video, .. } => directory
             .join("Video")
             .join(format!("{stem}-v{video}-{}.mp4", &digest[..10])),
+        MediaMode::Live { video, .. } => directory
+            .join("Video")
+            .join(format!("{stem}-live-v{video}-{}.mp4", &digest[..10])),
         MediaMode::Audio { format, .. } => directory
             .join("Music")
             .join(format!(

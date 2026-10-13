@@ -198,12 +198,15 @@ struct MediaFlags {
     positional: Vec<String>,
     headers: Vec<(String, String)>,
     subtitles: Vec<usize>,
+    /// `--max-seconds N` for live recordings; ignored by the other modes.
+    max_seconds: Option<u64>,
 }
 
 fn media_flags(args: Vec<String>) -> MediaFlags {
     let mut positional = Vec::new();
     let mut headers = Vec::new();
     let mut subtitles = Vec::new();
+    let mut max_seconds = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -218,6 +221,15 @@ fn media_flags(args: Vec<String>) -> MediaFlags {
                     subtitles.push(part.trim().parse::<usize>().unwrap_or_else(|_| usage()));
                 }
             }
+            "--max-seconds" => {
+                let seconds = iter.next().unwrap_or_else(|| usage());
+                let seconds = seconds
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| (1..=xdm_ipc::MAX_LIVE_SECONDS).contains(value))
+                    .unwrap_or_else(|| usage());
+                max_seconds = Some(seconds);
+            }
             _ => positional.push(arg),
         }
     }
@@ -225,6 +237,7 @@ fn media_flags(args: Vec<String>) -> MediaFlags {
         positional,
         headers,
         subtitles,
+        max_seconds,
     }
 }
 
@@ -270,9 +283,12 @@ fn media_command(args: Vec<String>) {
     let stop = media_stop();
     let headers = &flags.headers;
     let outcome = match (sub.as_str(), positional.len()) {
-        ("inspect", 1) => xdm_media::inspect_with_headers(&positional[0], headers)
-            .map(|tracks| {
-                serde_json::to_string_pretty(&tracks).unwrap_or_default()
+        ("inspect", 1) => xdm_media::inspect_report_with_headers(&positional[0], headers)
+            .map(|report| {
+                // The live verdict rides on stderr, so scripts reading the
+                // track array from stdout stay unaffected.
+                eprintln!("live: {}", report.live);
+                serde_json::to_string_pretty(&report.tracks).unwrap_or_default()
             }),
         ("download", 3) | ("download", 4) => {
             xdm_media::download_with_headers(
@@ -286,6 +302,25 @@ fn media_command(args: Vec<String>) {
                 false,
             )
             .map(|_| format!("saved {}", positional[1]))
+        }
+        ("record", 3) | ("record", 4) => {
+            xdm_media::record_live(
+                &positional[0],
+                &PathBuf::from(&positional[1]),
+                parse_number(&positional[2]),
+                positional.get(3).map(|v| parse_number(v)),
+                headers,
+                &stop,
+                flags.max_seconds.map(std::time::Duration::from_secs),
+            )
+            .map(|summary| {
+                format!(
+                    "saved {} ({} bytes, {:.1}s)",
+                    positional[1],
+                    summary.bytes,
+                    summary.duration_secs
+                )
+            })
         }
         ("audio", 4) => xdm_media::download_audio(
             &positional[0],
@@ -350,6 +385,7 @@ fn daemon_command(args: Vec<String>) {
         // daemon media-job URL OUT video VIDEO [AUDIO] [--subtitles 1,2] [--header 'N: v']
         // daemon media-job URL OUT audio TRACK original|mp3:KBPS|m4a:KBPS|opus:KBPS [--header 'N: v']
         // daemon media-job URL OUT subtitles TRACK [--header 'N: v']
+        // daemon media-job URL OUT live VIDEO [AUDIO] [--max-seconds N] [--header 'N: v']
         Some("media-job") if args.len() >= 5 => {
             let media = media_flags(args[3..].to_vec());
             let mode = match media.positional.as_slice() {
@@ -369,6 +405,16 @@ fn daemon_command(args: Vec<String>) {
                 },
                 [kind, track] if kind == "subtitles" => MediaMode::Subtitles {
                     track: parse_number(track),
+                },
+                [kind, video] if kind == "live" => MediaMode::Live {
+                    video: parse_number(video),
+                    audio: None,
+                    max_seconds: media.max_seconds,
+                },
+                [kind, video, audio] if kind == "live" => MediaMode::Live {
+                    video: parse_number(video),
+                    audio: Some(parse_number(audio)),
+                    max_seconds: media.max_seconds,
                 },
                 _ => usage(),
             };
@@ -903,10 +949,11 @@ fn usage() -> ! {
        xdm-cli grab PROJECT.json
        xdm-cli media inspect MANIFEST_URL [--header 'Name: value']
        xdm-cli media download MANIFEST_URL OUTPUT.mp4|OUTPUT.mkv VIDEO_INDEX [AUDIO_INDEX] [--subtitles 1,2] [--header 'Name: value']
+       xdm-cli media record MANIFEST_URL OUTPUT.mp4|OUTPUT.mkv VIDEO_INDEX [AUDIO_INDEX] [--max-seconds N] [--header 'Name: value']
        xdm-cli media audio MANIFEST_URL OUTPUT TRACK original|mp3:KBPS|m4a:KBPS|opus:KBPS [--header 'Name: value']
        xdm-cli media subtitles MANIFEST_URL OUTPUT.srt|.vtt TRACK [--header 'Name: value']
        xdm-cli media queue MANIFEST_URL OUTPUT VIDEO_INDEX [AUDIO_INDEX] [--subtitles 1,2] [--header 'Name: value']
-       xdm-cli daemon media-job MANIFEST_URL OUTPUT video|audio|subtitles SELECTION [SELECTION...] [--subtitles 1,2] [--header 'Name: value']"
+       xdm-cli daemon media-job MANIFEST_URL OUTPUT video|audio|subtitles|live SELECTION [SELECTION...] [--subtitles 1,2] [--max-seconds N] [--header 'Name: value']"
     );
     std::process::exit(2)
 }

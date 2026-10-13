@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use xdm_ipc::{MediaAudioFormat, MediaMode};
 
 /// Web headers a media job replays: bounded count and lengths, no
@@ -14,7 +15,9 @@ pub(crate) fn valid_media_headers(headers: &[(String, String)]) -> bool {
 }
 
 /// Fields a `SubmitMediaJob` carries: the manifest-URL and track-index guards
-/// of `SubmitMedia`, plus a mode-aware destination extension check.
+/// of `SubmitMedia`, plus a mode-aware destination extension check. A live
+/// recording accepts the same containers as a video mux and its catch cap
+/// (`max_seconds`, when set) stays within one day.
 pub(crate) fn valid_media_request(url: &str, output: &str, mode: &MediaMode) -> bool {
     let manifest = url.split('?').next().unwrap_or("").to_ascii_lowercase();
     let extension = std::path::Path::new(output)
@@ -34,10 +37,32 @@ pub(crate) fn valid_media_request(url: &str, output: &str, mode: &MediaMode) -> 
         }
         MediaMode::Audio { track, .. } => *track <= 10000,
         MediaMode::Subtitles { track } => *track <= 10000,
+        MediaMode::Live {
+            video,
+            audio,
+            max_seconds,
+        } => {
+            *video <= 10000
+                && audio.is_none_or(|index| index <= 10000)
+                && max_seconds.is_none_or(|seconds| {
+                    (1..=xdm_ipc::MAX_LIVE_SECONDS).contains(&seconds)
+                })
+        }
     };
     (manifest.ends_with(".m3u8") || manifest.ends_with(".mpd"))
         && mode.valid(extension)
         && bounded
+}
+
+/// The crash-safe temporary file xdm-media records a live capture into before
+/// publishing; it mirrors the engine's private `part_path` so the work runner
+/// can report recorded bytes while ffmpeg is still writing.
+pub(crate) fn media_part_path(output: &Path) -> PathBuf {
+    let extension = output
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("media");
+    output.with_extension(format!("{extension}.xdm-part"))
 }
 
 /// Stored-mode decode: rows written before `media_mode_json` exist are the
@@ -78,6 +103,94 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use xdm_ipc::Command;
+
+    #[test]
+    fn live_jobs_validate_containers_and_catch_cap() {
+        let (service, _, _) = service(1000);
+        let live = |request_id: &str, output: &str, mode: MediaMode| -> bool {
+            service
+                .command(Command::SubmitMediaJob {
+                    request_id: request_id.into(),
+                    url: "http://127.0.0.1:1/master.m3u8".into(),
+                    output: output.into(),
+                    headers: Vec::new(),
+                    mode,
+                    priority: 1,
+                })
+                .unwrap()
+                .ok
+        };
+        // A live recording targets the containers xdm-media's recorder muxes.
+        assert!(live(
+            "live-mp4",
+            "/nonexistent-xdm-test/take.mp4",
+            MediaMode::Live { video: 0, audio: Some(1), max_seconds: Some(60) }
+        ));
+        assert!(live(
+            "live-mkv",
+            "/nonexistent-xdm-test/take.mkv",
+            MediaMode::Live { video: 0, audio: None, max_seconds: None }
+        ));
+        // Sidecars, raw extensions, zeroed or oversized caps, and unbounded
+        // track indices stay rejected.
+        assert!(!live(
+            "live-srt",
+            "/nonexistent-xdm-test/take.srt",
+            MediaMode::Live { video: 0, audio: None, max_seconds: None }
+        ));
+        assert!(!live(
+            "live-ts",
+            "/nonexistent-xdm-test/take.ts",
+            MediaMode::Live { video: 0, audio: None, max_seconds: None }
+        ));
+        assert!(!live(
+            "live-zero-cap",
+            "/nonexistent-xdm-test/take.mp4",
+            MediaMode::Live { video: 0, audio: None, max_seconds: Some(0) }
+        ));
+        assert!(!live(
+            "live-over-cap",
+            "/nonexistent-xdm-test/take.mp4",
+            MediaMode::Live { video: 0, audio: None, max_seconds: Some(xdm_ipc::MAX_LIVE_SECONDS + 1) }
+        ));
+        assert!(!live(
+            "live-bad-track",
+            "/nonexistent-xdm-test/take.mp4",
+            MediaMode::Live { video: 20000, audio: None, max_seconds: None }
+        ));
+    }
+
+    /// Live tasks grid the queued row into the Video category and record the
+    /// video and audio selectors in the legacy columns.
+    #[test]
+    fn live_jobs_persist_mode_and_video_category() {
+        let (service, _, _) = service(1000);
+        let reply = service
+            .command(Command::SubmitMediaJob {
+                request_id: "live-cat".into(),
+                url: "http://127.0.0.1:1/master.m3u8".into(),
+                output: "/nonexistent-xdm-test/live.mkv".into(),
+                headers: Vec::new(),
+                mode: MediaMode::Live { video: 2, audio: Some(3), max_seconds: Some(30) },
+                priority: 1,
+            })
+            .unwrap();
+        assert!(reply.ok, "{:?}", reply.error);
+        let inner = service.inner.lock().unwrap();
+        let (category, video, audio, mode_json): (String, Option<i64>, Option<i64>, String) = inner
+            .db
+            .query_row(
+                "SELECT category,media_video,media_audio,media_mode_json FROM tasks WHERE id=?1",
+                [reply.task_id.unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        drop(inner);
+        assert_eq!(category, "Video");
+        assert_eq!((video, audio), (Some(2), Some(3)));
+        let mode: MediaMode = serde_json::from_str(&mode_json).unwrap();
+        assert_eq!(mode, MediaMode::Live { video: 2, audio: Some(3), max_seconds: Some(30) });
+    }
 
     #[test]
     fn media_job_validates_modes_and_persists_mode_and_headers() {

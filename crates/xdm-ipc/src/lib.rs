@@ -264,6 +264,12 @@ pub enum MediaAudioFormat {
 }
 
 /// What one clear-media job produces from a manifest.
+/// What one clear-media job produces from a manifest.
+///
+/// The live catch cap is shared with the daemon's validation and the native
+/// host's payload guards so every entry point rejects the same extremes.
+pub const MAX_LIVE_SECONDS: u64 = 24 * 60 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MediaMode {
@@ -284,13 +290,25 @@ pub enum MediaMode {
     Subtitles {
         track: usize,
     },
+    /// Live "stop and save" recording. Pausing or stopping finishes the
+    /// capture gracefully so the published file stays playable and the task
+    /// completes instead of pausing; `max_seconds` ends the capture by
+    /// itself. A VOD manifest submitted this way records as a normal video
+    /// job (a stop keeps pause semantics and `max_seconds` is ignored).
+    Live {
+        video: usize,
+        #[serde(default)]
+        audio: Option<usize>,
+        #[serde(default)]
+        max_seconds: Option<u64>,
+    },
 }
 
 impl MediaMode {
     /// The output extensions this mode produces; the destination must end in one.
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
-            Self::Video { .. } => &["mp4", "mkv"],
+            Self::Video { .. } | Self::Live { .. } => &["mp4", "mkv"],
             Self::Audio { format, .. } => match format {
                 MediaAudioFormat::Original => &["m4a", "mp3", "opus", "webm"],
                 MediaAudioFormat::Mp3 { bitrate_kbps } if (8..=320).contains(bitrate_kbps) => &["mp3"],
@@ -492,6 +510,9 @@ pub struct TaskSummary {
     /// Realm of the 401/407 challenge a task is waiting on in `auth_required`.
     #[serde(default)]
     pub auth_realm: Option<String>,
+    /// Wall-clock seconds a live-recording media job has captured so far.
+    #[serde(default)]
+    pub media_seconds: Option<u64>,
 }
 
 fn main_queue_id() -> i64 {
@@ -942,6 +963,11 @@ mod tests {
                 format: MediaAudioFormat::Original,
             },
             MediaMode::Subtitles { track: 4 },
+            MediaMode::Live {
+                video: 2,
+                audio: Some(3),
+                max_seconds: Some(120),
+            },
         ];
         for mode in modes {
             let command = Command::SubmitMediaJob {
@@ -977,9 +1003,21 @@ mod tests {
                 subtitles: Vec::new()
             }
         );
+        // Live payloads default audio and the catch cap the same way.
+        let live: MediaMode = serde_json::from_value(serde_json::json!({
+            "kind": "live", "video": 0
+        }))
+        .unwrap();
+        assert_eq!(
+            live,
+            MediaMode::Live { video: 0, audio: None, max_seconds: None }
+        );
         // Extensions: video muxes, audio formats pin their container, and an
         // out-of-range bitrate admits nothing.
         let video = MediaMode::Video { video: 0, audio: None, subtitles: Vec::new() };
+        assert!(video.valid("MP4") && video.valid("mkv") && !video.valid("srt"));
+        let live = MediaMode::Live { video: 0, audio: None, max_seconds: Some(10) };
+        assert!(live.valid("mp4") && live.valid("MKV") && !live.valid("srt"));
         assert!(video.valid("MP4") && video.valid("mkv") && !video.valid("srt"));
         let mp3 = MediaMode::Audio { track: 0, format: MediaAudioFormat::Mp3 { bitrate_kbps: 96 } };
         assert!(mp3.valid("mp3") && !mp3.valid("m4a"));
@@ -1153,6 +1191,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy.auth_realm, None);
+        assert_eq!(legacy.media_seconds, None);
         let mut waiting = legacy.clone();
         waiting.auth_realm = Some("xdm-test".into());
         assert!(serde_json::to_string(&waiting).unwrap().contains("xdm-test"));

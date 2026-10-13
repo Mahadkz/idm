@@ -113,7 +113,7 @@ pub(crate) fn finish(service: &Service, id: i64, status: &str, error: Option<&st
         .execute("UPDATE tasks SET status='running' WHERE id=?1", [id])
         .unwrap();
     inner
-        .finish_task(id, status, error.map(str::to_string), None)
+        .finish_task(id, status, error.map(str::to_string), None, None)
         .unwrap();
 }
 

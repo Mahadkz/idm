@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
-use xdm_http::{Options, Progress, Proxy, TransferControl, download_with_control};
+use xdm_http::{Options, Progress, Proxy, TransferControl, download_with_stall_timeout};
 use schedule::{Clock, SystemClock};
 use xdm_ipc::{
     Command, MediaMode, Paths, Reply, Request, TaskSummary, read_frame, write_frame,
@@ -51,6 +51,8 @@ pub(crate) struct Inner {
     pub(crate) pending: HashMap<i64, PendingCompletion>,
     /// Global proxy route for HTTP tasks, stored as canonical JSON.
     pub(crate) proxy: String,
+    /// Global N31 stall timeout in seconds applied to every HTTP task.
+    pub(crate) stall_timeout: u64,
     /// Saved site logins for HTTP authentication (N10).
     pub(crate) credentials: credentials::Store,
     /// Live crawls keyed by their site-grab request ID.
@@ -73,9 +75,41 @@ fn is_permanent_error(message: &str) -> bool {
         .any(|status| message.contains(status))
 }
 
+/// Stall timeout bounds shared by the setting, the CLI flag and the engine.
+const STALL_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 1..=600;
+
+/// Failures that leave resumable partial data which can never be completed by
+/// resuming: the safe way out is a full restart from byte zero.
+fn restart_reason(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<&'static str> {
+    if xdm_http::range_unreliable(error).is_some() {
+        return Some("server stopped honoring byte ranges");
+    }
+    let text = error.to_string();
+    if text.contains("partial download identity changed or checkpoint invalid; use --restart") {
+        return Some("partial download identity changed or checkpoint invalid");
+    }
+    if text.contains("remote validators changed") {
+        return Some("remote validators changed during range transfer");
+    }
+    None
+}
+
+/// The engine's partial-file and checkpoint paths, mirrored here so
+/// `TaskRestart` deletes exactly the files one task owns.
+fn http_part_paths(output: &Path) -> [PathBuf; 2] {
+    [
+        PathBuf::from(format!("{}.part", output.display())),
+        PathBuf::from(format!("{}.part.meta", output.display())),
+    ]
+}
+
 pub(crate) struct Active {
     pub(crate) queue_id: i64,
     pub(crate) stop: Arc<AtomicBool>,
+    /// Set only when the daemon itself asked the worker to stop. The engine
+    /// also flips `stop` when it aborts on a failure, which must not read as
+    /// a user pause in the recorded outcome.
+    pub(crate) stop_requested: Arc<AtomicBool>,
     pub(crate) control: Option<Arc<TransferControl>>,
     /// Live counters for single-stream FTP transfers.
     pub(crate) ftp: Option<Arc<FtpLive>>,
@@ -205,7 +239,11 @@ struct Work {
     output: PathBuf,
     kind: WorkKind,
     proxy: Proxy,
+    /// N31 idle cap handed to the HTTP engine for this task.
+    stall_timeout: Duration,
     stop: Arc<AtomicBool>,
+    /// Whether the stop flag was set by the daemon rather than an engine abort.
+    stop_requested: Arc<AtomicBool>,
     /// Live FTP progress holder, mirrored inside the active entry.
     ftp: Option<Arc<FtpLive>>,
     /// Live-recording progress holder, mirrored inside the active entry.
@@ -248,7 +286,7 @@ pub(crate) fn set_setting(db: &Connection, key: &str, value: &str) -> rusqlite::
 }
 
 fn task_summaries(inner: &Inner, task_id: Option<i64>) -> Result<Vec<TaskSummary>> {
-    let mut stmt = inner.db.prepare("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm FROM tasks WHERE id BETWEEN COALESCE(?1,1) AND COALESCE(?1,9223372036854775807) ORDER BY id DESC LIMIT 1000")?;
+    let mut stmt = inner.db.prepare("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason FROM tasks WHERE id BETWEEN COALESCE(?1,1) AND COALESCE(?1,9223372036854775807) ORDER BY id DESC LIMIT 1000")?;
     let tasks = stmt
         .query_map([task_id], |row| {
             let output: String = row.get(2)?;
@@ -311,6 +349,7 @@ fn task_summaries(inner: &Inner, task_id: Option<i64>) -> Result<Vec<TaskSummary
                 retry_at: row.get(17)?,
                 position: row.get(18)?,
                 auth_realm: row.get(19)?,
+                restart_reason: row.get(20)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -474,6 +513,7 @@ impl Service {
             ("body", "BLOB"),
             ("media_mode_json", "TEXT"),
             ("auth_realm", "TEXT"),
+            ("restart_reason", "TEXT"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {name} {definition}"))?;
@@ -546,6 +586,10 @@ impl Service {
         let proxy = get_setting(&db, "proxy")?
             .and_then(|value| serde_json::from_str::<Proxy>(&value).ok())
             .unwrap_or_default();
+        let stall_timeout = get_setting(&db, "stall_timeout_seconds")?
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| STALL_TIMEOUT_RANGE.contains(value))
+            .unwrap_or(xdm_http::DEFAULT_STALL_TIMEOUT.as_secs());
         // Site logins live beside the task database; in-memory test databases
         // keep the store in memory only.
         let credentials = credentials::Store::load(
@@ -569,6 +613,7 @@ impl Service {
                 adapter,
                 pending: HashMap::new(),
                 proxy: serde_json::to_string(&proxy).unwrap_or_default(),
+                stall_timeout,
                 credentials,
                 grabs: HashMap::new(),
                 pending_grabs: Vec::new(),
@@ -689,6 +734,33 @@ impl Service {
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
                 let mut reply = Reply::accepted(0);
                 reply.proxy = serde_json::from_str(&inner.proxy).ok();
+                Ok(reply)
+            }
+            Command::SetStallTimeout { seconds } => {
+                if !STALL_TIMEOUT_RANGE.contains(&seconds) {
+                    return Ok(Reply::error(
+                        "stall timeout must be between 1 and 600 seconds",
+                    ));
+                }
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                set_setting(&inner.db, "stall_timeout_seconds", &seconds.to_string())?;
+                inner.stall_timeout = seconds;
+                drop(inner);
+                self.wake.notify_one();
+                let mut reply = Reply::accepted(0);
+                reply.stall_timeout_seconds = Some(seconds);
+                Ok(reply)
+            }
+            Command::GetStallTimeout => {
+                let inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                let mut reply = Reply::accepted(0);
+                reply.stall_timeout_seconds = Some(inner.stall_timeout);
                 Ok(reply)
             }
             Command::SubmitMedia {
@@ -1004,6 +1076,7 @@ impl Service {
                 inner.queue_interrupted.remove(&task_id);
                 if let Some(active) = inner.active.get(&task_id) {
                     active.stop.store(true, Ordering::Relaxed);
+                    active.stop_requested.store(true, Ordering::Relaxed);
                 }
                 let updated = inner.db.execute("UPDATE tasks SET status=CASE WHEN status='running' THEN 'pausing' ELSE 'paused' END, updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('queued','running')", [task_id])?;
                 if updated == 0 {
@@ -1165,7 +1238,53 @@ impl Service {
                 password,
                 remember,
             } => self.task_provide_login(task_id, username, password, remember),
+            Command::TaskRestart { task_id } => self.task_restart(task_id),
         }
+    }
+
+    /// Restarts one `restart_required` task from byte zero: only its own
+    /// `.part`/`.part.meta` (derived from the task's output path) are deleted,
+    /// then the task re-enters the queue with a fresh retry budget.
+    fn task_restart(&self, task_id: i64) -> Result<Reply> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if inner.active.contains_key(&task_id) {
+            return Ok(Reply::error(
+                "pause the task and wait for it to stop before restarting it",
+            ));
+        }
+        let output: Option<String> = inner
+            .db
+            .query_row(
+                "SELECT output FROM tasks WHERE id=?1 AND status='restart_required'",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(output) = output else {
+            return Ok(Reply::error("task is not waiting for a restart"));
+        };
+        for path in http_part_paths(Path::new(&output)) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Ok(Reply::error(format!(
+                        "could not remove {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        inner.db.execute(
+            "UPDATE tasks SET status='queued',error=NULL,restart_reason=NULL,retry_count=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [task_id],
+        )?;
+        drop(inner);
+        self.wake.notify_one();
+        Ok(Reply::accepted(task_id))
     }
 
     fn next_work(&self) -> Result<Work> {
@@ -1301,11 +1420,13 @@ impl Service {
                     };
                     inner.db.execute("UPDATE tasks SET status='running',retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
                     let stop = Arc::new(AtomicBool::new(false));
+                    let stop_requested = Arc::new(AtomicBool::new(false));
                     inner.active.insert(
                         id,
                         Active {
                             queue_id,
                             stop: stop.clone(),
+                            stop_requested: stop_requested.clone(),
                             control,
                             ftp: ftp.clone(),
                             media: media.clone(),
@@ -1317,7 +1438,9 @@ impl Service {
                         output: PathBuf::from(output),
                         kind,
                         proxy: serde_json::from_str(&inner.proxy).unwrap_or_default(),
+                        stall_timeout: Duration::from_secs(inner.stall_timeout),
                         stop,
+                        stop_requested,
                         ftp,
                         media,
                     });
@@ -1370,7 +1493,7 @@ impl Service {
                         method,
                         body,
                         control,
-                    } => download_with_control(
+                    } => download_with_stall_timeout(
                         Options {
                             url: work.url,
                             output: work.output,
@@ -1384,6 +1507,7 @@ impl Service {
                             stop: work.stop.clone(),
                         },
                         control,
+                        work.stall_timeout,
                     ),
                     WorkKind::Ftp => match work.ftp.clone() {
                         None => Err("FTP progress holder missing".into()),
@@ -1482,9 +1606,9 @@ impl Service {
                 };
                 if let Ok(mut inner) = service.inner.lock() {
                     let interrupted_for_queue = inner.queue_interrupted.remove(&work.id);
-                    let (status, error, challenge) = worker_outcome(
+                    let (status, error, challenge, reason) = worker_outcome(
                         &result,
-                        work.stop.load(Ordering::Relaxed),
+                        daemon_stopped(&work.stop, &work.stop_requested),
                         interrupted_for_queue,
                     );
                     let _ = inner.finish_task(
@@ -1492,6 +1616,7 @@ impl Service {
                         status,
                         error,
                         challenge.and_then(|challenge| challenge.realm),
+                        reason,
                     );
                     inner.active.remove(&work.id);
                     service.wake.notify_one();
@@ -1501,35 +1626,56 @@ impl Service {
     }
 }
 
+/// The engine flips the shared stop flag when it aborts a failing transfer;
+/// only a stop the daemon itself requested counts as a pause or queue stop.
+fn daemon_stopped(stop: &AtomicBool, requested: &AtomicBool) -> bool {
+    stop.load(Ordering::Relaxed) && requested.load(Ordering::Relaxed)
+}
+
 /// Maps a worker result to the recorded task outcome. A 401/407 challenge
 /// becomes `auth_required` instead of `failed` so credentials can be offered
-/// once; the queue retry policy never sees authentication failures.
+/// once; a range- or checkpoint-unusable failure becomes `restart_required`
+/// so the queue retry policy never loops on it. Both carry their detail in
+/// the summary instead of a bare failure.
 fn worker_outcome(
     result: &Result<()>,
     stopped: bool,
     interrupted: bool,
-) -> (&'static str, Option<String>, Option<xdm_http::AuthChallenge>) {
+) -> (
+    &'static str,
+    Option<String>,
+    Option<xdm_http::AuthChallenge>,
+    Option<&'static str>,
+) {
     match result {
-        Ok(()) => ("complete", None, None),
-        Err(_) if stopped && interrupted => ("queued", None, None),
-        Err(e) if stopped => ("paused", Some(e.to_string()), None),
-        Err(e) => match xdm_http::auth_challenge(e.as_ref()) {
-            Some(challenge) => ("auth_required", Some(e.to_string()), Some(challenge)),
-            None => ("failed", Some(e.to_string()), None),
-        },
+        Ok(()) => ("complete", None, None, None),
+        Err(_) if stopped && interrupted => ("queued", None, None, None),
+        Err(e) if stopped => ("paused", Some(e.to_string()), None, None),
+        Err(e) => {
+            if let Some(reason) = restart_reason(e.as_ref()) {
+                return ("restart_required", Some(e.to_string()), None, Some(reason));
+            }
+            match xdm_http::auth_challenge(e.as_ref()) {
+                Some(challenge) => ("auth_required", Some(e.to_string()), Some(challenge), None),
+                None => ("failed", Some(e.to_string()), None, None),
+            }
+        }
     }
 }
 
 impl Inner {
     /// Records a worker outcome. Completed tasks leave their queue (history
     /// kept); failed tasks with a transient error are re-queued per the
-    /// queue's retry policy. Manual and queue stops never reach the retry path.
+    /// queue's retry policy. Manual and queue stops never reach the retry
+    /// path, and neither do `auth_required` nor `restart_required`: both wait
+    /// for an explicit user action instead of looping.
     fn finish_task(
         &mut self,
         id: i64,
         status: &str,
         error: Option<String>,
         auth_realm: Option<String>,
+        restart_reason: Option<&str>,
     ) -> Result<()> {
         let (queue_id, count): (i64, i64) = self.db.query_row(
             "SELECT queue_id,retry_count FROM tasks WHERE id=?1",
@@ -1537,7 +1683,7 @@ impl Inner {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if status == "complete" {
-            self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,history_queue_id=queue_id,queue_id=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+            self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
             return Ok(());
         }
         if status == "auth_required" {
@@ -1545,6 +1691,14 @@ impl Inner {
                 "UPDATE tasks SET status='auth_required',error=?1,auth_realm=?2,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?3",
                 params![error, auth_realm, id],
             )?;
+            return Ok(());
+        }
+        if status == "restart_required" {
+            self.db.execute(
+                "UPDATE tasks SET status='restart_required',error=?1,restart_reason=?2,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?3",
+                params![error, restart_reason, id],
+            )?;
+            cancel_pending(self, queue_id, "suppressed");
             return Ok(());
         }
         if status == "failed" {
@@ -1753,7 +1907,7 @@ mod tests {
             .execute("UPDATE tasks SET status='running' WHERE id=?1", [id])
             .unwrap();
         inner
-            .finish_task(id, status, error.map(str::to_string), None)
+            .finish_task(id, status, error.map(str::to_string), None, None)
             .unwrap();
     }
 
@@ -1903,6 +2057,162 @@ mod tests {
         assert_eq!(proxy(&persisted), serde_json::json!({"mode": "direct"}));
         drop(persisted);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stall_timeout_setting_validates_and_survives_reopen() {
+        let (service, _, _) = service(1000);
+        let get = |service: &Service| {
+            service
+                .command(Command::GetStallTimeout)
+                .unwrap()
+                .stall_timeout_seconds
+                .unwrap()
+        };
+        assert_eq!(get(&service), xdm_http::DEFAULT_STALL_TIMEOUT.as_secs());
+        assert!(!service.command(Command::SetStallTimeout { seconds: 0 }).unwrap().ok);
+        assert!(!service.command(Command::SetStallTimeout { seconds: 601 }).unwrap().ok);
+        assert!(service.command(Command::SetStallTimeout { seconds: 2 }).unwrap().ok);
+        assert_eq!(get(&service), 2);
+        // Queued HTTP work carries the setting to the engine.
+        let id = submit(&service, "stall-work");
+        let work = service.next_work().unwrap();
+        assert_eq!(work.id, id);
+        assert_eq!(work.stall_timeout, Duration::from_secs(2));
+        // The setting persists like the proxy setting.
+        let path = std::env::temp_dir().join(format!("xdm-stall-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let file_service =
+                Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly))
+                    .unwrap();
+            assert!(
+                file_service
+                    .command(Command::SetStallTimeout { seconds: 600 })
+                    .unwrap()
+                    .ok
+            );
+        }
+        let persisted =
+            Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly))
+                .unwrap();
+        assert_eq!(get(&persisted), 600);
+        drop(persisted);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn restart_required_parks_instead_of_retrying() {
+        let (service, _, _) = service(1000);
+        let q = queue(&service, "Restart");
+        let id = submit(&service, "rr0");
+        service.command(Command::AssignQueue { queue_id: q, task_ids: vec![id] }).unwrap();
+        // Infinite retries must still not loop on a restart-required failure.
+        service
+            .command(Command::QueueSetRetry { queue_id: q, max_retries: -1, delay_seconds: 1 })
+            .unwrap();
+        {
+            let mut inner = service.inner.lock().unwrap();
+            inner
+                .db
+                .execute("UPDATE tasks SET status='running' WHERE id=?1", [id])
+                .unwrap();
+            inner
+                .finish_task(
+                    id,
+                    "restart_required",
+                    Some("remote validators changed during range transfer".into()),
+                    None,
+                    Some("remote validators changed during range transfer"),
+                )
+                .unwrap();
+        }
+        assert_eq!(task_state(&service, id), ("restart_required".into(), 0, None, q));
+        let task = service.command(Command::GetTask { task_id: id }).unwrap().tasks.remove(0);
+        assert_eq!(task.status, "restart_required");
+        assert_eq!(
+            task.restart_reason.as_deref(),
+            Some("remote validators changed during range transfer")
+        );
+        // Classification: the three restart causes versus ordinary failures.
+        let flip: Result<()> = Err(Box::new(xdm_http::RangeUnreliable {
+            at: 7,
+            reason: "invalid Content-Range".into(),
+        }));
+        assert_eq!(worker_outcome(&flip, false, false).0, "restart_required");
+        let identity: Result<()> =
+            Err("partial download identity changed or checkpoint invalid; use --restart".into());
+        assert_eq!(worker_outcome(&identity, false, false).0, "restart_required");
+        let validators: Result<()> = Err("remote validators changed during range transfer".into());
+        assert_eq!(worker_outcome(&validators, false, false).0, "restart_required");
+        let plain: Result<()> = Err("connection reset".into());
+        assert_eq!(worker_outcome(&plain, false, false).0, "failed");
+        // A manual stop still wins: the partial data waits for the decision.
+        assert_eq!(worker_outcome(&flip, true, false).0, "paused");
+        assert_eq!(worker_outcome(&flip, true, true).0, "queued");
+        // The engine flips the shared stop flag when it aborts a transfer;
+        // only a stop the daemon requested counts as a pause.
+        let stop = Arc::new(AtomicBool::new(false));
+        let requested = Arc::new(AtomicBool::new(false));
+        stop.store(true, Ordering::Relaxed);
+        assert!(!daemon_stopped(&stop, &requested), "engine abort is not a pause");
+        requested.store(true, Ordering::Relaxed);
+        assert!(daemon_stopped(&stop, &requested));
+    }
+
+    #[test]
+    fn task_restart_deletes_only_own_part_files_and_requeues() {
+        let (service, _, _) = service(1000);
+        let directory = std::env::temp_dir().join(format!("xdm-task-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("own.bin");
+        let neighbor = directory.join("neighbor.bin");
+        let own = http_part_paths(&output);
+        let foreign = http_part_paths(&neighbor);
+        for path in own.iter().chain(foreign.iter()) {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let id = service
+            .command(Command::Submit {
+                request_id: "restart-own".into(),
+                url: format!("http://127.0.0.1:1/{}", output.display()),
+                output: output.display().to_string(),
+                headers: Vec::new(),
+                priority: 1,
+                connections: 1,
+            })
+            .unwrap()
+            .task_id
+            .unwrap();
+        // Only a task parked in restart_required may restart from zero.
+        assert!(!service.command(Command::TaskRestart { task_id: id }).unwrap().ok);
+        {
+            let mut inner = service.inner.lock().unwrap();
+            inner
+                .db
+                .execute("UPDATE tasks SET status='running' WHERE id=?1", [id])
+                .unwrap();
+            inner
+                .finish_task(
+                    id,
+                    "restart_required",
+                    Some("stopped honoring ranges".into()),
+                    None,
+                    Some("server stopped honoring byte ranges"),
+                )
+                .unwrap();
+        }
+        assert!(service.command(Command::TaskRestart { task_id: id }).unwrap().ok);
+        assert_eq!(task_state(&service, id).0, "queued");
+        let task = service.command(Command::GetTask { task_id: id }).unwrap().tasks.remove(0);
+        assert_eq!(task.status, "queued");
+        assert_eq!(task.restart_reason, None);
+        assert_eq!(task.error, None);
+        assert!(own.iter().all(|path| !path.exists()));
+        assert!(foreign.iter().all(|path| path.exists()));
+        assert!(!service.command(Command::TaskRestart { task_id: 999 }).unwrap().ok);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -2190,12 +2500,13 @@ mod tests {
                 .execute("UPDATE tasks SET status='running' WHERE id=?1", [id])
                 .unwrap();
             let result: Result<()> = Err(auth_error(401, Some("xdm-test")));
-            let (status, message, challenge) = worker_outcome(&result, false, false);
+            let (status, message, challenge, reason) = worker_outcome(&result, false, false);
             assert_eq!(status, "auth_required");
             assert!(message.as_deref().is_some_and(|text| text.contains("HTTP 401")));
             assert_eq!(challenge.as_ref().unwrap().realm.as_deref(), Some("xdm-test"));
+            assert!(reason.is_none());
             inner
-                .finish_task(id, status, message, challenge.and_then(|c| c.realm))
+                .finish_task(id, status, message, challenge.and_then(|c| c.realm), reason)
                 .unwrap();
         }
         let task = service
@@ -2234,8 +2545,8 @@ mod tests {
                 .execute("UPDATE tasks SET status='running' WHERE id=?1", [id])
                 .unwrap();
             let result: Result<()> = Err(auth_error(401, Some("xdm-test")));
-            let (status, message, challenge) = worker_outcome(&result, false, false);
-            inner.finish_task(id, status, message, challenge.and_then(|c| c.realm)).unwrap();
+            let (status, message, challenge, reason) = worker_outcome(&result, false, false);
+            inner.finish_task(id, status, message, challenge.and_then(|c| c.realm), reason).unwrap();
         }
         let remembered = service
             .command(Command::TaskProvideLogin {

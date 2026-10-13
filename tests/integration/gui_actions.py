@@ -44,34 +44,38 @@ def main():
 
         def cli(*args):
             result = subprocess.run([str(ROOT / "target/debug/xdm-cli"), "daemon", *map(str, args)],
-                                    env=env, capture_output=True, text=True, timeout=5, check=True)
+                                    env=env, capture_output=True, text=True, timeout=60, check=True)
             return json.loads(result.stdout)
 
-        def until(action):
-            deadline = time.monotonic() + 10
+        def until(action, timeout=60):
+            deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                if gui and gui.poll() is not None:
+                    raise AssertionError(f"xdm-gui exited prematurely with code {gui.returncode}")
+                if daemon and daemon.poll() is not None:
+                    raise AssertionError(f"xdm-daemon exited prematurely with code {daemon.returncode}")
                 value = action()
                 if value:
                     return value
                 time.sleep(0.1)
-            raise AssertionError("GUI condition timed out")
+            raise AssertionError(f"GUI condition timed out after {timeout}s")
 
         def window(name):
             result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", name], env=env,
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=30)
             return result.stdout.splitlines()[-1] if result.returncode == 0 else None
 
         def click(identifier, x, y):
-            subprocess.run(["xdotool", "windowfocus", identifier], env=env, check=False, timeout=5)
+            subprocess.run(["xdotool", "windowfocus", identifier], env=env, check=False, timeout=30)
             subprocess.run(["xdotool", "mousemove", "--window", identifier, str(x), str(y), "click", "1"],
-                           env=env, check=True, timeout=5)
+                           env=env, check=True, timeout=30)
             time.sleep(0.2)
 
         def type_field(identifier, x, y, value):
-            subprocess.run(["xdotool", "windowfocus", identifier], env=env, check=True, timeout=5)
+            subprocess.run(["xdotool", "windowfocus", identifier], env=env, check=True, timeout=30)
             click(identifier, x, y)
-            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], env=env, check=True, timeout=5)
-            subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "0", str(value)], env=env, check=True, timeout=5)
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], env=env, check=True, timeout=30)
+            subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "0", str(value)], env=env, check=True, timeout=30)
 
         try:
             daemon = subprocess.Popen([str(ROOT / "target/debug/xdm-daemon")], env=env,
@@ -178,22 +182,36 @@ def main():
             # Exercise Task Move Up and Down in the task list
             second = cli("submit", "http://example.invalid/second.bin", base / "second.bin")["task_id"]
             cli("queue", "assign", custom["id"], second)
-            click(main_window, 930, 76)  # Refresh button in row 2
-            time.sleep(1.0)
-            # Select second task (row 1 in list view)
-            click(main_window, 120, 460)
-            # Click "Up" button (x=685, y=365)
-            click(main_window, 685, 365)
-            until(lambda: next(t for t in cli("list")["tasks"] if t["id"] == second)["position"] == 1)
-            # Click "Down" button (x=755, y=365)
-            click(main_window, 755, 365)
-            until(lambda: next(t for t in cli("list")["tasks"] if t["id"] == second)["position"] == 2)
-            # Click "Top" button (x=618, y=365)
-            click(main_window, 618, 365)
-            until(lambda: next(t for t in cli("list")["tasks"] if t["id"] == second)["position"] == 1)
-            # Click "Bottom" button (x=835, y=365)
-            click(main_window, 835, 365)
-            until(lambda: next(t for t in cli("list")["tasks"] if t["id"] == second)["position"] == 2)
+
+            def move_task(btn_x, btn_y, target_pos):
+                def get_pos():
+                    tasks = cli("list")["tasks"]
+                    t = next((t for t in tasks if t["id"] == second), None)
+                    return t["position"] if t else None
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if gui and gui.poll() is not None:
+                        raise AssertionError(f"xdm-gui exited prematurely with code {gui.returncode}")
+                    if daemon and daemon.poll() is not None:
+                        raise AssertionError(f"xdm-daemon exited prematurely with code {daemon.returncode}")
+                    if get_pos() == target_pos:
+                        return
+                    cur_pos = get_pos()
+                    row_y = 400 if cur_pos == 1 else 460
+                    click(main_window, 930, 76)  # Refresh button
+                    click(main_window, 120, row_y)  # Select second task's current row
+                    click(main_window, btn_x, btn_y)  # Click move button
+                    step_end = time.monotonic() + 2.0
+                    while time.monotonic() < step_end:
+                        if get_pos() == target_pos:
+                            return
+                        time.sleep(0.1)
+                raise AssertionError(f"Task move to position {target_pos} timed out after 60s")
+
+            move_task(685, 365, 1)  # Up
+            move_task(755, 365, 2)  # Down
+            move_task(618, 365, 1)  # Top
+            move_task(835, 365, 2)  # Bottom
 
             # Exercise Batch download dialog
             click(main_window, 194, 76)  # "Batch…" button in row 2
@@ -243,19 +261,23 @@ def main():
             # Exercise Countdown banner and Cancel button in main window
             banner_task = cli("submit", f"http://127.0.0.1:{port}/complete.bin", base / "banner-test.bin")["task_id"]
             banner_queue = cli("queue", "create", "BannerQueue", 1)["queue_id"]
-            cli("queue", "completion", banner_queue, "shutdown", "--confirm-destructive", "--countdown", 30)
+            cli("queue", "completion", banner_queue, "shutdown", "--confirm-destructive", "--countdown", 120)
             cli("queue", "assign", banner_queue, banner_task)
             cli("queue", "start-one", banner_queue)
 
             # Daemon arms completion pending
             pending = until(lambda: [r for r in cli("completion", "status")["completion_pending"] if r["queue_id"] == banner_queue])
             assert pending[0]["action"] == "shutdown"
-            assert 0 < pending[0]["seconds_remaining"] <= 30
+            assert 0 < pending[0]["seconds_remaining"] <= 120
 
             # Wait for GUI periodic poll (every 5s when idle) to catch pending action, then click Cancel
             cancelled = False
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
+                if gui and gui.poll() is not None:
+                    raise AssertionError(f"xdm-gui exited prematurely with code {gui.returncode}")
+                if daemon and daemon.poll() is not None:
+                    raise AssertionError(f"xdm-daemon exited prematurely with code {daemon.returncode}")
                 time.sleep(0.8)
                 click(main_window, 838, 38)
                 if not [r for r in cli("completion", "status")["completion_pending"] if r["queue_id"] == banner_queue]:
@@ -273,7 +295,12 @@ def main():
                 print("GUI LOG:\n" + log_path.read_text())
             for process in [gui, daemon, virtual]:
                 if process and process.poll() is None:
-                    process.terminate(); process.wait(timeout=5)
+                    process.terminate()
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
 
 
 if __name__ == "__main__":

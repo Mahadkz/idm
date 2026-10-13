@@ -20,23 +20,25 @@ var XdmCore = (() => {
   }
 
   function cookieHeader(cookies) {
-    return cookies.map(item => `${item.name}=${item.value}`).join("; ");
+    return (cookies || []).map(item => `${item.name}=${item.value}`).join("; ");
   }
 
-  function buildSubmit({ url, filenameHint, mime = "", pageUrl = "", requestId, request, cookies, userAgent, method, body, contentType }) {
+  function buildSubmit({ url, filenameHint, mime = "", pageUrl = "", requestId, request, cookies, userAgent, method, body, contentType, container }) {
     const cookie = cookieHeader(cookies);
-    const referrer = headerValue(request?.headers, "referer") || pageUrl;
+    const referrer = headerValue(request?.headers, "referer") || (pageUrl || undefined);
     const agent = headerValue(request?.headers, "user-agent") || userAgent;
     const headers = [{ name: "User-Agent", value: agent }];
     if (body) headers.push({ name: "Content-Type", value: contentType });
+    const payload = {
+      url, filenameHint, mime, source: { pageUrl: pageUrl || undefined },
+      requestContext: { headers, referrer, cookies: cookie ? [{ url, header: cookie }] : [] },
+      method: body ? (method || "POST") : undefined,
+      body: body || undefined,
+    };
+    if (container) payload.container = container;
     return {
       version: 1, requestId, type: "download.submit",
-      payload: {
-        url, filenameHint, mime, source: { pageUrl },
-        requestContext: { headers, referrer, cookies: cookie ? [{ url, header: cookie }] : [] },
-        method: body ? (method || "POST") : undefined,
-        body: body || undefined,
-      }
+      payload
     };
   }
 

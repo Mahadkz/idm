@@ -135,7 +135,7 @@ for (const [name, requestBody] of [
 {
   const h = harness();
   h.handlers.installed();
-  assert.deepEqual(h.calls.menus.map(menu => menu.id), ['xdm-link', 'xdm-media']);
+  assert.deepEqual(h.calls.menus.map(menu => menu.id), ['xdm-link', 'xdm-media', 'xdm-image', 'xdm-page', 'xdm-downloads']);
   h.handlers.menu({ menuItemId: 'xdm-link', linkUrl: 'http://example.test/x.zip', cookieStoreId: 'firefox-container-1' }, { id: 2, url: 'http://example.test/page' });
   await tick(); await tick();
   assert.equal(h.calls.native, 1);

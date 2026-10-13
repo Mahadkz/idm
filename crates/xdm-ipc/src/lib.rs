@@ -245,6 +245,18 @@ pub enum Command {
         password: String,
         remember: bool,
     },
+    /// Sets the global HTTP stall timeout in seconds (1..=600) applied to
+    /// every HTTP task the daemon starts.
+    SetStallTimeout {
+        seconds: u64,
+    },
+    /// Reads the global HTTP stall timeout in seconds.
+    GetStallTimeout,
+    /// Deletes only the `restart_required` task's own `.part`/`.part.meta`
+    /// and requeues it from byte zero.
+    TaskRestart {
+        task_id: i64,
+    },
 }
 
 /// Mirrors `xdm_media::AudioFormat` with the identical serde shape so IPC stays
@@ -513,6 +525,10 @@ pub struct TaskSummary {
     /// Wall-clock seconds a live-recording media job has captured so far.
     #[serde(default)]
     pub media_seconds: Option<u64>,
+    /// Why a task is parked in `restart_required` instead of `failed`: the
+    /// resumable partial data cannot be completed without a full restart.
+    #[serde(default)]
+    pub restart_reason: Option<String>,
 }
 
 fn main_queue_id() -> i64 {
@@ -629,6 +645,10 @@ pub struct Reply {
     /// carries passwords.
     #[serde(default)]
     pub logins: Vec<LoginSummary>,
+    /// Global HTTP stall timeout in seconds; only set by `GetStallTimeout`
+    /// and `SetStallTimeout` replies.
+    #[serde(default)]
+    pub stall_timeout_seconds: Option<u64>,
 }
 
 impl Reply {
@@ -652,6 +672,7 @@ impl Reply {
             grab_projects: Vec::new(),
             categories: Vec::new(),
             completion_pending: Vec::new(),
+            stall_timeout_seconds: None,
             logins: Vec::new(),
         }
     }
@@ -675,6 +696,7 @@ impl Reply {
             grab_projects: Vec::new(),
             categories: Vec::new(),
             completion_pending: Vec::new(),
+            stall_timeout_seconds: None,
             logins: Vec::new(),
         }
     }
@@ -707,6 +729,7 @@ impl Reply {
             grab_projects: Vec::new(),
             categories: Vec::new(),
             completion_pending: Vec::new(),
+            stall_timeout_seconds: None,
             logins: Vec::new(),
         }
     }
@@ -1195,6 +1218,38 @@ mod tests {
         let mut waiting = legacy.clone();
         waiting.auth_realm = Some("xdm-test".into());
         assert!(serde_json::to_string(&waiting).unwrap().contains("xdm-test"));
+        // Older clients also read task rows without the restart field.
+        assert_eq!(legacy.restart_reason, None);
+        let mut parked = legacy.clone();
+        parked.status = "restart_required".into();
+        parked.restart_reason = Some("server stopped honoring byte ranges".into());
+        assert!(serde_json::to_string(&parked).unwrap().contains("byte ranges"));
+    }
+
+    #[test]
+    fn stall_timeout_and_task_restart_round_trip() {
+        let commands = vec![
+            Command::SetStallTimeout { seconds: 30 },
+            Command::GetStallTimeout,
+            Command::TaskRestart { task_id: 12 },
+        ];
+        for command in commands {
+            let mut bytes = Vec::new();
+            write_frame(&mut bytes, &command).unwrap();
+            let restored: Command = read_frame(&mut bytes.as_slice()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&command).unwrap(),
+                serde_json::to_value(&restored).unwrap()
+            );
+        }
+        // The setting travels in the reply and stays absent for older replies.
+        let mut reply = Reply::list(Vec::new());
+        assert!(reply.stall_timeout_seconds.is_none());
+        reply.stall_timeout_seconds = Some(30);
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &reply).unwrap();
+        let back: Reply = read_frame(&mut bytes.as_slice()).unwrap();
+        assert_eq!(back.stall_timeout_seconds, Some(30));
     }
 }
 

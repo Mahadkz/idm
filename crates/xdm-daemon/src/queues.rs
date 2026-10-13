@@ -28,11 +28,12 @@ pub(crate) fn interrupt_queue_workers(inner: &mut Inner, queue_id: Option<i64>) 
         .active
         .iter()
         .filter(|(_, active)| queue_id.is_none_or(|id| active.queue_id == id))
-        .map(|(id, active)| (*id, active.stop.clone()))
+        .map(|(id, active)| (*id, active.stop.clone(), active.stop_requested.clone()))
         .collect::<Vec<_>>();
-    for (id, stop) in active {
+    for (id, stop, requested) in active {
         inner.queue_interrupted.insert(id);
         stop.store(true, Ordering::Relaxed);
+        requested.store(true, Ordering::Relaxed);
     }
     // Any stop sweep — manual, global or schedule cutoff — suppresses the
     // destructive countdown of the affected queues.
@@ -278,7 +279,7 @@ pub(crate) fn queue_tick(inner: &mut Inner) -> Result<()> {
             finish_cycle(inner, id, "manual_stop", now)?;
         } else if state == "running" && pending == 0 {
             let failed: i64 = inner.db.query_row(
-                "SELECT COUNT(*) FROM tasks WHERE queue_id=?1 AND status='failed'",
+                "SELECT COUNT(*) FROM tasks WHERE queue_id=?1 AND status IN ('failed','restart_required')",
                 [id],
                 |row| row.get(0),
             )?;
@@ -1237,7 +1238,7 @@ mod tests {
         first.command(Command::List).unwrap();
         {
             let mut inner = first.inner.lock().unwrap();
-            inner.finish_task(id, "complete", None, None).unwrap();
+            inner.finish_task(id, "complete", None, None, None).unwrap();
         }
         first.command(Command::List).unwrap();
         assert_eq!(first.command(Command::CompletionStatus).unwrap().completion_pending.len(), 1);
@@ -1273,11 +1274,13 @@ mod tests {
         service.command(Command::QueueStartOne { queue_id: q }).unwrap();
         // One busy worker in the independently started queue.
         let stop = Arc::new(AtomicBool::new(false));
+        let stop_requested = Arc::new(AtomicBool::new(false));
         service.inner.lock().unwrap().active.insert(
             id,
             Active {
                 queue_id: q,
                 stop: stop.clone(),
+                stop_requested: stop_requested.clone(),
                 control: None,
                 ftp: None,
                 media: None,

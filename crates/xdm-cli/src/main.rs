@@ -2,7 +2,10 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use xdm_http::{Options, Proxy, download};
+use std::time::Duration;
+use xdm_http::{
+    DEFAULT_STALL_TIMEOUT, Options, Proxy, TransferControl, download_with_stall_timeout,
+};
 use xdm_ipc::{Command, CompletionAction, MediaMode, MoveTarget, Paths, ProxyChoice};
 
 fn main() {
@@ -30,6 +33,7 @@ fn main() {
     let mut method = "GET".to_owned();
     let mut body = None;
     let mut proxy = Proxy::System;
+    let mut stall_timeout = DEFAULT_STALL_TIMEOUT;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-proxy" => proxy = Proxy::Direct,
@@ -78,6 +82,14 @@ fn main() {
                     .unwrap_or_else(|| usage());
                 bytes_per_second = Some(kib.checked_mul(1024).unwrap_or_else(|| usage()));
             }
+            "--stall-timeout" => {
+                let seconds = args
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|v| (1..=600).contains(v))
+                    .unwrap_or_else(|| usage());
+                stall_timeout = Duration::from_secs(seconds);
+            }
             "--help" | "-h" => usage(),
             _ if arg.starts_with('-') => usage(),
             _ => positional.push(arg),
@@ -114,18 +126,29 @@ fn main() {
         }
         return;
     }
-    match download(Options {
-        url: positional[0].clone(),
-        output: output.clone(),
-        connections,
-        restart,
-        headers,
-        method,
-        body,
-        proxy,
-        bytes_per_second,
-        stop,
-    }) {
+    let control = match TransferControl::new(bytes_per_second) {
+        Ok(control) => Arc::new(control),
+        Err(error) => {
+            eprintln!("download: {error}");
+            std::process::exit(1);
+        }
+    };
+    match download_with_stall_timeout(
+        Options {
+            url: positional[0].clone(),
+            output: output.clone(),
+            connections,
+            restart,
+            headers,
+            method,
+            body,
+            proxy,
+            bytes_per_second,
+            stop,
+        },
+        control,
+        stall_timeout,
+    ) {
         Ok(()) => println!("saved {}", output.display()),
         Err(error) => {
             eprintln!("download: {error}");
@@ -843,6 +866,17 @@ fn daemon_command(args: Vec<String>) {
                 },
             }
         }
+        Some("stall-timeout") if args.len() == 2 && args[1] == "get" => Command::GetStallTimeout,
+        Some("stall-timeout") if args.len() == 2 => Command::SetStallTimeout {
+            seconds: args[1]
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| (1..=600).contains(seconds))
+                .unwrap_or_else(|| usage()),
+        },
+        Some("restart") if args.len() == 2 => Command::TaskRestart {
+            task_id: args[1].parse().unwrap_or_else(|_| usage()),
+        },
         _ => usage(),
     };
     send_daemon(command);
@@ -939,7 +973,7 @@ fn send_daemon(command: Command) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT]|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
+        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT]|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
        xdm-cli daemon grab PROJECT.json ABSOLUTE_DIRECTORY [--start] [--queue ID]
        xdm-cli daemon grab-status REQUEST_ID|grab-save NAME PROJECT.json|grab-projects|grab-remove NAME
        xdm-cli daemon category list|save NAME EXT,EXT|- ABSOLUTE_DIRECTORY [*.site,...]|remove NAME

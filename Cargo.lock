@@ -5829,10 +5829,12 @@ name = "xdm-http"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "xdm-categories",
 ]
 
 [[package]]

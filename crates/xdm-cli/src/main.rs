@@ -831,6 +831,23 @@ fn daemon_command(args: Vec<String>) {
             priority: 1,
             connections: 8,
         },
+        // The extended submit carries the duplicate policy, so a repeat of a
+        // URL another task already owns needs --allow-duplicate to pass.
+        Some("submit") if args.len() == 4 && args[3] == "--allow-duplicate" => {
+            Command::SubmitEx {
+                request_id: new_request_id("cli"),
+                url: args[1].clone(),
+                output: args[2].clone(),
+                headers: Vec::new(),
+                method: "GET".into(),
+                body: None,
+                priority: 1,
+                connections: 8,
+                name_from_server: false,
+                ignore_modification_date: false,
+                allow_duplicate: true,
+            }
+        }
         Some("submit-post") if args.len() == 4 => {
             let body = std::fs::read(&args[3]).unwrap_or_else(|error| {
                 eprintln!("read {}: {error}", args[3]);
@@ -973,7 +990,7 @@ fn send_daemon(command: Command) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT]|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
+        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT]|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
        xdm-cli daemon grab PROJECT.json ABSOLUTE_DIRECTORY [--start] [--queue ID]
        xdm-cli daemon grab-status REQUEST_ID|grab-save NAME PROJECT.json|grab-projects|grab-remove NAME
        xdm-cli daemon category list|save NAME EXT,EXT|- ABSOLUTE_DIRECTORY [*.site,...]|remove NAME

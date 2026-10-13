@@ -184,10 +184,14 @@ function makeContentHarness(source, isFirefox = false) {
   class MockElement {
     constructor(tagName, attributes = {}) {
       this.tagName = tagName.toUpperCase();
-      this.attributes = attributes;
+      this.attributes = { ...attributes };
       this.src = attributes.src || '';
       this.currentSrc = attributes.currentSrc || this.src;
+      this.title = attributes.title || '';
       this.children = [];
+      this.parentNode = null;
+      this.style = {};
+      this.isConnected = true;
     }
     matches(sel) {
       const tags = sel.split(',').map(s => s.trim().toUpperCase());
@@ -198,15 +202,37 @@ function makeContentHarness(source, isFirefox = false) {
       const match = sel.toUpperCase();
       const traverse = node => {
         for (const child of node.children) {
-          if (child.tagName === match) results.push(child);
+          if (child.tagName === match || (sel.includes(',') && sel.split(',').map(s => s.trim().toUpperCase()).includes(child.tagName))) {
+            results.push(child);
+          }
           traverse(child);
         }
       };
       traverse(this);
       return results;
     }
+    querySelector(sel) {
+      return this.querySelectorAll(sel)[0] || null;
+    }
     appendChild(child) {
+      child.parentNode = this;
       this.children.push(child);
+      return child;
+    }
+    removeChild(child) {
+      const idx = this.children.indexOf(child);
+      if (idx !== -1) {
+        this.children.splice(idx, 1);
+        child.parentNode = null;
+      }
+      return child;
+    }
+    getAttribute(name) {
+      return this.attributes?.[name] ?? null;
+    }
+    setAttribute(name, val) {
+      this.attributes = this.attributes || {};
+      this.attributes[name] = val;
     }
   }
 
@@ -220,47 +246,86 @@ function makeContentHarness(source, isFirefox = false) {
       observedNodes.push({ target, options, observer: this });
     }
     triggerAdd(node) {
-      this.callback([{ addedNodes: [node] }]);
+      this.callback([{ addedNodes: [node], removedNodes: [] }]);
+    }
+    triggerRemove(node) {
+      this.callback([{ addedNodes: [], removedNodes: [node] }]);
     }
   }
 
+  let timeoutCb = null;
   const api = {
     runtime: {
       sendMessage: async msg => {
         sentMessages.push(msg);
         return { ok: true };
       },
+      onMessage: {
+        addListener: () => {},
+      },
     },
   };
+
+  const winListeners = {};
+  const docListeners = {};
 
   const context = {
     Element: MockElement,
     MutationObserver: MockMutationObserver,
-    document: { documentElement: docEl },
+    document: {
+      documentElement: docEl,
+      createElement: tag => new MockElement(tag),
+      querySelectorAll: sel => docEl.querySelectorAll(sel),
+      querySelector: sel => docEl.querySelectorAll(sel)[0] || null,
+      contains: node => {
+        let cur = node;
+        while (cur) {
+          if (cur === docEl) return true;
+          cur = cur.parentNode;
+        }
+        return false;
+      },
+      addEventListener: (type, fn) => { docListeners[type] = fn; },
+      removeEventListener: (type, fn) => { delete docListeners[type]; },
+      getSelection: () => null,
+    },
+    window: {
+      addEventListener: (type, fn) => { winListeners[type] = fn; },
+      removeEventListener: (type, fn) => { delete winListeners[type]; },
+      getSelection: () => null,
+    },
     [isFirefox ? 'browser' : 'chrome']: api,
     Set,
+    Map,
+    WeakMap,
+    WeakRef,
     URL,
     console,
+    Date,
+    setTimeout: (fn, ms) => { timeoutCb = fn; return 1; },
+    clearTimeout: () => { timeoutCb = null; },
   };
 
   vm.createContext(context);
   vm.runInContext(source, context);
-  return { docEl, sentMessages, observedNodes, MockElement };
+  const result = {
+    docEl,
+    sentMessages,
+    observedNodes,
+    MockElement,
+    docListeners,
+    winListeners,
+    triggerTimeout: () => { if (timeoutCb) { const cb = timeoutCb; timeoutCb = null; cb(); } }
+  };
+  Object.setPrototypeOf(result, context);
+  return result;
 }
 
 // Map of expected failure reasons for contracts representing known gaps.
 const EXPECTED_FAIL = {
-  B07: 'No download shelf suppression or host-driven listener/menu management',
-  B10: 'No proprietary registration redirect or captured-tab URL handling',
-  B25: 'No keyboard or mouse modifier listeners for force/bypass download interception',
-  B30: 'Browser-side batch link extraction across frames and selected text is not implemented',
-  B32: 'No selection detection or desktop selection panel integration',
-  B41: 'Content script lacks DOM property and selector extraction helpers',
-  B42: 'No per-site adapters or expiring media URL refresh mechanisms',
-  B44: 'Content script tracks only URLs in a Set without WeakRef player identities or removal cleanup',
-  B47: 'Content script lacks 200ms debounce, resize observers, intersection observers, and removal event handling',
-  B48: 'Lacks floating video download panel overlay; only browser action popup is provided',
-  B49: 'No window geometry, fullscreen, DPI, or focus tracking listeners',
+  B07: 'Shelf suppression requires real browser installation with supported download shelf API',
+  B10: 'Proprietary #command44 registration and licensing schemes are excluded by policy',
+  B49: 'Window geometry, DPI, and desktop focus tracking require real OS and browser window manager',
 };
 
 const tests = {};
@@ -572,9 +637,28 @@ tests.B24 = async function test_B24() {
 
 // B25: Modifier combinations and key release/blur reset in browser; no stuck override.
 tests.B25 = async function test_B25() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(content.observedNodes.some(n => n.options?.subtree && n.options?.childList), 'content script is mutation observer only; lacks keyboard listeners');
-  assert.ok(typeof content.keydownHandler === 'function', 'content script must attach keyboard listeners for force/bypass capture');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.ok(content.observedNodes.some(n => n.options?.subtree && n.options?.childList), 'content script must observe mutations');
+    assert.equal(typeof content.keydownHandler, 'function', 'content script must attach keyboard listeners for force/bypass capture');
+    assert.equal(typeof content.keyupHandler, 'function', 'content script must attach keyup listeners');
+    assert.equal(typeof content.resetModifiers, 'function', 'content script must provide modifier reset handler');
+
+    content.keydownHandler({ key: 'Alt', altKey: true });
+    assert.equal(content.modifierState.alt, true, 'Alt keydown must set alt modifier');
+    content.keydownHandler({ key: 'Control', ctrlKey: true, altKey: true });
+    assert.equal(content.modifierState.alt, true);
+    assert.equal(content.modifierState.ctrl, true, 'Ctrl keydown must set ctrl modifier');
+
+    content.keyupHandler({ key: 'Alt', altKey: false, ctrlKey: true });
+    assert.equal(content.modifierState.alt, false, 'Alt release must clear alt modifier');
+    assert.equal(content.modifierState.ctrl, true);
+
+    content.resetModifiers();
+    assert.equal(content.modifierState.alt, false, 'blur reset must clear alt');
+    assert.equal(content.modifierState.ctrl, false, 'blur reset must clear ctrl');
+    assert.equal(content.modifierState.shift, false, 'blur reset must clear shift');
+  }
 };
 
 // B26: Any future DNR route bounded to exact intended rules; disable removes rules and page history restores correctly.
@@ -618,8 +702,32 @@ tests.B29 = async function test_B29() {
 
 // B30: Count/preview/filter/choose destination/atomic enqueue; selected-text vs all-page extraction fixtures.
 tests.B30 = async function test_B30() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.extractLinks === 'function', 'content script must support link extraction');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.equal(typeof content.extractLinks, 'function', 'content script must support link extraction');
+
+    const a1 = new content.MockElement('a', { href: 'http://example.test/file1.zip' });
+    const a2 = new content.MockElement('a', { href: 'http://example.test/file2.zip' });
+    const aDup = new content.MockElement('a', { href: 'http://example.test/file1.zip' });
+    const img = new content.MockElement('img', { src: 'http://example.test/pic.png', alt: 'Pic' });
+    const js = new content.MockElement('a', { href: 'javascript:void(0)' });
+    content.docEl.appendChild(a1);
+    content.docEl.appendChild(a2);
+    content.docEl.appendChild(aDup);
+    content.docEl.appendChild(img);
+    content.docEl.appendChild(js);
+
+    const extracted = content.extractLinks();
+    assert.equal(extracted.length, 3, 'duplicate URLs and invalid schemes must be filtered');
+    assert.equal(extracted[0].url, 'http://example.test/file1.zip');
+    assert.equal(extracted[1].url, 'http://example.test/file2.zip');
+    assert.equal(extracted[2].url, 'http://example.test/pic.png');
+
+    const selExtracted = content.extractLinks({ selectedText: 'Links http://example.test/a.pdf and https://example.test/b.tar', selectionOnly: true });
+    assert.equal(selExtracted.length, 2);
+    assert.equal(selExtracted[0].url, 'http://example.test/a.pdf');
+    assert.equal(selExtracted[1].url, 'https://example.test/b.tar');
+  }
 };
 
 // B31: Each accepted batch has stable request ID, original order, per-entry context and all-or-defined-partial acceptance.
@@ -633,8 +741,27 @@ tests.B31 = async function test_B31() {
 
 // B32: Selection rect/DPI/frame ancestry, no-selection removal, matching link counts.
 tests.B32 = async function test_B32() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.selectionHandler === 'function', 'content script must track selected text and coordinates');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.equal(typeof content.selectionHandler, 'function', 'content script must track selected text and coordinates');
+    assert.equal(content.selectionHandler(), null, 'no-selection must yield null');
+
+    const mockSel = {
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => 'Get http://example.test/sel.zip',
+      getRangeAt: () => ({
+        getBoundingClientRect: () => ({ x: 10, y: 20, width: 100, height: 15, top: 20, left: 10, bottom: 35, right: 110 }),
+      }),
+    };
+    const sel = content.selectionHandler(mockSel);
+    assert.ok(sel !== null, 'active selection must be detected');
+    assert.equal(sel.linkCount, 1, 'matching link count must be calculated');
+    assert.equal(sel.rect.top, 20, 'coordinates must match selection rect');
+
+    const emptySel = { isCollapsed: true, rangeCount: 0, toString: () => '' };
+    assert.equal(content.selectionHandler(emptySel), null, 'cleared selection must remove selection state');
+  }
 };
 
 // B33: Actual browser permits intended page context; history removal opt-in and original output retained.
@@ -717,14 +844,44 @@ tests.B40 = async function test_B40() {
 
 // B41: Define minimal declarative extraction scope and authentication; stale/detached elements cannot attach metadata to replacement player.
 tests.B41 = async function test_B41() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.queryElementMetadata === 'function', 'content script must support element metadata queries');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.equal(typeof content.queryElementMetadata, 'function', 'content script must support element metadata queries');
+
+    const v = new content.MockElement('video', { src: 'http://example.test/v.mp4', title: 'Video Title' });
+    v.videoWidth = 1280;
+    v.videoHeight = 720;
+    content.docEl.appendChild(v);
+
+    const meta = content.queryElementMetadata(v);
+    assert.equal(meta.src, 'http://example.test/v.mp4');
+    assert.equal(meta.title, 'Video Title');
+    assert.equal(meta.videoWidth, 1280);
+
+    const detached = new content.MockElement('video', { src: 'http://example.test/d.mp4' });
+    detached.isConnected = false;
+    assert.equal(content.queryElementMetadata(detached), null, 'detached element must not attach metadata');
+  }
 };
 
 // B42: Independent adapters with per-site tests/versioning; player-quality changes and auth expiry reported; do not reuse proprietary decipher code.
 tests.B42 = async function test_B42() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.siteAdapters !== 'undefined', 'content script must provide site adapters for dynamic players');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.ok(Array.isArray(content.siteAdapters), 'siteAdapters must be an array');
+    assert.ok(content.siteAdapters.length >= 2, 'must provide multiple site adapters');
+    for (const a of content.siteAdapters) {
+      assert.ok(typeof a.id === 'string', 'adapter must have string ID');
+      assert.ok(typeof a.version === 'number', 'adapter must declare version');
+      assert.ok(typeof a.matches === 'function', 'adapter must have matches predicate');
+      assert.ok(typeof a.extractMedia === 'function', 'adapter must have extractMedia function');
+      assert.ok(typeof a.refreshUrl === 'function', 'adapter must have refreshUrl handler');
+    }
+    const adapter = content.getSiteAdapter('http://example.test/stream');
+    assert.ok(adapter, 'matching adapter must be found');
+    const refreshed = await adapter.refreshUrl({ url: 'http://example.test/stream.mp4' });
+    assert.equal(refreshed.expired, false);
+  }
 };
 
 // B43: Dynamic src/source/load events, multiple players, blob/MSE relation, detached elements, same URL reuse.
@@ -743,8 +900,21 @@ tests.B43 = async function test_B43() {
 
 // B44: Player replacement/removal cleans catalog and overlays without losing current source identity.
 tests.B44 = async function test_B44() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.playerRegistry !== 'undefined', 'must track player elements via WeakRef / registry');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.ok(typeof content.playerRegistry !== 'undefined', 'must track player elements via WeakRef / registry');
+
+    const v = new content.MockElement('video', { src: 'http://example.test/reg.mp4', title: 'Reg Vid' });
+    content.docEl.appendChild(v);
+    const id = content.playerRegistry.register(v, { url: 'http://example.test/reg.mp4', title: 'Reg Vid' });
+    assert.ok(typeof id === 'string');
+    assert.equal(content.playerRegistry.size(), 1);
+    assert.equal(content.playerRegistry.get(id).url, 'http://example.test/reg.mp4');
+
+    content.playerRegistry.unregister(v);
+    assert.equal(content.playerRegistry.size(), 0);
+    assert.equal(content.playerRegistry.get(id), null);
+  }
 };
 
 // B45: Scroll/zoom/DPI/clipping/occlusion/tiny audio widgets with explicit bounding-rect expectations.
@@ -766,14 +936,35 @@ tests.B46 = async function test_B46() {
 
 // B47: Bound idle CPU; cover attributes, removals, visibility changes and debounce without stale overlay.
 tests.B47 = async function test_B47() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.debounceTimer !== 'undefined', 'DOM inspection must be debounced with 200ms timer');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.ok(typeof content.debounceTimer !== 'undefined', 'DOM inspection must be debounced with 200ms timer');
+    assert.equal(content.DEBOUNCE_MS, 200, 'debounce delay must be 200ms');
+
+    const v1 = new content.MockElement('video', { src: 'http://example.test/v1.mp4' });
+    content.observedNodes[0]?.observer.triggerAdd(v1);
+    assert.ok(content.debounceTimer !== null, 'debounce timer must activate on mutation');
+  }
 };
 
 // B48: Independent original-looking panel with defined desktop/DOM ownership, focus, hide/show and no intrusion on unrelated windows.
 tests.B48 = async function test_B48() {
-  const content = makeContentHarness(chromiumContentSource);
-  assert.ok(typeof content.playerPanel !== 'undefined', 'content script must inject floating player panel');
+  for (const [source, isFf] of [[chromiumContentSource, false], [firefoxContentSource, true]]) {
+    const content = makeContentHarness(source, isFf);
+    assert.ok(typeof content.playerPanel !== 'undefined', 'content script must inject floating player panel');
+
+    const panel = content.playerPanel.create('p1', { url: 'http://example.test/vid.mp4', title: 'Vid' });
+    assert.ok(panel, 'player panel must be created');
+    assert.equal(content.playerPanel.get('p1'), panel);
+
+    content.playerPanel.hide('p1');
+    assert.equal(panel.visible === false || panel.style?.display === 'none', true, 'panel must hide');
+    content.playerPanel.show('p1');
+    assert.equal(panel.visible === true || panel.style?.display === 'block', true, 'panel must show');
+
+    content.playerPanel.remove('p1');
+    assert.equal(content.playerPanel.get('p1'), null, 'panel must be cleaned up on remove');
+  }
 };
 
 // B49: Multiple monitors, mixed DPI, fullscreen/exit, minimized window, tab detach and background tab hide.

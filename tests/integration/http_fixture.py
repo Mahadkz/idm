@@ -1,4 +1,4 @@
-"""Disposable HTTP server with engine faults: one-shot links, POST-only files, no-range and flaky bodies."""
+"""Disposable HTTP server with engine faults: one-shot links, POST-only files, no-range and flaky bodies, stalls and range corruption."""
 import argparse
 import json
 import re
@@ -84,19 +84,30 @@ class Handler(BaseHTTPRequestHandler):
             if not match or int(match[1]) >= size:
                 return self.plain(416, [('Content-Range', f'bytes */{size}')])
             start, end, status = int(match[1]), min(int(match[2] or size - 1), size - 1), 206
+        flip = path == '/flip.bin' and attempt > 2
+        if flip:
+            # N05: let the honest streams bank checkpointed progress before the
+            # corrupt answer arrives, so the failure leaves a resumable checkpoint.
+            time.sleep(0.2)
         self.send_response(status)
         self.send_header('Content-Length', str(end - start + 1))
         self.send_header('ETag', '"engine-v1"')
         if status == 206:
-            self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            announced = start + 1 if flip else start
+            self.send_header('Content-Range', f'bytes {announced}-{end}/{size}')
         self.end_headers()
         position = start
+        half = start + (end - start + 1) // 2
         try:
             while position <= end:
                 count = min(64 * 1024, end - position + 1)
                 if path == '/flaky-norange.bin' and attempt == 1 and position >= SIZE // 2:
                     self.close_connection = True
                     return  # disconnect halfway through the first full response
+                # N31: the second range request sends half its body, then holds the
+                # connection open for a long time without closing it or sending more.
+                if path == '/stall.bin' and attempt == 2 and position >= half:
+                    time.sleep(30)
                 self.wfile.write(payload(position, position + count - 1))
                 self.wfile.flush()
                 position += count

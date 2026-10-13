@@ -285,6 +285,11 @@ const WRITE_BUFFER: usize = 256 * 1024;
 /// Minimum spacing of periodic checkpoints; pause, stop and segment ends always checkpoint.
 const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Idle period after which a transfer abandons a connection that has delivered no
+/// bytes and reopens from its cursor, counting toward the retry budget (N31).
+/// The same budget bounds connect and response headers of every request.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Replayable request identity shared by the probe and every transfer request.
 #[derive(Debug, Clone)]
 struct Request {
@@ -387,6 +392,42 @@ pub fn auth_challenge(error: &(dyn Error + Send + Sync + 'static)) -> Option<Aut
     error
         .downcast_ref::<AuthRequired>()
         .map(|required| required.0.clone())
+}
+
+/// A server that accepted byte ranges during probing later answered a range request
+/// with a response that cannot be assembled safely: a wrong status, Content-Range or
+/// length (N05). Workers are stopped, the checkpoint is kept resumable, and the
+/// caller must choose a full restart instead of completing with mixed data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeUnreliable {
+    /// Byte offset the invalid response was opened at.
+    pub at: u64,
+    /// What was wrong with the response.
+    pub reason: String,
+}
+
+impl std::fmt::Display for RangeUnreliable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server stopped honoring byte ranges at byte {}: {}; partial data kept, rerun with --restart",
+            self.at, self.reason
+        )
+    }
+}
+
+impl Error for RangeUnreliable {}
+
+/// The typed range failure of an aborted transfer, when present (N05).
+pub fn range_unreliable(error: &(dyn Error + Send + Sync + 'static)) -> Option<RangeUnreliable> {
+    error.downcast_ref::<RangeUnreliable>().cloned()
+}
+
+fn unreliable(at: u64, reason: impl Into<String>) -> Box<dyn Error + Send + Sync> {
+    Box::new(RangeUnreliable {
+        at,
+        reason: reason.into(),
+    })
 }
 
 /// Parses the first challenge of a WWW-Authenticate or Proxy-Authenticate
@@ -572,7 +613,12 @@ fn retryable(status: StatusCode) -> bool {
 }
 
 
-fn client(headers: &[(String, String)], method: &Method, proxy: &Proxy) -> Result<Client> {
+fn client(
+    headers: &[(String, String)],
+    method: &Method,
+    proxy: &Proxy,
+    stall_timeout: Duration,
+) -> Result<Client> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
         let key = HeaderName::from_bytes(name.as_bytes())?;
@@ -626,8 +672,11 @@ fn client(headers: &[(String, String)], method: &Method, proxy: &Proxy) -> Resul
         }
         attempt.follow()
     });
+    // The blocking client has no `read_timeout` (that builder is async-only), but its
+    // `timeout` is re-armed for every body read, so it doubles as the N31 socket idle
+    // timeout; it also bounds connect and response headers, where no byte flows either.
     let mut builder = Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(stall_timeout)
         .default_headers(map)
         .referer(false)
         .redirect(policy);
@@ -800,6 +849,8 @@ struct Shared {
     refused: Mutex<Option<StatusCode>>,
     /// Last periodic checkpoint; bounds disk syncs for all workers together.
     checkpointed: Mutex<Instant>,
+    /// First terminal worker failure (N05 `RangeUnreliable`, pause, I/O error).
+    aborted: Mutex<Option<Box<dyn Error + Send + Sync>>>,
 }
 
 enum Outcome {
@@ -814,6 +865,20 @@ impl Shared {
 
     fn refused(&self) -> bool {
         self.refused.lock().map(|r| r.is_some()).unwrap_or(true)
+    }
+
+    /// Records the first terminal failure and stops every worker. Written bytes stay
+    /// in the checkpoint, so a resumable state is left behind for pause and a safe
+    /// full restart alike.
+    fn abort(&self, error: Box<dyn Error + Send + Sync>) {
+        if let Ok(mut slot) = self.aborted.lock() {
+            let _ = slot.get_or_insert(error);
+        }
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    fn take_failure(&self) -> Option<Box<dyn Error + Send + Sync>> {
+        self.aborted.lock().ok().and_then(|mut slot| slot.take())
     }
 
     fn persist(&self, start: u64, cursor: u64) -> Result<()> {
@@ -915,18 +980,30 @@ fn find(state: &Checkpoint, start: u64) -> Result<usize> {
 fn worker(shared: Arc<Shared>) -> Result<()> {
     loop {
         if shared.stop.load(Ordering::Relaxed) {
-            return Err(err("paused"));
+            shared.abort(err("paused"));
+            return Ok(());
         }
-        let Some(start) = shared.claim()? else {
+        let Some(start) = shared.claim().unwrap_or_else(|error| {
+            shared.abort(error);
+            None
+        }) else {
             return Ok(());
         };
-        match transfer_segment(&shared, start)? {
-            Outcome::Done => {}
-            Outcome::Refused(status) => {
-                shared.release(start)?;
+        match transfer_segment(&shared, start) {
+            Ok(Outcome::Done) => {}
+            Ok(Outcome::Refused(status)) => {
+                if let Err(error) = shared.release(start) {
+                    shared.abort(error);
+                    return Ok(());
+                }
                 if let Ok(mut refused) = shared.refused.lock() {
                     refused.get_or_insert(status);
                 }
+                return Ok(());
+            }
+            // The first failure aborts the siblings instead of racing them to the join.
+            Err(error) => {
+                shared.abort(error);
                 return Ok(());
             }
         }
@@ -998,18 +1075,28 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                     {
                         return Ok(Outcome::Refused(status));
                     }
-                    return Err(err(format!(
-                        "range request returned HTTP {status} at byte {cursor}"
-                    )));
+                    // A 200 or 416 for a range request means the server stopped
+                    // honoring ranges; splicing that response would mix data (N05).
+                    return Err(unreliable(
+                        cursor,
+                        format!("HTTP {status} for a range request"),
+                    ));
                 }
-                if !identity_encoded(&response)
-                    || response.url().as_str() != effective_url
-                    || header(&response, CONTENT_RANGE)
-                        .as_deref()
-                        .and_then(parse_content_range)
-                        != Some((cursor, end, total))
-                {
-                    return Err(err(format!("invalid Content-Range at byte {cursor}")));
+                if !identity_encoded(&response) {
+                    return Err(unreliable(cursor, "range response was not identity-encoded"));
+                }
+                if response.url().as_str() != effective_url {
+                    return Err(unreliable(cursor, "range response arrived from another destination"));
+                }
+                let range = header(&response, CONTENT_RANGE);
+                if range.as_deref().and_then(parse_content_range) != Some((cursor, end, total)) {
+                    return Err(unreliable(
+                        cursor,
+                        format!(
+                            "invalid Content-Range {}",
+                            range.as_deref().unwrap_or("missing")
+                        ),
+                    ));
                 }
                 if etag
                     .as_ref()
@@ -1024,7 +1111,10 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 }
                 if let Some(value) = header(&response, CONTENT_LENGTH) {
                     if value.parse::<u64>().ok() != Some(end - cursor + 1) {
-                        return Err(err("invalid range body length"));
+                        return Err(unreliable(
+                            cursor,
+                            format!("body length {value} does not match the range"),
+                        ));
                     }
                 }
                 (response, false)
@@ -1079,6 +1169,8 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 break;
             }
             let filled = (position - written) as usize;
+            // Read failures include the N31 idle timeout: the connection delivered
+            // nothing for the stall period and is abandoned below, keeping written bytes.
             match response.read(&mut buffer[filled..filled + want]) {
                 Ok(0) => {
                     failed = true;
@@ -1126,7 +1218,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
             if !open_ended && !shrunk {
                 let mut extra = [0u8; 1];
                 if response.read(&mut extra)? != 0 {
-                    return Err(err("range body exceeded declared end"));
+                    return Err(unreliable(cursor, "body exceeded the declared range end"));
                 }
             }
             shared.release(start)?;
@@ -1229,6 +1321,29 @@ pub fn download(options: Options) -> Result<()> {
 }
 
 pub fn download_with_control(options: Options, control: Arc<TransferControl>) -> Result<()> {
+    download_with_stall_timeout(options, control, DEFAULT_STALL_TIMEOUT)
+}
+
+/// Downloads with an explicit N31 stall timeout: any request whose connection
+/// delivers no bytes for `stall_timeout` is abandoned and reopened from its
+/// cursor, counting toward the retry budget. Rate-limiter waits never count;
+/// only the socket idle time does. Must be greater than zero.
+pub fn download_with_stall_timeout(
+    options: Options,
+    control: Arc<TransferControl>,
+    stall_timeout: Duration,
+) -> Result<()> {
+    if stall_timeout.is_zero() {
+        return Err(err("stall timeout must be greater than zero"));
+    }
+    run_transfer(options, control, stall_timeout)
+}
+
+fn run_transfer(
+    options: Options,
+    control: Arc<TransferControl>,
+    stall_timeout: Duration,
+) -> Result<()> {
     if options.connections == 0 || options.connections > 16 {
         return Err(err("connections must be between 1 and 16"));
     }
@@ -1247,7 +1362,7 @@ pub fn download_with_control(options: Options, control: Arc<TransferControl>) ->
         let _ = fs::remove_file(&meta);
     }
     let request = Request::new(&options)?;
-    let client = client(&options.headers, &request.method, &options.proxy)?;
+    let client = client(&options.headers, &request.method, &options.proxy, stall_timeout)?;
     // GET transfers keep the original header-only identity so older checkpoints stay resumable.
     let context = if request.method == Method::GET && request.body.is_none() {
         serde_json::to_vec(&options.headers)?
@@ -1341,6 +1456,7 @@ pub fn download_with_control(options: Options, control: Arc<TransferControl>) ->
         adopted: Mutex::new(probe.response.take().map(|r| (probe.offset, r))),
         refused: Mutex::new(None),
         checkpointed: Mutex::new(Instant::now()),
+        aborted: Mutex::new(None),
     });
     let handles: Vec<_> = (0..options.connections)
         .map(|_| {
@@ -1359,6 +1475,10 @@ pub fn download_with_control(options: Options, control: Arc<TransferControl>) ->
                 options.stop.store(true, Ordering::Relaxed);
             }
         }
+    }
+    // The first worker failure aborted the others; surface that cause, not a sibling's "paused".
+    if let Some(error) = shared.take_failure() {
+        return Err(error);
     }
     if let Some(e) = failure {
         return Err(e);
@@ -1520,6 +1640,23 @@ mod tests {
             "authentication required: HTTP 401 Basic realm \"xdm-test\""
         );
     }
+
+    #[test]
+    fn range_unreliable_errors_survive_the_error_box() {
+        let error: Box<dyn Error + Send + Sync> =
+            unreliable(4096, "invalid Content-Range bytes 4097-8191/16384");
+        assert_eq!(
+            range_unreliable(error.as_ref()),
+            Some(RangeUnreliable {
+                at: 4096,
+                reason: "invalid Content-Range bytes 4097-8191/16384".into()
+            })
+        );
+        assert_eq!(range_unreliable(err("paused").as_ref()), None);
+        let text = error.to_string();
+        assert!(text.contains("stopped honoring byte ranges at byte 4096"), "{text}");
+        assert!(text.contains("--restart"), "{text}");
+    }
 }
 
 #[cfg(test)]
@@ -1661,6 +1798,7 @@ mod property_tests {
             adopted: Mutex::new(None),
             refused: Mutex::new(None),
             checkpointed: Mutex::new(Instant::now()),
+            aborted: Mutex::new(None),
         }
     }
 
@@ -1703,5 +1841,301 @@ mod property_tests {
             assert!(claims >= connections.min(16).min(length as usize));
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+}
+
+/// Local disposable servers for the N31 stall and N05 range-corruption behaviors (rule 13).
+#[cfg(test)]
+mod net_tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Faults {
+        len: u64,
+        ignore_ranges: bool,
+        /// This request number delivers half its body, then holds the connection open.
+        stall_attempt: Option<u32>,
+        /// Requests after this number announce a wrong Content-Range.
+        flip_after: Option<u32>,
+        /// Pause before answering a request whose Content-Range will be wrong.
+        flip_delay: Duration,
+    }
+
+    impl Faults {
+        fn new(len: u64) -> Self {
+            Self {
+                len,
+                ignore_ranges: false,
+                stall_attempt: None,
+                flip_after: None,
+                flip_delay: Duration::ZERO,
+            }
+        }
+    }
+
+    struct Server {
+        port: u16,
+        /// One `(start, end, open_ended)` entry per request, in arrival order.
+        spans: Arc<Mutex<Vec<(u64, u64, bool)>>>,
+        requests: Arc<AtomicU64>,
+    }
+
+    /// Spawns a threaded HTTP/1.1 server that closes every connection after one response.
+    fn spawn_server(faults: Faults) -> Server {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(AtomicU64::new(0));
+        let server_spans = spans.clone();
+        let server_requests = requests.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let faults = faults.clone();
+                let spans = server_spans.clone();
+                let requests = server_requests.clone();
+                thread::spawn(move || serve(stream, faults, spans, requests));
+            }
+        });
+        Server {
+            port,
+            spans,
+            requests,
+        }
+    }
+
+    fn serve(
+        stream: std::net::TcpStream,
+        faults: Faults,
+        spans: Arc<Mutex<Vec<(u64, u64, bool)>>>,
+        requests: Arc<AtomicU64>,
+    ) {
+        use std::io::{BufRead, BufReader, Write};
+        let mut stream = stream;
+        let mut reader = BufReader::new(match stream.try_clone() {
+            Ok(clone) => clone,
+            Err(_) => return,
+        });
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+            return;
+        }
+        let mut range: Option<String> = None;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("range") {
+                    range = Some(value.trim().to_owned());
+                }
+            }
+        }
+        let attempt = (requests.fetch_add(1, Ordering::Relaxed) + 1) as u32;
+        let len = faults.len;
+        let (start, end, open) = match range.as_deref() {
+            Some(value) if !faults.ignore_ranges => {
+                let value = value.strip_prefix("bytes=").unwrap_or(value);
+                let (first, last) = value.split_once('-').unwrap_or((value, ""));
+                let start = first.parse::<u64>().unwrap_or(0).min(len - 1);
+                let open = last.is_empty();
+                let end = if open {
+                    len - 1
+                } else {
+                    last.parse::<u64>().unwrap_or(len - 1).min(len - 1)
+                };
+                (start, end, open)
+            }
+            _ => (0, len - 1, true),
+        };
+        if let Ok(mut spans) = spans.lock() {
+            spans.push((start, end, open));
+        }
+        let ranged = range.is_some() && !faults.ignore_ranges;
+        let flip = faults.flip_after.is_some_and(|after| attempt > after);
+        if flip && !faults.flip_delay.is_zero() {
+            // Let the honest streams bank checkpointed progress before the corrupt answer.
+            thread::sleep(faults.flip_delay);
+        }
+        let status = if ranged { "206 Partial Content" } else { "200 OK" };
+        let mut head = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"net-tests\"\r\nConnection: close\r\n",
+            end - start + 1
+        );
+        if ranged {
+            // N05 fault: the announced window is shifted one byte off the requested one.
+            let announced = if flip { start + 1 } else { start };
+            head.push_str(&format!("Content-Range: bytes {announced}-{end}/{len}\r\n"));
+        }
+        head.push_str("\r\n");
+        if stream.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        let half = start + (end - start + 1) / 2;
+        let mut position = start;
+        while position <= end {
+            let count = (end - position + 1).min(16 * 1024) as usize;
+            if faults.stall_attempt == Some(attempt) && position >= half {
+                // N31 fault: keep the socket open without delivering another byte.
+                thread::sleep(Duration::from_secs(30));
+            }
+            let chunk: Vec<u8> = (0..count)
+                .map(|offset| ((position + offset as u64) % 256) as u8)
+                .collect();
+            if stream.write_all(&chunk).is_err() || stream.flush().is_err() {
+                return;
+            }
+            position += count as u64;
+        }
+    }
+
+    impl Server {
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/f.bin", self.port)
+        }
+
+        fn total(&self) -> usize {
+            self.requests.load(Ordering::Relaxed) as usize
+        }
+
+        fn closed_spans(&self) -> Vec<(u64, u64)> {
+            self.spans
+                .lock()
+                .map(|spans| {
+                    spans
+                        .iter()
+                        .filter(|&&(_, _, open)| !open)
+                        .map(|&(start, end, _)| (start, end))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    fn workspace(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdm-stall-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn options(url: String, output: &Path, connections: usize) -> Options {
+        Options {
+            url,
+            output: output.to_path_buf(),
+            connections,
+            ..Default::default()
+        }
+    }
+
+    fn assert_pattern(path: &Path, len: u64) {
+        let data = fs::read(path).unwrap();
+        assert_eq!(data.len() as u64, len);
+        assert!(
+            data.iter()
+                .enumerate()
+                .all(|(offset, byte)| *byte == (offset % 256) as u8),
+            "downloaded bytes do not match the served pattern"
+        );
+    }
+
+    #[test]
+    fn stalled_range_connection_is_abandoned_and_reopened_from_cursor() {
+        let len = 512 * 1024;
+        let mut faults = Faults::new(len);
+        faults.stall_attempt = Some(2);
+        let server = spawn_server(faults);
+        let dir = workspace("range-stall");
+        let output = dir.join("f.bin");
+        let started = Instant::now();
+        download_with_stall_timeout(
+            options(server.url(), &output, 4),
+            Arc::new(TransferControl::new(None).unwrap()),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_pattern(&output, len);
+        // The probe, three workers and at least one reopen of the stalled range.
+        assert!(server.total() >= 5, "{} requests", server.total());
+        let spans = server.closed_spans();
+        assert!(
+            spans
+                .iter()
+                .any(|&(start, end)| spans.iter().any(|&(other, _)| other > start && other <= end)),
+            "no request reopened inside the stalled range: {spans:?}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unreliable_ranges_stop_workers_and_keep_a_resumable_checkpoint() {
+        let len = 512 * 1024;
+        let mut faults = Faults::new(len);
+        faults.flip_after = Some(2);
+        faults.flip_delay = Duration::from_millis(150);
+        let server = spawn_server(faults);
+        let dir = workspace("flip");
+        let output = dir.join("f.bin");
+        let error = download_with_stall_timeout(
+            options(server.url(), &output, 4),
+            Arc::new(TransferControl::new(None).unwrap()),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        let typed = range_unreliable(error.as_ref()).expect(&error.to_string());
+        assert!(typed.reason.contains("Content-Range"), "{}", typed.reason);
+        assert!(error.to_string().contains("--restart"));
+        assert!(!output.exists());
+        assert!(dir.join("f.bin.part").exists());
+        let meta: Checkpoint =
+            serde_json::from_reader(File::open(dir.join("f.bin.part.meta")).unwrap()).unwrap();
+        let done: u64 = meta.segments.iter().map(|s| s.cursor - s.start).sum();
+        assert!(0 < done && done < len, "{done} of {len} bytes checkpointed");
+        // Every worker stopped: only the probe and the honest range requests were made.
+        assert!(server.total() <= 4, "{} requests", server.total());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rate_limited_transfer_is_not_treated_as_a_stall() {
+        let len = 128 * 1024;
+        let server = spawn_server(Faults::new(len));
+        let dir = workspace("throttle");
+        let output = dir.join("f.bin");
+        let started = Instant::now();
+        download_with_stall_timeout(
+            options(server.url(), &output, 4),
+            Arc::new(TransferControl::new(Some(32 * 1024)).unwrap()),
+            // The transfer outlives the stall timeout many times over; the limiter's
+            // waits happen between reads, so the socket idle clock never sees them.
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert_pattern(&output, len);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stalled_single_stream_restarts_from_zero() {
+        let len = 128 * 1024;
+        let mut faults = Faults::new(len);
+        faults.ignore_ranges = true;
+        faults.stall_attempt = Some(1);
+        let server = spawn_server(faults);
+        let dir = workspace("stream-stall");
+        let output = dir.join("f.bin");
+        download_with_stall_timeout(
+            options(server.url(), &output, 2),
+            Arc::new(TransferControl::new(None).unwrap()),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_pattern(&output, len);
+        // The adopted probe response stalled; exactly one retry from byte zero followed.
+        assert_eq!(server.total(), 2);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

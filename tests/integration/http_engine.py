@@ -136,6 +136,40 @@ def main():
             assert out.read_bytes() == b"keep"
             assert digest(Path(f"{out}.part")) == EXPECTED
 
+            # N31: a range connection that stops delivering is abandoned well before the
+            # server's 30 s hold ends, and reopened from the stalled worker's cursor.
+            out = directory / "stall.bin"
+            started = time.monotonic()
+            run(f"{base}/stall.bin", out, "--connections", "4")
+            elapsed = time.monotonic() - started
+            assert digest(out) == EXPECTED
+            assert elapsed < 25, f"stall recovery took {elapsed:.1f}s"
+            seen = requests("/stall.bin")
+            assert len(seen) >= 5, seen
+            closed = [tuple(int(v) for v in r["range"][len("bytes="):].split("-"))
+                      for r in seen if r["range"] and not r["range"].endswith("-")]
+            assert any(a > start and a <= end for start, end in closed for a, _ in closed), closed
+
+            # N05: a server that stops honoring ranges fails with a typed error, stops
+            # every worker and leaves a resumable checkpoint instead of mixed data.
+            out = directory / "flip.bin"
+            failed = run(f"{base}/flip.bin", out, "--connections", "4", success=False)
+            assert "stopped honoring byte ranges" in failed.stderr, failed.stderr
+            assert "--restart" in failed.stderr, failed.stderr
+            assert not out.exists() and Path(f"{out}.part").exists()
+            meta = json.loads(Path(f"{out}.part.meta").read_text())
+            done = sum(s["cursor"] - s["start"] for s in meta["segments"])
+            assert 0 < done < SIZE, done
+            assert 3 <= len(requests("/flip.bin")) <= 4
+
+            # A throttled transfer is not a stall: the limiter waits between reads
+            # while the socket keeps delivering, so the cap holds for the whole file.
+            out = directory / "throttle.bin"
+            started = time.monotonic()
+            run(f"{base}/throttle.bin", out, "--rate-kib", "256")
+            elapsed = time.monotonic() - started
+            assert digest(out) == EXPECTED and elapsed >= 14, elapsed
+
             # Proxy routing: environment by default, explicit direct, HTTP proxy, SOCKS5 with remote DNS, bypass.
             proxy_log = directory / "proxy.jsonl"
             proxies = subprocess.Popen([sys.executable, str(PROXY_FIXTURE), str(proxy_log)],
@@ -170,7 +204,7 @@ def main():
         finally:
             server.terminate()
             server.wait(timeout=5)
-    print("http engine adoption, one-shot, replay, resume, no-clobber and proxy checks passed")
+    print("http engine adoption, one-shot, replay, resume, no-clobber, proxy, stall recovery, range-corruption and throttle checks passed")
 
 
 if __name__ == "__main__":

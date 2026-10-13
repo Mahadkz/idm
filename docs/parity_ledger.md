@@ -43,7 +43,7 @@
 | N28 | Windows dial-up/VPN and redial | missing | Missing. | — |
 | N29 | Static segment allocation | implemented | Implemented independent static1–16 partitioning; one worker thread per segment,6… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N30 | Dynamic splitting and worker reuse | partial | Partial (2026-10-13): workers form a pool of the requested size that claims idle… | tests/integration/http_engine.py |
-| N31 | Stall recovery and adaptive connections | implemented | Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a con… | tests/integration/http_engine.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs |
+| N31 | Stall recovery and adaptive connections | implemented | Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a con… | tests/integration/http_engine.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs |
 | N32 | Overlap/data-corruption validation | partial | Partial safety: strict headers/body lengths/validators; no persisted interval ch… | — |
 | N33 | Preallocation and offset writes | different | Independent implementation: set_len plus positional write_at; not explicit Linux… | — |
 | N34 | Checkpoint schema and write ordering | partial | Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validat… | tests/integration/contracts_core.py |

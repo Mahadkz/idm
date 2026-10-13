@@ -329,7 +329,8 @@
       "test_refs": [
         "tests/integration/http_engine.py",
         "tests/integration/http_fixture.py",
-        "crates/xdm-http/src/lib.rs"
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/main.rs"
       ]
     },
     {

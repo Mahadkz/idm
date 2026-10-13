@@ -461,6 +461,11 @@ impl Service {
             ));
         }
         let transaction = inner.db.transaction()?;
+        let retry_max: i64 = transaction.query_row(
+            "SELECT retry_max FROM queues WHERE id=?1",
+            [queue_id],
+            |row| row.get(0),
+        )?;
         for id in &task_ids {
             let current = transaction
                 .query_row(
@@ -484,6 +489,15 @@ impl Service {
                         "UPDATE tasks SET queue_id=?1,position=(SELECT COALESCE(MAX(position),0)+1 FROM tasks WHERE queue_id=?1),updated_at=CURRENT_TIMESTAMP WHERE id=?2",
                         params![queue_id, id],
                     )?;
+                    // A retry armed under the old queue's policy must not
+                    // fire in a queue that would never have armed it; the
+                    // failure stands instead. Infinite (-1) always retries.
+                    if retry_max >= 0 {
+                        transaction.execute(
+                            "UPDATE tasks SET status='failed',retry_count=0,retry_at=NULL WHERE id=?1 AND status='queued' AND retry_at IS NOT NULL AND retry_count>?2",
+                            params![id, retry_max],
+                        )?;
+                    }
                 }
             }
         }
@@ -540,12 +554,11 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
-        set_setting(&inner.db, "queue_running", "0")?;
+        // Arming only records the deadline (IDM behavior): the gate keeps
+        // its state and running transfers, including independent queue
+        // starts, keep running until the start time opens the gate.
         set_setting(&inner.db, "queue_start_at", &at_unix.to_string())?;
-        inner.queue_running = false;
         inner.queue_start_at = Some(at_unix);
-        stop_all_independent(&inner.db)?;
-        interrupt_queue_workers(&mut inner, None);
         drop(inner);
         self.wake.notify_one();
         Ok(Reply::list(Vec::new()))
@@ -706,6 +719,25 @@ impl Service {
         {
             return Ok(Reply::error("queue not found"));
         }
+        // A running queue adopts the edited cutoff even when it already
+        // passed: the start path cannot re-arm a closed window, so without
+        // this an earlier stop time would never take effect.
+        let running: bool = inner.db.query_row(
+            "SELECT running FROM queues WHERE id=?1",
+            [queue_id],
+            |row| row.get(0),
+        )?;
+        let now = inner.clock.now();
+        if running
+            && let Some(occurrence) = schedule::current_occurrence(&schedule, now, inner.clock.as_ref())
+            && occurrence.has_stop
+            && now >= occurrence.end
+        {
+            inner.db.execute(
+                "UPDATE queues SET sched_until=?1 WHERE id=?2",
+                params![occurrence.end, queue_id],
+            )?;
+        }
         queue_reply(&inner, queue_id)
     }
 
@@ -820,7 +852,7 @@ impl Service {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use xdm_ipc::{Command, CompletionAction, MoveTarget};
@@ -828,7 +860,7 @@ mod tests {
     use crate::os_actions::RecordOnly;
     use crate::schedule::tests::FakeClock;
     use crate::test_helpers::{finish, order, queue, service, submit, summary, task_state};
-    use crate::Service;
+    use crate::{Active, Service, unix_now};
 
     #[test]
     fn manual_order_moves_and_persists_in_queue() {
@@ -1230,5 +1262,109 @@ mod tests {
         service.command(Command::QueueStop).unwrap();
         let row = summary(&service, q);
         assert!(!row.started_alone);
+    }
+
+    #[test]
+    fn scheduling_global_start_only_arms_the_deadline() {
+        let (service, _, _) = service(1000);
+        let q = queue(&service, "Armed");
+        let id = submit(&service, "a0");
+        service.command(Command::AssignQueue { queue_id: q, task_ids: vec![id] }).unwrap();
+        service.command(Command::QueueStartOne { queue_id: q }).unwrap();
+        // One busy worker in the independently started queue.
+        let stop = Arc::new(AtomicBool::new(false));
+        service.inner.lock().unwrap().active.insert(
+            id,
+            Active {
+                queue_id: q,
+                stop: stop.clone(),
+                control: None,
+                ftp: None,
+                media: None,
+            },
+        );
+        let at = unix_now() + 60;
+        assert!(
+            service
+                .command(Command::QueueScheduleStart { at_unix: at })
+                .unwrap()
+                .ok
+        );
+        // Arming a future start records only the deadline: the gate, the
+        // independent start and the busy worker keep running.
+        let list = service.command(Command::List).unwrap();
+        assert_eq!((list.queue_running, list.queue_start_at), (Some(true), Some(at)));
+        let row = summary(&service, q);
+        assert!(row.running && row.started_alone);
+        assert!(!stop.load(Ordering::Relaxed));
+        let inner = service.inner.lock().unwrap();
+        assert!(inner.queue_interrupted.is_empty());
+    }
+
+    #[test]
+    fn schedule_edit_to_earlier_stop_stops_running_queue_at_once() {
+        let (service, clock, _) = service(10_000);
+        let q = queue(&service, "Edited");
+        let id = submit(&service, "e0");
+        service.command(Command::AssignQueue { queue_id: q, task_ids: vec![id] }).unwrap();
+        // 02:46 local: a 01:40-03:20 window is open and starts the queue.
+        service
+            .command(Command::QueueSetSchedule { queue_id: q, kind: "daily".into(), start: 100, stop: Some(200), days: 0x7f })
+            .unwrap();
+        service.command(Command::List).unwrap();
+        let row = summary(&service, q);
+        assert!(row.running && row.started_alone && row.run_state == "running");
+        // Editing the stop to 02:30, already past, must stop the queue on
+        // this command's tick: the closed window can never re-arm a cutoff.
+        service
+            .command(Command::QueueSetSchedule { queue_id: q, kind: "daily".into(), start: 100, stop: Some(150), days: 0x7f })
+            .unwrap();
+        let row = summary(&service, q);
+        assert!(!row.running && !row.started_alone);
+        assert_eq!(row.run_state, "stopped");
+        let events = service.command(Command::QueueEvents { queue_id: q }).unwrap().queue_events;
+        assert_eq!(events.last().map(|event| event.outcome.as_str()), Some("schedule_stop"));
+        // Extending the stop instead keeps the queue running to the new end.
+        clock.set(10_500);
+        service
+            .command(Command::QueueSetSchedule { queue_id: q, kind: "daily".into(), start: 100, stop: Some(240), days: 0x7f })
+            .unwrap();
+        assert!(summary(&service, q).running);
+        clock.set(14_400);
+        service.command(Command::List).unwrap();
+        let row = summary(&service, q);
+        assert!(!row.running && row.run_state == "stopped");
+    }
+
+    #[test]
+    fn moving_pending_retry_into_no_retry_queue_cancels_it() {
+        let (service, clock, _) = service(1000);
+        let lenient = queue(&service, "Lenient");
+        let strict = queue(&service, "Strict");
+        service
+            .command(Command::QueueSetRetry { queue_id: lenient, max_retries: 3, delay_seconds: 60 })
+            .unwrap();
+        let id = submit(&service, "r0");
+        service.command(Command::AssignQueue { queue_id: lenient, task_ids: vec![id] }).unwrap();
+        finish(&service, id, "failed", Some("connection refused"));
+        // The transient failure arms one retry under the lenient queue.
+        assert_eq!(task_state(&service, id), ("queued".into(), 1, Some(1060), lenient));
+        // Moving into a no-retry queue cancels the pending retry: the
+        // failure stands instead of firing one more attempt at the armed time.
+        service.command(Command::AssignQueue { queue_id: strict, task_ids: vec![id] }).unwrap();
+        assert_eq!(task_state(&service, id), ("failed".into(), 0, None, strict));
+        clock.set(1200);
+        service.command(Command::List).unwrap();
+        assert_eq!(task_state(&service, id).0, "failed");
+        // A target queue that would still retry keeps the armed retry.
+        let other = submit(&service, "r1");
+        service.command(Command::AssignQueue { queue_id: lenient, task_ids: vec![other] }).unwrap();
+        finish(&service, other, "failed", Some("connection refused"));
+        let also = queue(&service, "Also");
+        service
+            .command(Command::QueueSetRetry { queue_id: also, max_retries: 3, delay_seconds: 5 })
+            .unwrap();
+        service.command(Command::AssignQueue { queue_id: also, task_ids: vec![other] }).unwrap();
+        assert_eq!(task_state(&service, other), ("queued".into(), 1, Some(1260), also));
     }
 }

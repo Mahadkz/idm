@@ -683,14 +683,14 @@ def test_N17_timeouts_and_refusals():
         server = Fixture(delay=0.02)
         try:
             server.set("/idle.bin", silent=True, size=2 * MIB)
-            # the engine's 30 s request timeout plus the bounded retry budget
-            # (four attempts) means a stalling server fails after ~150 s
+            # N31 stall recovery abandons a connection after the 15 s stall timeout and the
+            # bounded retry budget then gives up, so a silent server fails in roughly 60-100 s
             started = time.monotonic()
             result = download(server.url("/idle.bin"), out / "idle.bin", success=False,
                               timeout=300)
             idle_elapsed = time.monotonic() - started
-            assert 120 <= idle_elapsed < 280, idle_elapsed
-            assert "timed out" in result.stderr, result.stderr
+            assert 30 <= idle_elapsed < 200, idle_elapsed
+            assert re.search(r"timed out|stall", result.stderr), result.stderr
             assert not (out / "idle.bin").exists()
         finally:
             server.close()
@@ -873,11 +873,12 @@ def test_N39_disk_full_and_access_denied():
                 result = download(server.url("/denied-dir.bin"), denied / "f.bin",
                                   "--connections", "1", success=False, timeout=45)
                 assert result.stderr, result.stderr
-                assert not (denied / "f.bin").exists(), "denied destination produced a file"
             finally:
                 server.close()
         finally:
             os.chmod(denied, 0o755)
+        # Checked after restoring access: stat inside an unreadable directory raises.
+        assert not (denied / "f.bin").exists(), "denied destination produced a file"
         # ENOSPC needs a size-limited filesystem; mounting one requires
         # privileges the harness lacks and the binaries expose no injection
         # or preflight substitute, so this half of the criterion fails today.
@@ -1027,10 +1028,11 @@ def execute(function):
     started = time.monotonic()
     try:
         function()
-    except Exception:
+    except Exception as error:
         detail = traceback.format_exc()
         elapsed = round(time.monotonic() - started, 1)
-        if contract in EXPECTED_FAIL:
+        # Only a failed assertion documents a gap; any other exception is a harness error.
+        if contract in EXPECTED_FAIL and isinstance(error, AssertionError):
             status, summary = "xfail", f"{contract}: {EXPECTED_FAIL[contract]}"
         else:
             status, summary = "fail", detail.strip().splitlines()[-1]

@@ -1167,7 +1167,8 @@ async function run() {
         passed++;
       }
     } else {
-      if (expectedFailReason) {
+      // Only a failed assertion documents a gap; any other error is a harness error.
+      if (expectedFailReason && testError.name === 'AssertionError') {
         console.log(`XFAIL: ${id} - ${expectedFailReason}`);
         xfailed++;
       } else {

@@ -4,10 +4,10 @@
 
 | Document | Implemented | Partial | Different | Missing | Unknown | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| idm_core_queue_contracts.md | 11 | 42 | 5 | 11 | 0 | 69 |
+| idm_core_queue_contracts.md | 11 | 45 | 5 | 8 | 0 | 69 |
 | idm_browser_behavior_contracts.md | 37 | 14 | 8 | 3 | 0 | 62 |
 | idm_behavior_review.md | 0 | 27 | 0 | 12 | 0 | 39 |
-| **Total** | **48** | **83** | **13** | **26** | **0** | **170** |
+| **Total** | **48** | **86** | **13** | **23** | **0** | **170** |
 
 ## Contract Details
 
@@ -56,12 +56,12 @@
 | N41 | File timestamps | missing | Missing: no preserve-server-date option or timestamp write. | — |
 | N42 | Finalize, rename and output conflicts | partial | Partial (2026-10-13): publication uses a hard link plus removal of `.part` (chec… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N43 | Orphan partial cleanup | missing | Missing: stopped-task remove retains files by design; no orphan inventory/cleanu… | — |
-| N44 | Default/per-server connection caps | partial | Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget… | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
-| N45 | Per-file limiter and remembered exceptions | partial | Partial: shared token bucket across a task workers, persisted task cap, adjustab… | tests/integration/task_rate.py |
-| N46 | Aggregate/per-host bandwidth limits | missing | Missing: no aggregate/per-host bucket. | tests/integration/bandwidth.py |
-| N47 | Usage quota and automatic resumption | missing | Missing: live counters exist but no durable quota ledger/window scheduler. | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
+| N44 | Default/per-server connection caps | partial | Partial: per-task 1–16 connections and daemon job cap 1–16. HTTP engine per-host… | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
+| N45 | Per-file limiter and remembered exceptions | partial | Partial: a shared token bucket across all of a task's workers, persisted task ca… | tests/integration/bandwidth.py, tests/integration/task_rate.py |
+| N46 | Aggregate/per-host bandwidth limits | partial | Partial: a global cap (`daemon limit-global KIB` or `unlimited`, 1 KiB/s to 4 Gi… | tests/integration/bandwidth.py |
+| N47 | Usage quota and automatic resumption | partial | Partial: fixed-window usage quota (`daemon quota MIB HOURS` or `off`). The windo… | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
 | N48 | Resource efficiency contract | partial | Partial: bounded 64 KiB buffers, task-limit bounded threads; per-MiB sync checkp… | — |
-| Q01 | Queue types and default queues | partial | Partial: only Main + named ordinary queues; no fixed Synchronization queue or mo… | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
+| Q01 | Queue types and default queues | partial | Partial: Main plus named ordinary queues. A synchronization queue is created wit… | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
 | Q02 | Named queues and membership | partial | Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max3… | tests/integration/named_queues.py |
 | Q03 | Independent start/stop and global controls | partial | Partial: `queue start-one ID` sets a per-queue independent-start flag so the que… | tests/integration/scheduler.py, tests/integration/queue_policies.py |
 | Q04 | Per-queue simultaneous files | implemented | Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/gl… | tests/integration/named_queues.py |
@@ -70,7 +70,7 @@
 | Q07 | Queue retry count and rotation | partial | Partial: per-queue `queue retry ID COUNT | tests/integration/queue_policies.py |
 | Q08 | One-time start/stop | partial | Partial: global one-shot as before, plus per-queue one-time schedule (`queue sch… | tests/integration/scheduler.py, tests/integration/queue_policies.py |
 | Q09 | Daily/weekday recurrence | partial | Partial: per-queue daily schedule (`queue schedule ID daily HH:MM HH:MM | tests/integration/queue_policies.py |
-| Q10 | Synchronization repeat/check changed objects | missing | Missing: no conditional refresh/replacement or recurring validator watch. | tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
+| Q10 | Synchronization repeat/check changed objects | partial | Partial: each completed member of a synchronization queue is checked by `daemon … | tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
 | Q11 | Start queue on application startup | different | Different: running flags restored; crashed active tasks requeued and eligible ta… | — |
 | Q12 | Missed runs and daemon availability | partial | Partial: per-queue missed-run policy is implemented (catch up once if the window… | — |
 | Q13 | Sleep wake timers | missing | Missing: no wake registration or capability warning. | — |
@@ -237,7 +237,9 @@
 | N39 | Disk-full and access-denied assembly | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N44 | Default/per-server connection caps | partial | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs | idm_core_queue_contracts.md |
-| N45 | Per-file limiter and remembered exceptions | partial | tests/integration/task_rate.py | idm_core_queue_contracts.md |
+| N45 | Per-file limiter and remembered exceptions | partial | tests/integration/bandwidth.py, tests/integration/task_rate.py | idm_core_queue_contracts.md |
+| N46 | Aggregate/per-host bandwidth limits | partial | tests/integration/bandwidth.py | idm_core_queue_contracts.md |
+| N47 | Usage quota and automatic resumption | partial | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs | idm_core_queue_contracts.md |
 | Q01 | Queue types and default queues | partial | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | Q02 | Named queues and membership | partial | tests/integration/named_queues.py | idm_core_queue_contracts.md |
 | Q03 | Independent start/stop and global controls | partial | tests/integration/scheduler.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
@@ -246,6 +248,7 @@
 | Q07 | Queue retry count and rotation | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q08 | One-time start/stop | partial | tests/integration/scheduler.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q09 | Daily/weekday recurrence | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
+| Q10 | Synchronization repeat/check changed objects | partial | tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | Q14 | Completion success/failure/manual-stop rules | partial | tests/integration/completion_actions.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | B09 | B `Oc` checks competing packaged extension IDs and can disab… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
@@ -289,4 +292,4 @@
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 
-**Count: 76**
+**Count: 79**

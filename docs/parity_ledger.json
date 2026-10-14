@@ -3,9 +3,9 @@
   "summary": {
     "idm_core_queue_contracts.md": {
       "implemented": 11,
-      "partial": 42,
+      "partial": 45,
       "different": 5,
-      "missing": 11
+      "missing": 8
     },
     "idm_browser_behavior_contracts.md": {
       "implemented": 37,
@@ -464,7 +464,7 @@
       "id": "N44",
       "title": "Default/per-server connection caps",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget, wildcard overrides or connection profile setting.",
+      "current_behavior": "Partial: per-task 1–16 connections and daemon job cap 1–16. HTTP engine per-host connection budgets (`daemon host-connections PATTERN N` or `remove`, 1–256; default 16 per host) are enforced by leases shared by all HTTP tasks and persisted; an exact host name wins over the longest `*.domain` pattern (unit tests leases_never_exceed_the_budget_and_release_on_drop and host_patterns_prefer_exact_then_longest_wildcard). [Bandwidth fixture](../tests/integration/bandwidth.py) peaks above 3 connections to one host without a budget and between 1 and 3 with budget 3. Budgets key on the submitted host name only; redirect host changes, a connection profile setting and FTP (not governed) are not covered; untested on Windows.",
       "status": "partial",
       "test_refs": [
         "tests/integration/bandwidth.py",
@@ -476,9 +476,10 @@
       "id": "N45",
       "title": "Per-file limiter and remembered exceptions",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: shared token bucket across a task workers, persisted task cap, adjustable live. No app default enabled-state or per-file exception inheritance policy. [Task rate fixture](../tests/integration/task_rate.py) verifies live cap changes, counters/ETA, persisted cap, pause/resume, unlimited resume, and exact output hash.",
+      "current_behavior": "Partial: a shared token bucket across all of a task's workers, persisted task cap, adjustable live. Per-task caps compose with the N46 global and per-host caps; [Bandwidth fixture](../tests/integration/bandwidth.py) checks that a task limited to 6 MiB/s keeps at least 4 MiB/s while another host name is capped at 1 MiB/s. No app default enabled-state or per-file exception inheritance policy. [Task rate fixture](../tests/integration/task_rate.py) verifies live cap changes, counters/ETA, persisted cap, pause/resume, unlimited resume, and exact output hash.",
       "status": "partial",
       "test_refs": [
+        "tests/integration/bandwidth.py",
         "tests/integration/task_rate.py"
       ]
     },
@@ -486,8 +487,8 @@
       "id": "N46",
       "title": "Aggregate/per-host bandwidth limits",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing: no aggregate/per-host bucket.",
-      "status": "missing",
+      "current_behavior": "Partial: a global cap (`daemon limit-global KIB` or `unlimited`, 1 KiB/s to 4 GiB/s) is split equally among active HTTP tasks (unit test active_consumers_split_the_rate_equally) and changes live; per-host caps (`daemon limit-host PATTERN KIB`, `unlimited` or `remove`; host name, `*.domain` or `*`) are persisted and change live. [Bandwidth fixture](../tests/integration/bandwidth.py) uses a loopback server and a dedicated test daemon: two tasks stay at or below 4.4 MiB/s total with each at least 1.5 MiB/s; a live raise to 8 MiB/s takes effect; a capped host name stays at or below 1.25 MiB/s while another host name stays above 4 MiB/s; removing the limit restores speed; output hashes match. Limits: equal split only, no priority weighting; per-host caps use the submitted host name (localhost and 127.0.0.1 are different names); HTTP engine only; untested on Windows.",
+      "status": "partial",
       "test_refs": [
         "tests/integration/bandwidth.py"
       ]
@@ -496,8 +497,8 @@
       "id": "N47",
       "title": "Usage quota and automatic resumption",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing: live counters exist but no durable quota ledger/window scheduler.",
-      "status": "missing",
+      "current_behavior": "Partial: fixed-window usage quota (`daemon quota MIB HOURS` or `off`). The window opens when the first HTTP transfer runs after the previous window ended and lasts the set time; payload bytes of every HTTP task in every queue count, and a transfer can overshoot by one read per connection. At the limit active tasks move to quota_wait and resume automatically when the window closes; the used-byte ledger and window start persist across daemon restart. [Bandwidth fixture](../tests/integration/bandwidth.py) verifies that a 6 MiB quota over a 7.2 s window pauses a 10 MiB task with 6 to 8 MiB used, that the state and ledger survive a restart, that the task resumes after the window, and that the hash matches. Limits: fixed window, not rolling; payload bytes only; no warning before the limit; no clock-change test; untested on Windows.",
+      "status": "partial",
       "test_refs": [
         "tests/integration/bandwidth.py",
         "crates/xdm-http/src/governor.rs",
@@ -516,7 +517,7 @@
       "id": "Q01",
       "title": "Queue types and default queues",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: only Main + named ordinary queues; no fixed Synchronization queue or mode. [Daemon IPC fixture](../tests/integration/daemon_ipc.py) verifies queue creation, durable acceptance, and ordering/concurrency.",
+      "current_behavior": "Partial: Main plus named ordinary queues. A synchronization queue is created with `daemon queue create NAME [LIMIT] --sync` and its type is stored, but there is no default synchronization queue and no mode switch to change a queue's type later. Ordinary queues reject check and sync-interval; a completed task assigned to a synchronization queue stays there as a member. [Daemon IPC fixture](../tests/integration/daemon_ipc.py) verifies queue creation, durable acceptance, and ordering/concurrency; [Sync queues fixture](../tests/integration/sync_queues.py) verifies --sync creation, rejection of misuse on ordinary queues, and that a queue holding completed members cannot be removed. Migration of existing queues is not covered; untested on Windows.",
       "status": "partial",
       "test_refs": [
         "tests/integration/daemon_ipc.py",
@@ -611,8 +612,8 @@
       "id": "Q10",
       "title": "Synchronization repeat/check changed objects",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Missing: no conditional refresh/replacement or recurring validator watch.",
-      "status": "missing",
+      "current_behavior": "Partial: each completed member of a synchronization queue is checked by `daemon queue check ID` or on an interval (`daemon queue sync-interval ID HOURS MINUTES` or `off`). Interval checks are persisted and the scheduler sleeps until the next due time (unit test pump_reports_none_without_sync_queues_and_remaining_time_otherwise). Each check sends a HEAD with If-None-Match and If-Modified-Since from the saved validators (GET Range 0-0 if HEAD is refused). A 304, or validators that match, downloads nothing; a change is decided by ETag first, then Last-Modified, then length. A changed member is fetched into a temporary file and renamed over the old one; a failed refresh keeps the old file and removes the temporary. Each member gets a sync_updated, sync_unchanged or sync_failed event, and each check a sync_checked summary. [Sync queues fixture](../tests/integration/sync_queues.py) verifies that a first check with matching local size stores the baseline without a GET, that unchanged checks issue HEAD without GET, that a changed ETag is replaced with the new hash, that a 500 or 503 source keeps the old file with no temporary left, that the pending version is picked up after recovery, and that periodic checks run. Gaps: no validator baseline at completion (until the first check only local size is compared); HTTP(S) GET members only; untested on Windows, where rename-over-existing is not exercised.",
+      "status": "partial",
       "test_refs": [
         "tests/integration/sync_queues.py",
         "crates/xdm-daemon/src/main.rs",

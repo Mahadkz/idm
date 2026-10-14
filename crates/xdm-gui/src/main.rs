@@ -1,6 +1,8 @@
 mod clipboard;
 mod dialog_helpers;
 mod i18n;
+mod maintenance;
+mod paged;
 mod scheduler;
 mod settings;
 mod sound;
@@ -14,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use paged::{FetchPage, PAGE, PagedModel, Query};
 use xdm_ipc::{Command, CompletionAction, MoveTarget, Paths, TaskSummary};
 
 slint::slint! {
@@ -139,6 +142,9 @@ slint::slint! {
         callback open-task();
         callback open-task-folder();
         callback move-rename-task();
+        callback restart-task();
+        callback open-partials();
+        callback open-bandwidth();
         callback task-clicked(int, bool, bool);
         callback task-right-clicked(int, length, length);
         callback key-delete();
@@ -241,6 +247,12 @@ slint::slint! {
                             padding: 4px;
                             spacing: 6px;
                             HorizontalBox {
+                                Text { text: "Tools:"; vertical-alignment: center; }
+                                Button { text: Tr.t(@tr("Bandwidth…"), Tr.lang); clicked => { root.open-bandwidth(); } }
+                                Button { text: Tr.t(@tr("Clean up partial files…"), Tr.lang); clicked => { root.open-partials(); } }
+                                Button { text: Tr.t(@tr("Restart"), Tr.lang); clicked => { root.restart-task(); } }
+                            }
+                            HorizontalBox {
                                 Text { text: "URL"; vertical-alignment: center; }
                                 LineEdit { text <=> root.url; placeholder-text: "https://example.com/file.zip or ftp://..."; }
                             }
@@ -272,7 +284,7 @@ slint::slint! {
                 }
                 HorizontalBox {
                     spacing: 8px;
-                    LineEdit { text <=> root.search-query; placeholder-text: "Find URL, filename, status, or category"; }
+                    LineEdit { text <=> root.search-query; placeholder-text: "Find URL or file name (status:paused filters by status)"; }
                     Button { text: Tr.t(@tr("Find"), Tr.lang); clicked => { root.refresh(); } }
                     Button { text: Tr.t(@tr("Clear"), Tr.lang); clicked => { root.search-query = ""; root.refresh(); } }
                     Button { text: Tr.t(@tr("Columns…"), Tr.lang); clicked => { root.open-columns(); } }
@@ -319,8 +331,8 @@ slint::slint! {
                     }
                     if root.col-status: HeaderCell {
                         text: Tr.t(@tr("Status"), Tr.lang) + (root.sort-column == "status" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 100px;
-                        max-width: 100px;
+                        min-width: 120px;
+                        max-width: 120px;
                         clicked => { root.sort-by-column("status"); }
                     }
                     if root.col-time-left: HeaderCell {
@@ -388,8 +400,8 @@ slint::slint! {
                                 vertical-alignment: center;
                             }
                             if root.col-status: Text {
-                                min-width: 100px;
-                                max-width: 100px;
+                                min-width: 120px;
+                                max-width: 120px;
                                 text: task.status;
                                 color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
                                 overflow: elide;
@@ -461,7 +473,7 @@ slint::slint! {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                                     root.selected = index;
                                     root.context-menu-x = min(root.width - 180px, max(10px, self.absolute-position.x + self.mouse-x - root.absolute-position.x));
-                                    root.context-menu-y = min(root.height - 220px, max(10px, self.absolute-position.y + self.mouse-y - root.absolute-position.y));
+                                    root.context-menu-y = min(root.height - 260px, max(10px, self.absolute-position.y + self.mouse-y - root.absolute-position.y));
                                     root.task-right-clicked(index, self.mouse-x, self.mouse-y);
                                     context-popup.show();
                                 }
@@ -477,7 +489,7 @@ slint::slint! {
             x: root.context-menu-x;
             y: root.context-menu-y;
             width: 170px;
-            height: 200px;
+            height: 240px;
             close-policy: close-on-click-outside;
             Rectangle {
                 background: Palette.color-scheme == ColorScheme.dark ? #282c34 : #ffffff;
@@ -493,6 +505,7 @@ slint::slint! {
                     Button { text: Tr.t(@tr("Open folder"), Tr.lang); clicked => { context-popup.close(); root.open-task-folder(); } }
                     Button { text: Tr.t(@tr("Move / Rename…"), Tr.lang); clicked => { context-popup.close(); root.move-rename-task(); } }
                     Button { text: Tr.t(@tr("Redownload…"), Tr.lang); clicked => { context-popup.close(); root.redownload-task(); } }
+                    Button { text: Tr.t(@tr("Restart"), Tr.lang); clicked => { context-popup.close(); root.restart-task(); } }
                     Button { text: Tr.t(@tr("Delete"), Tr.lang); clicked => { context-popup.close(); root.remove-task(); } }
                     Button { text: Tr.t(@tr("Properties"), Tr.lang); clicked => { context-popup.close(); root.task-details(); } }
                 }
@@ -537,14 +550,26 @@ slint::slint! {
     export component RemoveWindow inherits Window {
         title: "XDM — Remove task";
         width: 480px;
-        height: 220px;
+        height: 260px;
         in-out property <string> message;
+        in property <bool> partial-visible;
+        in-out property <bool> delete-partial;
         callback confirm();
         callback dismiss();
         VerticalBox {
             padding: 14px;
             Text { text: root.message; wrap: word-wrap; }
-            Text { text: "Downloaded files and checkpoints will be kept."; wrap: word-wrap; }
+            Text {
+                text: root.delete-partial ? "The partial file and checkpoint of unfinished tasks will be deleted." : "Downloaded files and checkpoints will be kept.";
+                wrap: word-wrap;
+            }
+            Rectangle {
+                height: 36px;
+                if root.partial-visible: CheckBox {
+                    text: "Also delete partial file";
+                    checked <=> root.delete-partial;
+                }
+            }
             HorizontalBox {
                 Button { text: "Remove from list"; clicked => { root.confirm(); } }
                 Button { text: "Cancel"; clicked => { root.dismiss(); } }
@@ -654,9 +679,10 @@ slint::slint! {
     export component QueuesWindow inherits Window {
         title: "XDM — Queues";
         width: 780px;
-        height: 590px;
+        height: 652px;
         in property <[string]> queues;
         in-out property <int> selected: -1;
+        in-out property <string> sync-interval: "3600";
         in-out property <string> name;
         in-out property <string> limit: "2";
         in-out property <string> message;
@@ -700,6 +726,14 @@ slint::slint! {
                 Button { text: "Start now (solo)"; clicked => { root.action(8); } }
                 Button { text: "Stop now (solo)"; clicked => { root.action(9); } }
                 Button { text: "Scheduler & Settings…"; clicked => { root.open-settings(); } }
+            }
+            HorizontalBox {
+                Button { text: "Create sync queue"; clicked => { root.action(10); } }
+                Text { text: "Check every (s)"; vertical-alignment: center; }
+                LineEdit { text <=> root.sync-interval; preferred-width: 90px; }
+                Button { text: "Set interval"; clicked => { root.action(11); } }
+                Button { text: "Manual only"; clicked => { root.action(12); } }
+                Button { text: "Check now"; clicked => { root.action(13); } }
             }
             Text { text: root.message; wrap: word-wrap; }
             Button { text: "Close"; clicked => { root.dismiss(); } }
@@ -890,6 +924,188 @@ slint::slint! {
                 spacing: 8px;
                 Button { text: "Apply all settings"; clicked => { root.save-all(); } }
                 Button { text: "Close"; clicked => { root.dismiss(); } }
+            }
+        }
+    }
+
+    export struct PartialItem {
+        label: string,
+        checked: bool,
+    }
+
+    export component PartialsWindow inherits Window {
+        title: "XDM — Clean up partial files";
+        width: 760px;
+        height: 560px;
+        background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
+        default-font-family: "DejaVu Sans";
+        in-out property <string> directory;
+        in property <[PartialItem]> items;
+        in property <string> notice;
+        in property <bool> confirming;
+        in property <string> confirm-text;
+        in-out property <string> message: "Choose a folder and scan for .part / .part.meta files that no task owns.";
+        callback scan();
+        callback toggle(int);
+        callback select-all(bool);
+        callback delete-selected();
+        callback confirm-delete();
+        callback cancel-confirm();
+        callback dismiss();
+        VerticalBox {
+            padding: 14px;
+            spacing: 8px;
+            Text { text: "Unowned partial files"; font-size: 18px; font-weight: 700; color: #143f73; }
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Folder:"; vertical-alignment: center; }
+                LineEdit { text <=> root.directory; placeholder-text: "/home/user/Downloads"; }
+                Button { text: "Scan"; clicked => { root.scan(); } }
+            }
+            if root.notice != "": Text { text: root.notice; color: #b26a00; wrap: word-wrap; }
+            Rectangle {
+                background: Palette.color-scheme == ColorScheme.dark ? #21252b : #ffffff;
+                border-width: 1px;
+                border-color: #c8d0db;
+                ListView {
+                    for item[index] in root.items: Rectangle {
+                        height: 30px;
+                        background: item.checked ? #d8eaff : transparent;
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: (item.checked ? "[x]  " : "[ ]  ") + item.label;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                        }
+                        TouchArea { clicked => { root.toggle(index); } }
+                    }
+                }
+            }
+            HorizontalBox {
+                spacing: 8px;
+                Button { text: "Select all"; clicked => { root.select-all(true); } }
+                Button { text: "Select none"; clicked => { root.select-all(false); } }
+                Button { text: "Delete selected…"; clicked => { root.delete-selected(); } }
+            }
+            if root.confirming: HorizontalBox {
+                spacing: 8px;
+                Text { text: root.confirm-text; wrap: word-wrap; color: #b71c1c; vertical-alignment: center; }
+                Button { text: "Confirm delete"; clicked => { root.confirm-delete(); } }
+                Button { text: "Keep files"; clicked => { root.cancel-confirm(); } }
+            }
+            Text { text: root.message; wrap: word-wrap; color: #52677c; }
+            Button { text: "Close"; clicked => { root.dismiss(); } }
+        }
+    }
+
+    export component BandwidthWindow inherits Window {
+        title: "XDM — Bandwidth";
+        width: 760px;
+        height: 760px;
+        background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
+        default-font-family: "DejaVu Sans";
+        in-out property <string> global-limit;
+        in-out property <string> host-pattern;
+        in-out property <string> host-kib;
+        in-out property <string> conn-pattern;
+        in-out property <string> conn-count;
+        in-out property <string> quota-mib;
+        in-out property <string> quota-hours: "24";
+        in property <[string]> host-limits;
+        in property <[string]> host-conns;
+        in property <string> status-text;
+        in-out property <string> message;
+        callback apply-global();
+        callback clear-global();
+        callback set-host-limit();
+        callback remove-host-limit();
+        callback pick-host-limit(int);
+        callback set-host-conns();
+        callback remove-host-conns();
+        callback pick-host-conns(int);
+        callback apply-quota();
+        callback disable-quota();
+        callback refresh();
+        callback dismiss();
+        ScrollView {
+            VerticalBox {
+                padding: 14px;
+                spacing: 8px;
+                Text { text: "Bandwidth, host budgets and quota"; font-size: 18px; font-weight: 700; color: #143f73; }
+                Text { text: "Global limit over all HTTP downloads"; font-weight: 700; color: #143f73; }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "KiB/s:"; vertical-alignment: center; }
+                    LineEdit { text <=> root.global-limit; placeholder-text: "unlimited"; }
+                    Button { text: "Apply global limit"; clicked => { root.apply-global(); } }
+                    Button { text: "Unlimited"; clicked => { root.clear-global(); } }
+                }
+                Text { text: "Per-host limits (pattern: example.com, *.example.com or *; 0 KiB/s = explicitly unlimited)"; wrap: word-wrap; font-weight: 700; color: #143f73; }
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+                    for rule[index] in root.host-limits: Rectangle {
+                        height: 26px;
+                        background: Math.mod(index, 2) == 0 ? #ffffff : #f7f9fc;
+                        Text { x: 8px; width: parent.width - 16px; text: rule; vertical-alignment: center; color: #172a3f; }
+                        TouchArea { clicked => { root.pick-host-limit(index); } }
+                    }
+                    if root.host-limits.length == 0: Text { text: "No host limit rules."; color: #52677c; }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit { text <=> root.host-pattern; placeholder-text: "host pattern"; }
+                    LineEdit { text <=> root.host-kib; placeholder-text: "KiB/s"; preferred-width: 90px; }
+                    Button { text: "Set limit"; clicked => { root.set-host-limit(); } }
+                    Button { text: "Remove rule"; clicked => { root.remove-host-limit(); } }
+                }
+                Text { text: "Host connection budgets (simultaneous connections per host across all tasks)"; wrap: word-wrap; font-weight: 700; color: #143f73; }
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+                    for rule[index] in root.host-conns: Rectangle {
+                        height: 26px;
+                        background: Math.mod(index, 2) == 0 ? #ffffff : #f7f9fc;
+                        Text { x: 8px; width: parent.width - 16px; text: rule; vertical-alignment: center; color: #172a3f; }
+                        TouchArea { clicked => { root.pick-host-conns(index); } }
+                    }
+                    if root.host-conns.length == 0: Text { text: "No host budget rules (default budget applies)."; color: #52677c; }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit { text <=> root.conn-pattern; placeholder-text: "host pattern"; }
+                    LineEdit { text <=> root.conn-count; placeholder-text: "connections"; preferred-width: 90px; }
+                    Button { text: "Set budget"; clicked => { root.set-host-conns(); } }
+                    Button { text: "Remove rule"; clicked => { root.remove-host-conns(); } }
+                }
+                Text { text: "Usage quota (downloads wait in quota_wait once it is used up)"; font-weight: 700; color: #143f73; }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "MiB:"; vertical-alignment: center; }
+                    LineEdit { text <=> root.quota-mib; placeholder-text: "off"; preferred-width: 110px; }
+                    Text { text: "per hours:"; vertical-alignment: center; }
+                    LineEdit { text <=> root.quota-hours; preferred-width: 70px; }
+                    Button { text: "Apply quota"; clicked => { root.apply-quota(); } }
+                    Button { text: "Turn off"; clicked => { root.disable-quota(); } }
+                }
+                Text { text: "Status"; font-weight: 700; color: #143f73; }
+                Rectangle {
+                    background: Palette.color-scheme == ColorScheme.dark ? #21252b : #ffffff;
+                    border-width: 1px;
+                    border-color: #c8d0db;
+                    VerticalBox {
+                        padding: 8px;
+                        Text { text: root.status-text; wrap: word-wrap; color: #172a3f; }
+                    }
+                }
+                Text { text: root.message; wrap: word-wrap; color: #52677c; }
+                HorizontalBox {
+                    spacing: 8px;
+                    Button { text: "Refresh"; clicked => { root.refresh(); } }
+                    Button { text: "Close"; clicked => { root.dismiss(); } }
+                }
             }
         }
     }
@@ -1172,9 +1388,11 @@ slint::slint! {
     export component ConnectionWindow inherits Window {
         title: "XDM — Connection settings";
         width: 700px;
-        height: 520px;
+        height: 600px;
         background: #f2f4f7;
         default-font-family: "DejaVu Sans";
+        in-out property <string> stall-timeout: "30";
+        callback open-bandwidth();
         in-out property <string> proxy-mode: "system";
         in-out property <string> http-proxy: "";
         in-out property <string> https-proxy: "";
@@ -1228,6 +1446,15 @@ slint::slint! {
                 spacing: 8px;
                 Text { text: "Default connections for new downloads (1–16):"; vertical-alignment: center; }
                 LineEdit { text <=> root.default-connections; preferred-width: 80px; }
+            }
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "HTTP stall timeout in seconds (1–600):"; vertical-alignment: center; }
+                LineEdit { text <=> root.stall-timeout; preferred-width: 80px; }
+            }
+            HorizontalBox {
+                spacing: 8px;
+                Button { text: "Bandwidth limits and quota…"; clicked => { root.open-bandwidth(); } }
             }
             Text { text: root.message; wrap: word-wrap; color: #52677c; }
             HorizontalBox {
@@ -1678,7 +1905,7 @@ slint::slint! {
 
 fn task_details(task: &TaskSummary) -> String {
     format!(
-        "Queue #{}\nTask #{}\nStatus: {}\nCategory: {}\nType: {}\nPriority: {}\nConnections: {}\n\nSource URL: {}\n\nDestination: {}\n\nDownloaded: {} bytes\nTotal: {}\nSpeed cap: {}\nCreated (UTC): {}\nUpdated (UTC): {}\nVideo track: {:?}\nAudio track: {:?}\n\nLast error: {}",
+        "Queue #{}\nTask #{}\nStatus: {}\nCategory: {}\nType: {}\nPriority: {}\nConnections: {}\n\nSource URL: {}\n\nDestination: {}\n\nDownloaded: {} bytes\nTotal: {}\nSpeed cap: {}\nCreated (UTC): {}\nUpdated (UTC): {}\nVideo track: {:?}\nAudio track: {:?}\n\nLast error: {}\nRestart reason: {}",
         task.queue_id,
         task.id,
         task.status,
@@ -1699,7 +1926,8 @@ fn task_details(task: &TaskSummary) -> String {
         task.updated_at,
         task.media_video,
         task.media_audio,
-        task.error.as_deref().unwrap_or("None")
+        task.error.as_deref().unwrap_or("None"),
+        task.restart_reason.as_deref().unwrap_or("None")
     )
 }
 
@@ -1715,18 +1943,23 @@ fn request(paths: &Paths, command: Command) -> String {
     }
 }
 
+/// Task id at table row `index`; 0 marks a row whose page is not loaded yet.
+fn id_at(ids: &[i64], index: usize) -> Option<i64> {
+    ids.get(index).copied().filter(|id| *id > 0)
+}
+
 fn selected_task(ui: &MainWindow, ids: &Arc<Mutex<Vec<i64>>>) -> Option<i64> {
     let task_id = usize::try_from(ui.get_selected())
         .ok()
-        .and_then(|index| ids.lock().ok().and_then(|guard| guard.get(index).copied()));
+        .and_then(|index| ids.lock().ok().and_then(|guard| id_at(&guard, index)));
     if task_id.is_none() {
         ui.set_message("Select a task first".into());
     }
     task_id
 }
 
-/// Ids the current action applies to: the multi-selection (in list order) or,
-/// failing that, the single highlighted row.
+/// Ids the current action applies to: the multi-selection (in list order, loaded
+/// rows only) or, failing that, the single highlighted row.
 fn target_ids(
     ui: &MainWindow,
     ids: &Arc<Mutex<Vec<i64>>>,
@@ -1737,32 +1970,38 @@ fn target_ids(
         Err(_) => return Vec::new(),
     };
     let set = set.lock().map(|s| s.clone()).unwrap_or_default();
-    let multi: Vec<i64> = ids.iter().copied().filter(|id| set.contains(&(*id as usize))).collect();
+    let multi: Vec<i64> = ids
+        .iter()
+        .copied()
+        .filter(|id| *id > 0 && set.contains(&(*id as usize)))
+        .collect();
     if !multi.is_empty() {
         return multi;
     }
     usize::try_from(ui.get_selected())
         .ok()
-        .and_then(|i| ids.get(i).copied())
+        .and_then(|i| id_at(&ids, i))
         .into_iter()
         .collect()
 }
 
-/// Push the selection flags of `set` into the visible model rows (only changed rows).
-fn sync_selection(ui: &MainWindow, set: &std::collections::HashSet<usize>) {
+/// Runs `f` on the paged table model behind the main window.
+fn with_model<R>(ui: &MainWindow, f: impl FnOnce(&PagedModel<TaskRow>) -> R) -> Option<R> {
     let model_rc = ui.get_tasks();
-    let Some(model) = model_rc.as_any().downcast_ref::<VecModel<TaskRow>>() else {
-        return;
-    };
-    for i in 0..model.row_count() {
-        if let Some(mut row) = model.row_data(i) {
-            let want = set.contains(&(row.id as usize));
-            if row.selected != want {
-                row.selected = want;
-                model.set_row_data(i, row);
-            }
-        }
-    }
+    let model = model_rc.as_any().downcast_ref::<PagedModel<TaskRow>>()?;
+    Some(f(model))
+}
+
+/// Push the selection flags of `set` into the loaded model rows (only changed rows).
+fn sync_selection(ui: &MainWindow, set: &std::collections::HashSet<usize>) {
+    with_model(ui, |model| {
+        model.update_cached(|row| {
+            let want = row.id > 0 && set.contains(&(row.id as usize));
+            let changed = row.selected != want;
+            row.selected = want;
+            changed
+        });
+    });
 }
 
 /// Off-UI thread IPC worker keeping the interface responsive.
@@ -1828,88 +2067,209 @@ fn is_live_task(
     false
 }
 
-struct RowFilter<'a> {
-    queue_id: i64,
-    category: &'a str,
-    query: &'a str,
+fn loading_row() -> TaskRow {
+    TaskRow {
+        id: 0,
+        filename: "Loading…".into(),
+        size: "".into(),
+        status: "".into(),
+        time_left: "".into(),
+        transfer_rate: "".into(),
+        last_try_date: "".into(),
+        description: "".into(),
+        category: "".into(),
+        queue: "".into(),
+        progress: 0.0,
+        selected: false,
+    }
 }
 
-/// Filters `tasks` and converts them to table rows, recording the visible ids in order.
-fn build_rows(
-    tasks: Vec<xdm_ipc::TaskSummary>,
+fn row_from_summary(
+    task: xdm_ipc::TaskSummary,
     queue_map: &std::collections::HashMap<i64, String>,
     selected_set: &std::collections::HashSet<usize>,
-    filter: &RowFilter,
-    ids: &mut Vec<i64>,
-) -> Vec<TaskRow> {
-    ids.clear();
-    tasks
-        .into_iter()
-        .filter(|task| filter.queue_id == 0 || task.queue_id == filter.queue_id)
-        .filter(|task| filter.category == "All" || task.category == filter.category)
-        .filter(|task| {
-            filter.query.is_empty()
-                || task.url.to_lowercase().contains(filter.query)
-                || task.output.to_lowercase().contains(filter.query)
-                || task.status.to_lowercase().contains(filter.query)
-                || task.category.to_lowercase().contains(filter.query)
-                || task.id.to_string().contains(filter.query)
-        })
-        .map(|task| {
-                ids.push(task.id);
-                let progress = match (task.downloaded, task.total) {
-                    (Some(done), Some(total)) if total > 0 => {
-                        (done.saturating_mul(100) / total).min(100)
-                    }
-                    _ => 0,
-                };
-                let is_selected = selected_set.contains(&(task.id as usize));
-                let q_name = queue_map.get(&task.queue_id).cloned().unwrap_or_else(|| {
-                    if task.queue_id == 1 {
-                        "Default".into()
-                    } else {
-                        format!("#{}", task.queue_id)
-                    }
-                });
-                TaskRow {
-                    id: task.id as i32,
-                    filename: task_table::format_filename(&task.output, &task.url).into(),
-                    size: task_table::format_size(task.downloaded, task.total).into(),
-                    status: task_table::format_status(&task.status, task.downloaded, task.total).into(),
-                    time_left: task_table::format_time_left(&task.status, task.eta_seconds).into(),
-                    transfer_rate: task_table::format_rate(task.bytes_per_second).into(),
-                    last_try_date: task_table::format_date(&task.updated_at, &task.created_at).into(),
-                    description: (if !task.output.is_empty() {
-                        task.output
-                    } else {
-                        task.url
-                    })
-                    .into(),
-                    category: task.category.into(),
-                    queue: q_name.into(),
-                    progress: progress as f32,
-                    selected: is_selected,
-                }
-        })
-        .collect()
+) -> TaskRow {
+    let progress = match (task.downloaded, task.total) {
+        (Some(done), Some(total)) if total > 0 => (done.saturating_mul(100) / total).min(100),
+        _ => 0,
+    };
+    let is_selected = selected_set.contains(&(task.id as usize));
+    let q_name = queue_map.get(&task.queue_id).cloned().unwrap_or_else(|| {
+        if task.queue_id == 1 {
+            "Default".into()
+        } else {
+            format!("#{}", task.queue_id)
+        }
+    });
+    TaskRow {
+        id: task.id as i32,
+        filename: task_table::format_filename(&task.output, &task.url).into(),
+        size: task_table::format_size(task.downloaded, task.total).into(),
+        status: task_table::format_status(&task.status, task.downloaded, task.total).into(),
+        time_left: task_table::format_time_left(&task.status, task.eta_seconds).into(),
+        transfer_rate: task_table::format_rate(task.bytes_per_second).into(),
+        last_try_date: task_table::format_date(&task.updated_at, &task.created_at).into(),
+        description: (if !task.output.is_empty() { task.output } else { task.url }).into(),
+        category: task.category.into(),
+        queue: q_name.into(),
+        progress: progress as f32,
+        selected: is_selected,
+    }
 }
 
-/// Updates `model` in place: only rows whose content changed are written, so a
-/// steady-state refresh of an unchanged list notifies the view of nothing.
-fn apply_rows(model: &VecModel<TaskRow>, rows: Vec<TaskRow>) {
-    let cur_len = model.row_count();
-    let new_len = rows.len();
-    for i in (new_len..cur_len).rev() {
-        model.remove(i);
-    }
-    for (i, row) in rows.into_iter().enumerate() {
-        if i < model.row_count() {
-            if model.row_data(i).as_ref() != Some(&row) {
-                model.set_row_data(i, row);
-            }
-        } else {
-            model.push(row);
+/// Daemon sort key for a header column, or `None` when the daemon cannot sort
+/// by it (size, time left, rate and queue name are not stored columns).
+fn daemon_sort(column: &str, asc: bool, queue_filtered: bool) -> Option<String> {
+    let key = match column {
+        "id" if queue_filtered => "position",
+        "id" => "id",
+        "filename" | "description" => "output",
+        "status" => "status",
+        "category" => "category",
+        "last_try_date" => "updated",
+        _ => return None,
+    };
+    Some(format!("{}{key}", if asc { "" } else { "-" }))
+}
+
+/// Builds the daemon query from the window state. `status:<name>` words in the
+/// search box select a status; everything else is the URL/file-name search.
+fn build_query(ui: &MainWindow, sort: &(String, bool)) -> Query {
+    let queue_id = ui.get_queue_filter_id().as_str().parse::<i64>().unwrap_or(0);
+    let category = ui.get_category_filter().to_string();
+    let mut status = None;
+    let mut words = Vec::new();
+    for word in ui.get_search_query().to_string().split_whitespace() {
+        match word.strip_prefix("status:") {
+            Some(value) if !value.is_empty() => status = Some(value.to_lowercase()),
+            _ => words.push(word.to_owned()),
         }
+    }
+    let search = words.join(" ");
+    Query {
+        sort: daemon_sort(&sort.0, sort.1, queue_id != 0).unwrap_or_else(|| "id".into()),
+        filter: xdm_ipc::TaskFilter {
+            status,
+            category: (category != "All").then_some(category),
+            queue_id: (queue_id != 0).then_some(queue_id),
+            search: (!search.is_empty()).then_some(search),
+        },
+    }
+}
+
+struct PageResult {
+    pages: Vec<(usize, Vec<TaskSummary>)>,
+    total: usize,
+}
+
+/// Fetches whole pages with `ListPage`; the daemon sorts and filters. Replies
+/// may reach 16 MiB, which `Paths::request` already reads with `read_frame_max`.
+fn fetch_pages(paths: &Paths, query: &Query, pages: &[usize]) -> Result<PageResult, String> {
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for &page in pages {
+        let reply = paths
+            .request(Command::ListPage {
+                offset: (page * PAGE) as u64,
+                limit: PAGE as u64,
+                sort: Some(query.sort.clone()),
+                filter: Some(query.filter.clone()),
+            })
+            .map_err(|error| format!("Daemon unavailable: {error}"))?;
+        if !reply.ok {
+            return Err(reply.error.unwrap_or_else(|| "List failed".into()));
+        }
+        total = reply.total as usize;
+        out.push((page, reply.tasks));
+    }
+    Ok(PageResult { pages: out, total })
+}
+
+fn queue_state_text(reply: &xdm_ipc::Reply) -> String {
+    let state = if let Some(at) = reply.queue_start_at {
+        Local
+            .timestamp_opt(at, 0)
+            .single()
+            .map(|time| format!("Queue scheduled for {}", time.format("%Y-%m-%d %H:%M")))
+            .unwrap_or_else(|| "Queue scheduled".into())
+    } else if reply.queue_running == Some(true) {
+        "Queue running".into()
+    } else {
+        "Queue stopped".into()
+    };
+    if let Some(at) = reply.queue_stop_at {
+        let stop = Local
+            .timestamp_opt(at, 0)
+            .single()
+            .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| at.to_string());
+        format!("{state} · stops {stop}")
+    } else {
+        state
+    }
+}
+
+/// State shared by the table refresh, the page-miss fetcher and the actions.
+#[derive(Clone)]
+struct TableShared {
+    queues: Arc<Mutex<std::collections::HashMap<i64, String>>>,
+    selected: Arc<Mutex<std::collections::HashSet<usize>>>,
+    ids: Arc<Mutex<Vec<i64>>>,
+    /// Raw daemon status and live-recording seconds of every loaded task.
+    statuses: Arc<Mutex<std::collections::HashMap<i64, (String, Option<u64>)>>>,
+}
+
+impl TableShared {
+    /// `XDM_GUI_PERF`: renders the window once (software renderer snapshot) and logs
+    /// how long the page took from request to pixels.
+    fn log_render(ui: &MainWindow, label: &str, started: std::time::Instant) {
+        let render_start = std::time::Instant::now();
+        let rendered = ui.window().take_snapshot().is_ok();
+        eprintln!(
+            "[xdm-gui] {label} render={:?} fetch_to_render={:?} snapshot_ok={rendered}",
+            render_start.elapsed(),
+            started.elapsed()
+        );
+    }
+
+    fn status_of(&self, id: i64) -> Option<String> {
+        self.statuses.lock().ok().and_then(|map| map.get(&id).map(|entry| entry.0.clone()))
+    }
+
+    /// UI thread: converts fetched summaries to rows, installs them into the
+    /// model and refreshes the row-index to task-id mirror.
+    fn install(&self, ui: &MainWindow, epoch: u64, result: PageResult, replace_all: bool) -> bool {
+        let queues = self.queues.lock().map(|g| g.clone()).unwrap_or_default();
+        let selected = self.selected.lock().map(|g| g.clone()).unwrap_or_default();
+        if let Ok(mut statuses) = self.statuses.lock() {
+            if statuses.len() > 50_000 {
+                statuses.clear();
+            }
+            for (_, tasks) in &result.pages {
+                for task in tasks {
+                    statuses.insert(task.id, (task.status.clone(), task.media_seconds));
+                }
+            }
+        }
+        let total = result.total;
+        let pages = result
+            .pages
+            .into_iter()
+            .map(|(page, tasks)| {
+                let rows = tasks.into_iter().map(|task| row_from_summary(task, &queues, &selected)).collect();
+                (page, rows)
+            })
+            .collect();
+        with_model(ui, |model| {
+            let applied = model.apply(epoch, total, pages, replace_all);
+            if applied {
+                if let Ok(mut ids) = self.ids.lock() {
+                    *ids = model.ids(|row| i64::from(row.id));
+                }
+            }
+            applied
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -1948,8 +2308,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sort_state = Arc::new(Mutex::new(("id".to_string(), true)));
     let selected_task_ids = Arc::new(Mutex::new(std::collections::HashSet::<usize>::new()));
-    let tasks_model = Rc::new(VecModel::<TaskRow>::default());
+    let tasks_model = Rc::new(PagedModel::<TaskRow>::new(loading_row()));
     ui.set_tasks(ModelRc::from(tasks_model.clone()));
+    let perf_enabled = std::env::var_os("XDM_GUI_PERF").is_some();
+    let table_shared = TableShared {
+        queues: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        selected: selected_task_ids.clone(),
+        ids: task_ids.clone(),
+        statuses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    };
+    {
+        // A rendered row on an uncached page fetches just that page.
+        let ipc = ipc.clone();
+        let weak = ui.as_weak();
+        let shared = table_shared.clone();
+        let fetch: FetchPage = Rc::new(move |page, epoch, query| {
+            let weak = weak.clone();
+            let shared = shared.clone();
+            ipc.execute(move |paths| {
+                let started = std::time::Instant::now();
+                let result = fetch_pages(paths, &query, &[page]);
+                let ipc_time = started.elapsed();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return; };
+                    match result {
+                        Ok(result) => {
+                            let rows = result.pages.first().map_or(0, |(_, tasks)| tasks.len());
+                            let installed = std::time::Instant::now();
+                            if shared.install(&ui, epoch, result, false) && perf_enabled {
+                                let label = format!(
+                                    "page-fetch page={page} rows={rows} ipc={ipc_time:?} install={:?} fetch_to_install={:?}",
+                                    installed.elapsed(),
+                                    started.elapsed()
+                                );
+                                TableShared::log_render(&ui, &label, started);
+                            }
+                        }
+                        Err(error) => {
+                            with_model(&ui, |model| model.fetch_failed(epoch, page));
+                            ui.set_message(error.into());
+                        }
+                    }
+                });
+            });
+        });
+        tasks_model.set_fetch(fetch);
+    }
 
     let previous_task_statuses = Arc::new(Mutex::new(std::collections::HashMap::<i64, String>::new()));
     let previous_queue_statuses = Arc::new(Mutex::new(std::collections::HashMap::<i64, bool>::new()));
@@ -2010,10 +2414,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let weak = ui.as_weak();
-    let ids_refresh = task_ids.clone();
     let ipc_refresh = ipc.clone();
     let refreshing = Arc::new(AtomicBool::new(false));
-    let is_refreshing = refreshing.clone();
+    let refresh_again = Arc::new(AtomicBool::new(false));
+    let refresh_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let refresh_slot: Arc<std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>> = Arc::new(std::sync::OnceLock::new());
     let prev_tasks_refresh = previous_task_statuses.clone();
     let prev_queues_refresh = previous_queue_statuses.clone();
     let initialized_statuses_refresh = initialized_statuses.clone();
@@ -2021,178 +2426,181 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_ids_refresh = live_task_ids.clone();
     let db_path_refresh = paths.dir.join("tasks.sqlite3");
     let sort_state_refresh = sort_state.clone();
-    let selected_ids_refresh = selected_task_ids.clone();
-    let refresh: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        if is_refreshing.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let weak = weak.clone();
-        let ids_refresh = ids_refresh.clone();
-        let is_refreshing = is_refreshing.clone();
-        let prev_tasks = prev_tasks_refresh.clone();
-        let prev_queues = prev_queues_refresh.clone();
-        let initialized_statuses = initialized_statuses_refresh.clone();
-        let sound_settings = settings_sound_refresh.clone();
-        let live_ids_refresh = live_ids_refresh.clone();
-        let db_path_refresh = db_path_refresh.clone();
-        let sort_state = sort_state_refresh.clone();
-        let selected_ids = selected_ids_refresh.clone();
-        ipc_refresh.execute(move |paths| {
-            let reply_res = paths.request(Command::List);
-            let ipc_done = std::time::Instant::now();
+    let shared_refresh = table_shared.clone();
+    let refresh: Arc<dyn Fn() + Send + Sync> = {
+        let refresh_slot = refresh_slot.clone();
+        Arc::new(move || {
+            if refreshing.swap(true, Ordering::SeqCst) {
+                // Sort/filter changes made while a refresh is in flight must not be lost.
+                refresh_again.store(true, Ordering::SeqCst);
+                return;
+            }
+            let weak = weak.clone();
+            let ipc_refresh = ipc_refresh.clone();
+            let refreshing = refreshing.clone();
+            let refresh_again = refresh_again.clone();
+            let refresh_tick = refresh_tick.clone();
+            let refresh_slot = refresh_slot.clone();
+            let prev_tasks = prev_tasks_refresh.clone();
+            let prev_queues = prev_queues_refresh.clone();
+            let initialized_statuses = initialized_statuses_refresh.clone();
+            let sound_settings = settings_sound_refresh.clone();
+            let live_ids_refresh = live_ids_refresh.clone();
+            let db_path_refresh = db_path_refresh.clone();
+            let sort_state = sort_state_refresh.clone();
+            let shared = shared_refresh.clone();
             let _ = slint::invoke_from_event_loop(move || {
-                let ui_start = std::time::Instant::now();
-                is_refreshing.store(false, Ordering::SeqCst);
                 let Some(ui) = weak.upgrade() else {
+                    refreshing.store(false, Ordering::SeqCst);
                     return;
                 };
-                match reply_res {
-                    Ok(reply) if reply.ok => {
-                        if let (Ok(mut pt), Ok(mut pq)) = (prev_tasks.lock(), prev_queues.lock()) {
-                            let is_first = !initialized_statuses.swap(true, Ordering::SeqCst);
-                            if !is_first {
-                                if let Ok(settings_guard) = sound_settings.lock() {
-                                    for task in &reply.tasks {
-                                        if let Some(old_status) = pt.get(&task.id) {
-                                            if old_status != "completed" && task.status == "completed" {
-                                                sound::trigger_event_sound(&settings_guard, sound::SoundEvent::DownloadComplete);
-                                            } else if old_status != "failed" && task.status == "failed" {
-                                                sound::trigger_event_sound(&settings_guard, sound::SoundEvent::DownloadFailed);
-                                            }
-                                        }
-                                    }
-                                    for queue in &reply.queues {
-                                        if let Some(was_running) = pq.get(&queue.id) {
-                                            if *was_running && !queue.running {
-                                                sound::trigger_event_sound(&settings_guard, sound::SoundEvent::QueueComplete);
-                                            }
-                                        }
+                let sort = sort_state.lock().map(|s| s.clone()).unwrap_or(("id".into(), true));
+                let query = build_query(&ui, &sort);
+                // Re-fetch exactly the pages the table rendered since the last refresh.
+                let Some((epoch, pages)) = with_model(&ui, |model| {
+                    model.begin_query(&query);
+                    let mut pages = model.take_touched();
+                    if pages.is_empty() {
+                        pages.push(0);
+                    }
+                    (model.epoch(), pages)
+                }) else {
+                    refreshing.store(false, Ordering::SeqCst);
+                    return;
+                };
+                let previous_selection = usize::try_from(ui.get_selected())
+                    .ok()
+                    .and_then(|index| shared.ids.lock().ok().and_then(|ids| id_at(&ids, index)));
+                // The cheap queue snapshot rides on QueueEvents; the 1000-row List
+                // (queue run state, schedule) is only needed now and then.
+                let want_state = refresh_tick.fetch_add(1, Ordering::SeqCst) % 5 == 0;
+                let queue_filter = query.filter.queue_id.unwrap_or(0);
+                let sort_key = query.sort.clone();
+                ipc_refresh.execute(move |paths| {
+                    let started = std::time::Instant::now();
+                    let pages_res = fetch_pages(paths, &query, &pages);
+                    let ipc_done = std::time::Instant::now();
+                    let queues_res = paths
+                        .request(Command::QueueEvents { queue_id: 1 })
+                        .ok()
+                        .filter(|reply| reply.ok)
+                        .map(|reply| reply.queues);
+                    let state_res = if want_state {
+                        paths.request(Command::List).ok().filter(|reply| reply.ok)
+                    } else {
+                        None
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let ui_start = std::time::Instant::now();
+                        refreshing.store(false, Ordering::SeqCst);
+                        let Some(ui) = weak.upgrade() else {
+                            return;
+                        };
+                        match pages_res {
+                            Ok(result) => {
+                                if let Some(queues) = &queues_res {
+                                    if let Ok(mut map) = shared.queues.lock() {
+                                        *map = queues.iter().map(|q| (q.id, q.name.clone())).collect();
                                     }
                                 }
+                                if let Some(reply) = &state_res {
+                                    ui.set_queue_state(queue_state_text(reply).into());
+                                }
+                                if let (Ok(mut pt), Ok(mut pq)) = (prev_tasks.lock(), prev_queues.lock()) {
+                                    let is_first = !initialized_statuses.swap(true, Ordering::SeqCst);
+                                    if !is_first {
+                                        if let Ok(settings_guard) = sound_settings.lock() {
+                                            for (_, tasks) in &result.pages {
+                                                for task in tasks {
+                                                    if let Some(old_status) = pt.get(&task.id) {
+                                                        if !task_table::is_complete(old_status) && task_table::is_complete(&task.status) {
+                                                            sound::trigger_event_sound(&settings_guard, sound::SoundEvent::DownloadComplete);
+                                                        } else if old_status != "failed" && task.status == "failed" {
+                                                            sound::trigger_event_sound(&settings_guard, sound::SoundEvent::DownloadFailed);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            for queue in queues_res.iter().flatten() {
+                                                if let Some(was_running) = pq.get(&queue.id) {
+                                                    if *was_running && !queue.running {
+                                                        sound::trigger_event_sound(&settings_guard, sound::SoundEvent::QueueComplete);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if pt.len() > 50_000 {
+                                        pt.clear();
+                                    }
+                                    for (_, tasks) in &result.pages {
+                                        for task in tasks {
+                                            pt.insert(task.id, task.status.clone());
+                                        }
+                                    }
+                                    for queue in queues_res.iter().flatten() {
+                                        pq.insert(queue.id, queue.running);
+                                    }
+                                }
+                                let queue_caption = if queue_filter == 0 {
+                                    "All queues".to_owned()
+                                } else {
+                                    shared
+                                        .queues
+                                        .lock()
+                                        .ok()
+                                        .and_then(|map| map.get(&queue_filter).cloned())
+                                        .unwrap_or_else(|| "Queue unavailable".into())
+                                };
+                                ui.set_queue_caption(queue_caption.into());
+                                let rows: usize = result.pages.iter().map(|(_, tasks)| tasks.len()).sum();
+                                let total = result.total;
+                                let diff_start = std::time::Instant::now();
+                                let installed = shared.install(&ui, epoch, result, true);
+                                if installed && std::env::var_os("XDM_GUI_PERF").is_some() {
+                                    let label = format!(
+                                        "refresh pages={} rows={rows} total={total} sort={sort_key} ipc={:?} ui_thread_total={:?} (model install {:?})",
+                                        pages.len(),
+                                        ipc_done.duration_since(started),
+                                        ui_start.elapsed(),
+                                        diff_start.elapsed(),
+                                    );
+                                    TableShared::log_render(&ui, &label, started);
+                                }
+                                if installed {
+                                    let ids = shared.ids.lock().map(|g| g.clone()).unwrap_or_default();
+                                    let new_selected_index = previous_selection
+                                        .and_then(|id| ids.iter().position(|candidate| *candidate == id))
+                                        .map_or(-1, |index| index as i32);
+                                    ui.set_selected(new_selected_index);
+                                    let selected_task_id = usize::try_from(new_selected_index)
+                                        .ok()
+                                        .and_then(|idx| id_at(&ids, idx));
+                                    let is_live = selected_task_id.is_some_and(|id| {
+                                        let media_sec = shared
+                                            .statuses
+                                            .lock()
+                                            .ok()
+                                            .and_then(|map| map.get(&id).and_then(|entry| entry.1));
+                                        is_live_task(&db_path_refresh, id, media_sec, &live_ids_refresh)
+                                    });
+                                    ui.set_pause_button_text(if is_live { "Stop and save".into() } else { "Pause".into() });
+                                    ui.set_message(format!("{total} task(s)").into());
+                                }
                             }
-                            pt.clear();
-                            for task in &reply.tasks {
-                                pt.insert(task.id, task.status.clone());
-                            }
-                            pq.clear();
-                            for queue in &reply.queues {
-                                pq.insert(queue.id, queue.running);
+                            Err(error) => ui.set_message(error.into()),
+                        }
+                        if refresh_again.swap(false, Ordering::SeqCst) {
+                            if let Some(again) = refresh_slot.get() {
+                                again();
                             }
                         }
-                        let queue_state = if let Some(at) = reply.queue_start_at {
-                            Local
-                                .timestamp_opt(at, 0)
-                                .single()
-                                .map(|time| {
-                                    format!("Queue scheduled for {}", time.format("%Y-%m-%d %H:%M"))
-                                })
-                                .unwrap_or_else(|| "Queue scheduled".into())
-                        } else if reply.queue_running == Some(true) {
-                            "Queue running".into()
-                        } else {
-                            "Queue stopped".into()
-                        };
-                        let queue_state = if let Some(at) = reply.queue_stop_at {
-                            let stop = Local
-                                .timestamp_opt(at, 0)
-                                .single()
-                                .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
-                                .unwrap_or_else(|| at.to_string());
-                            format!("{queue_state} · stops {stop}")
-                        } else {
-                            queue_state
-                        };
-                        ui.set_queue_state(queue_state.into());
-                        let mut ids = match ids_refresh.lock() {
-                            Ok(guard) => guard,
-                            Err(_) => return,
-                        };
-                        let previous_selection = usize::try_from(ui.get_selected())
-                            .ok()
-                            .and_then(|index| ids.get(index).copied());
-                        ids.clear();
-                        let queue_filter = ui
-                            .get_queue_filter_id()
-                            .as_str()
-                            .parse::<i64>()
-                            .unwrap_or(0);
-                        let queue_caption = if queue_filter == 0 {
-                            "All queues".to_owned()
-                        } else {
-                            reply
-                                .queues
-                                .iter()
-                                .find(|queue| queue.id == queue_filter)
-                                .map_or_else(|| "Queue unavailable".into(), |queue| queue.name.clone())
-                        };
-                        ui.set_queue_caption(queue_caption.into());
-                        let filter = ui.get_category_filter().to_string();
-                        let query = ui.get_search_query().to_string().to_lowercase();
-                        let mut task_list = reply.tasks;
-                        let queue_map: std::collections::HashMap<i64, String> =
-                            reply.queues.iter().map(|q| (q.id, q.name.clone())).collect();
-                        let (sort_col, sort_asc) = sort_state
-                            .lock()
-                            .map(|s| s.clone())
-                            .unwrap_or(("id".into(), true));
-                        if queue_filter != 0 && sort_col == "id" {
-                            task_list.sort_by_key(|t| (t.position, t.id));
-                        } else {
-                            task_table::sort_tasks(&mut task_list, &sort_col, sort_asc, &queue_map);
-                        }
-                        let mut task_media_secs: std::collections::HashMap<i64, Option<u64>> =
-                            std::collections::HashMap::new();
-                        for t in &task_list {
-                            task_media_secs.insert(t.id, t.media_seconds);
-                        }
-                        let selected_set = selected_ids
-                            .lock()
-                            .map(|s| s.clone())
-                            .unwrap_or_default();
-                        let row_filter = RowFilter {
-                            queue_id: queue_filter,
-                            category: &filter,
-                            query: &query,
-                        };
-                        let rows = build_rows(task_list, &queue_map, &selected_set, &row_filter, &mut ids);
-
-                        let diff_start = std::time::Instant::now();
-                        let model_rc = ui.get_tasks();
-                        let Some(tasks_model) = model_rc.as_any().downcast_ref::<VecModel<TaskRow>>() else { return; };
-                        let new_len = rows.len();
-                        apply_rows(tasks_model, rows);
-                        let diff_duration = diff_start.elapsed();
-                        if new_len >= 1000 && std::env::var_os("XDM_GUI_PERF").is_some() {
-                            eprintln!(
-                                "[xdm-gui] refresh rows={} ui_thread_total={:?} (sort+filter+row build {:?}, model diff {:?}) event_loop_wait={:?}",
-                                new_len,
-                                ui_start.elapsed(),
-                                diff_start.duration_since(ui_start),
-                                diff_duration,
-                                ui_start.duration_since(ipc_done),
-                            );
-                        }
-
-                        let new_selected_index = previous_selection
-                            .and_then(|id| ids.iter().position(|candidate| *candidate == id))
-                            .map_or(-1, |index| index as i32);
-                        ui.set_selected(new_selected_index);
-                        let selected_task_id = usize::try_from(new_selected_index)
-                            .ok()
-                            .and_then(|idx| ids.get(idx).copied());
-                        let is_live = selected_task_id.is_some_and(|id| {
-                            let media_sec = task_media_secs.get(&id).copied().flatten();
-                            is_live_task(&db_path_refresh, id, media_sec, &live_ids_refresh)
-                        });
-                        ui.set_pause_button_text(if is_live { "Stop and save".into() } else { "Pause".into() });
-                        ui.set_message(format!("{} task(s)", ids.len()).into());
-                    }
-                    Ok(reply) => ui.set_message(reply.error.unwrap_or_else(|| "List failed".into()).into()),
-                    Err(error) => ui.set_message(format!("Daemon unavailable: {error}").into()),
-                }
+                    });
+                });
             });
-        });
-    });
+        })
+    };
+    let _ = refresh_slot.set(refresh.clone());
     let refresh_button = refresh.clone();
     ui.on_refresh(move || {
         refresh_button();
@@ -2206,7 +2614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(ui) = weak_select.upgrade() else { return; };
         let task_id = usize::try_from(index)
             .ok()
-            .and_then(|idx| ids_select.lock().ok().and_then(|guard| guard.get(idx).copied()));
+            .and_then(|idx| ids_select.lock().ok().and_then(|guard| id_at(&guard, idx)));
         let is_live = task_id.is_some_and(|id| {
             is_live_task(&db_path_select, id, None, &live_ids_select)
         });
@@ -2505,7 +2913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let index = ui.get_selected();
         let Some(task_id) = usize::try_from(index)
             .ok()
-            .and_then(|index| ids_priority.lock().ok().and_then(|guard| guard.get(index).copied()))
+            .and_then(|index| ids_priority.lock().ok().and_then(|guard| id_at(&guard, index)))
         else {
             ui.set_message("Select a task first".into());
             return;
@@ -2539,7 +2947,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let Some(task_id) = usize::try_from(ui.get_selected())
             .ok()
-            .and_then(|index| ids_rate.lock().ok().and_then(|guard| guard.get(index).copied()))
+            .and_then(|index| ids_rate.lock().ok().and_then(|guard| id_at(&guard, index)))
         else {
             ui.set_message("Select a task first".into());
             return;
@@ -2589,18 +2997,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_task_clicked(move |index, ctrl, shift| {
             let Some(ui) = weak.upgrade() else { return; };
             let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
-            let Some(id) = usize::try_from(index).ok().and_then(|i| ids.get(i).copied()) else { return; };
+            let Some(id) = usize::try_from(index).ok().and_then(|i| id_at(&ids, i)) else { return; };
             let Ok(mut set) = set.lock() else { return; };
             let prev = anchor.get();
             if shift && prev >= 0 {
                 let (lo, hi) = (prev.min(index) as usize, prev.max(index) as usize);
                 set.clear();
                 for i in lo..=hi.min(ids.len().saturating_sub(1)) {
-                    set.insert(ids[i] as usize);
+                    if let Some(id) = id_at(&ids, i) {
+                        set.insert(id as usize);
+                    }
                 }
             } else if ctrl {
                 if set.is_empty() {
-                    if let Some(pid) = usize::try_from(prev).ok().and_then(|i| ids.get(i).copied()) {
+                    if let Some(pid) = usize::try_from(prev).ok().and_then(|i| id_at(&ids, i)) {
                         set.insert(pid as usize);
                     }
                 }
@@ -2655,14 +3065,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return; };
             let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
             if let Ok(mut set) = set.lock() {
-                *set = ids.iter().map(|id| *id as usize).collect();
+                // Only rows whose page is loaded can be selected (the table is paged).
+                *set = ids.iter().filter(|id| **id > 0).map(|id| *id as usize).collect();
                 sync_selection(&ui, &set);
+                ui.set_message(format!("{} of {} task(s) selected (loaded rows)", set.len(), ids.len()).into());
             }
             if !ids.is_empty() && ui.get_selected() < 0 {
                 ui.set_selected(0);
                 anchor_all.set(0);
             }
-            ui.set_message(format!("{} task(s) selected", ids.len()).into());
         });
         for delta in [-1i32, 1] {
             let weak = ui.as_weak();
@@ -2685,7 +3096,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 anchor.set(next);
                 if let Ok(mut set) = set.lock() {
                     set.clear();
-                    set.insert(ids[next as usize] as usize);
+                    if let Some(id) = id_at(&ids, next as usize) {
+                        set.insert(id as usize);
+                    }
                     sync_selection(&ui, &set);
                 }
                 ui.invoke_task_selected(next);
@@ -2714,7 +3127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else if folder {
                         task_table::open_folder(&task.output);
                         ui.set_message(format!("Opening folder of {}", task.output).into());
-                    } else if task.status != "completed" {
+                    } else if !task_table::is_complete(&task.status) {
                         ui.set_message("Only completed downloads can be opened".into());
                     } else {
                         task_table::open_file(&task.output);
@@ -2737,6 +3150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let paths_move = paths.clone();
         let ids_move = task_ids.clone();
+        let ipc_move = ipc.clone();
         let refresh_move = refresh.clone();
         ui.on_move_rename_task(move || {
             let Some(ui) = weak.upgrade() else { return; };
@@ -2753,7 +3167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let Some(task) = task else { return; };
-            if task.status != "completed" {
+            if !task_table::is_complete(&task.status) {
                 ui.set_message("Move / Rename is only available for completed downloads".into());
                 return;
             }
@@ -2771,6 +3185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let weak_ui = ui.as_weak();
             let refresh = refresh_move.clone();
             let source = task.output.clone();
+            let ipc_move_file = ipc_move.clone();
             dialog.on_submit(move || {
                 let Some(dialog) = weak_dialog.upgrade() else { return; };
                 let target = dialog.get_target_path().to_string();
@@ -2778,16 +3193,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dialog.set_message("Enter a different destination path".into());
                     return;
                 }
-                match task_table::move_file(std::path::Path::new(&source), std::path::Path::new(target.trim())) {
-                    Ok(()) => {
-                        let _ = dialog.hide();
-                        if let Some(ui) = weak_ui.upgrade() {
-                            ui.set_message(format!("Moved to {target} (daemon task record keeps the old path)").into());
+                // The daemon moves the file and updates the task record; its error
+                // text (for example "destination exists") is shown verbatim.
+                dialog.set_message("Moving…".into());
+                let new_path = target.trim().to_owned();
+                let weak_dialog = weak_dialog.clone();
+                let weak_ui = weak_ui.clone();
+                let refresh = refresh.clone();
+                ipc_move_file.execute(move |paths| {
+                    let result = paths.request(Command::TaskMoveFile { task_id, new_path: new_path.clone() });
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(dialog) = weak_dialog.upgrade() else { return; };
+                        match result {
+                            Ok(reply) if reply.ok => {
+                                let _ = dialog.hide();
+                                if let Some(ui) = weak_ui.upgrade() {
+                                    ui.set_message(format!("Moved to {new_path}").into());
+                                }
+                                refresh();
+                            }
+                            Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Move rejected".into()).into()),
+                            Err(error) => dialog.set_message(format!("Daemon unavailable: {error}").into()),
                         }
-                        refresh();
-                    }
-                    Err(error) => dialog.set_message(error.into()),
-                }
+                    });
+                });
             });
             let weak_dialog = dialog.as_weak();
             dialog.on_dismiss(move || {
@@ -2803,6 +3232,442 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             *move_window.borrow_mut() = Some(dialog);
         });
+    }
+
+    // --- restart a task parked in restart_required ------------------------
+    {
+        let weak = ui.as_weak();
+        let ipc_restart = ipc.clone();
+        let ids = task_ids.clone();
+        let sel = selected_task_ids.clone();
+        let refresh_restart = refresh.clone();
+        ui.on_restart_task(move || {
+            let Some(ui) = weak.upgrade() else { return; };
+            let targets = target_ids(&ui, &ids, &sel);
+            if targets.is_empty() {
+                ui.set_message("Select a task first".into());
+                return;
+            }
+            let weak = weak.clone();
+            let refresh = refresh_restart.clone();
+            ipc_restart.execute(move |paths| {
+                let mut message = format!("Restarted {} task(s) from byte zero", targets.len());
+                for task_id in &targets {
+                    match paths.request(Command::TaskRestart { task_id: *task_id }) {
+                        Ok(reply) if reply.ok => {}
+                        Ok(reply) => {
+                            message = format!("Task #{task_id}: {}", reply.error.unwrap_or_else(|| "Restart rejected".into()));
+                            break;
+                        }
+                        Err(error) => {
+                            message = format!("Daemon unavailable: {error}");
+                            break;
+                        }
+                    }
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        refresh();
+                        ui.set_message(message.into());
+                    }
+                });
+            });
+        });
+    }
+
+    // --- clean up unowned partial files -----------------------------------
+    let partials_window = Rc::new(RefCell::new(None::<PartialsWindow>));
+    {
+        let weak_main = ui.as_weak();
+        let ipc_partials = ipc.clone();
+        let default_dir = paths.dir.join("downloads").to_string_lossy().into_owned();
+        ui.on_open_partials(move || {
+            let Some(ui) = weak_main.upgrade() else { return; };
+            let dialog = match PartialsWindow::new() {
+                Ok(dialog) => dialog,
+                Err(error) => {
+                    ui.set_message(error.to_string().into());
+                    return;
+                }
+            };
+            dialog.set_directory(default_dir.clone().into());
+            let entries = Arc::new(Mutex::new(Vec::<(xdm_ipc::PartialEntry, bool)>::new()));
+            let scanned_dir = Arc::new(Mutex::new(String::new()));
+            let render: Arc<dyn Fn(&PartialsWindow) + Send + Sync> = {
+                let entries = entries.clone();
+                Arc::new(move |dialog: &PartialsWindow| {
+                    let items: Vec<PartialItem> = entries
+                        .lock()
+                        .map(|guard| {
+                            guard
+                                .iter()
+                                .map(|(entry, checked)| PartialItem {
+                                    label: maintenance::partial_label(entry).into(),
+                                    checked: *checked,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    dialog.set_items(ModelRc::new(VecModel::from(items)));
+                })
+            };
+            let scan: Arc<dyn Fn() + Send + Sync> = {
+                let weak = dialog.as_weak();
+                let ipc = ipc_partials.clone();
+                let entries = entries.clone();
+                let scanned_dir = scanned_dir.clone();
+                let render = render.clone();
+                Arc::new(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    let directory = dialog.get_directory().trim().to_owned();
+                    dialog.set_message("Scanning…".into());
+                    dialog.set_confirming(false);
+                    let (weak, entries, scanned_dir, render) = (weak.clone(), entries.clone(), scanned_dir.clone(), render.clone());
+                    ipc.execute(move |paths| {
+                        let result = paths.request(Command::PartialScan { directory: directory.clone() });
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(dialog) = weak.upgrade() else { return; };
+                            match result {
+                                Ok(reply) if reply.ok => {
+                                    let count = reply.partials.len();
+                                    let bytes: u64 = reply.partials.iter().map(maintenance::partial_bytes).sum();
+                                    if let Ok(mut guard) = entries.lock() {
+                                        *guard = reply.partials.into_iter().map(|entry| (entry, false)).collect();
+                                    }
+                                    if let Ok(mut guard) = scanned_dir.lock() {
+                                        *guard = directory;
+                                    }
+                                    render(&dialog);
+                                    dialog.set_notice(if reply.truncated {
+                                        format!("Only the first {count} entries are listed (scan limit reached). Delete these and scan again for more.").into()
+                                    } else {
+                                        "".into()
+                                    });
+                                    dialog.set_message(format!("{count} unowned partial entr{} ({})", if count == 1 { "y" } else { "ies" }, maintenance::human_bytes(bytes)).into());
+                                }
+                                Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Scan rejected".into()).into()),
+                                Err(error) => dialog.set_message(format!("Daemon unavailable: {error}").into()),
+                            }
+                        });
+                    });
+                })
+            };
+            let scan_button = scan.clone();
+            dialog.on_scan(move || scan_button());
+            {
+                let entries = entries.clone();
+                let render = render.clone();
+                let weak = dialog.as_weak();
+                dialog.on_toggle(move |index| {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    if let Ok(mut guard) = entries.lock() {
+                        if let Some(item) = usize::try_from(index).ok().and_then(|i| guard.get_mut(i)) {
+                            item.1 = !item.1;
+                        }
+                    }
+                    dialog.set_confirming(false);
+                    render(&dialog);
+                });
+            }
+            {
+                let entries = entries.clone();
+                let render = render.clone();
+                let weak = dialog.as_weak();
+                dialog.on_select_all(move |all| {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    if let Ok(mut guard) = entries.lock() {
+                        for item in guard.iter_mut() {
+                            item.1 = all;
+                        }
+                    }
+                    dialog.set_confirming(false);
+                    render(&dialog);
+                });
+            }
+            {
+                let entries = entries.clone();
+                let scanned_dir = scanned_dir.clone();
+                let weak = dialog.as_weak();
+                dialog.on_delete_selected(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    let (count, bytes) = entries
+                        .lock()
+                        .map(|guard| {
+                            guard
+                                .iter()
+                                .filter(|(_, checked)| *checked)
+                                .fold((0usize, 0u64), |(c, b), (entry, _)| (c + 1, b + maintenance::partial_bytes(entry)))
+                        })
+                        .unwrap_or((0, 0));
+                    if count == 0 {
+                        dialog.set_message("Select at least one entry first".into());
+                        return;
+                    }
+                    let directory = scanned_dir.lock().map(|g| g.clone()).unwrap_or_default();
+                    dialog.set_confirm_text(format!("Permanently delete {count} partial entr{} ({}) from {directory}? Files of active tasks are never touched.", if count == 1 { "y" } else { "ies" }, maintenance::human_bytes(bytes)).into());
+                    dialog.set_confirming(true);
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                dialog.on_cancel_confirm(move || {
+                    if let Some(dialog) = weak.upgrade() {
+                        dialog.set_confirming(false);
+                    }
+                });
+            }
+            {
+                let entries = entries.clone();
+                let scanned_dir = scanned_dir.clone();
+                let ipc = ipc_partials.clone();
+                let scan = scan.clone();
+                let weak = dialog.as_weak();
+                dialog.on_confirm_delete(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    dialog.set_confirming(false);
+                    let paths_to_delete: Vec<String> = entries
+                        .lock()
+                        .map(|guard| {
+                            guard
+                                .iter()
+                                .filter(|(_, checked)| *checked)
+                                .flat_map(|(entry, _)| maintenance::partial_paths(entry))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let directory = scanned_dir.lock().map(|g| g.clone()).unwrap_or_default();
+                    let weak = weak.clone();
+                    let scan = scan.clone();
+                    ipc.execute(move |paths| {
+                        let result = paths.request(Command::PartialDelete { directory, paths: paths_to_delete });
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(dialog) = weak.upgrade() else { return; };
+                            match result {
+                                Ok(reply) if reply.ok => {
+                                    scan();
+                                    // The rescan sets its own text; keep the outcome visible after it.
+                                    dialog.set_notice(format!("Deleted {} file(s).", reply.total).into());
+                                }
+                                Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Delete rejected".into()).into()),
+                                Err(error) => dialog.set_message(format!("Daemon unavailable: {error}").into()),
+                            }
+                        });
+                    });
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                dialog.on_dismiss(move || {
+                    if let Some(dialog) = weak.upgrade() {
+                        let _ = dialog.hide();
+                    }
+                });
+            }
+            if let Some(previous) = partials_window.borrow_mut().take() {
+                let _ = previous.hide();
+            }
+            if let Err(error) = dialog.show() {
+                ui.set_message(error.to_string().into());
+            }
+            *partials_window.borrow_mut() = Some(dialog);
+        });
+    }
+
+    // --- bandwidth limits, host budgets and quota --------------------------
+    let bandwidth_window = Rc::new(RefCell::new(None::<BandwidthWindow>));
+    let open_bandwidth: Rc<dyn Fn()> = {
+        let weak_main = ui.as_weak();
+        let ipc_bw = ipc.clone();
+        Rc::new(move || {
+            let Some(ui) = weak_main.upgrade() else { return; };
+            let dialog = match BandwidthWindow::new() {
+                Ok(dialog) => dialog,
+                Err(error) => {
+                    ui.set_message(error.to_string().into());
+                    return;
+                }
+            };
+            let report = Arc::new(Mutex::new(xdm_ipc::BandwidthReport::default()));
+            // Runs an optional change, then reads the status back so the dialog
+            // always shows what the daemon really holds.
+            let run: Arc<dyn Fn(Option<Command>, &str) + Send + Sync> = {
+                let weak = dialog.as_weak();
+                let ipc = ipc_bw.clone();
+                let report = report.clone();
+                Arc::new(move |change: Option<Command>, done: &str| {
+                    let weak = weak.clone();
+                    let report = report.clone();
+                    let done = done.to_owned();
+                    ipc.execute(move |paths| {
+                        let change_error = match change {
+                            Some(command) => match paths.request(command) {
+                                Ok(reply) if reply.ok => None,
+                                Ok(reply) => Some(reply.error.unwrap_or_else(|| "Rejected by the daemon".into())),
+                                Err(error) => Some(format!("Daemon unavailable: {error}")),
+                            },
+                            None => None,
+                        };
+                        let status = paths.request(Command::BandwidthStatus);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(dialog) = weak.upgrade() else { return; };
+                            match status {
+                                Ok(reply) if reply.ok => {
+                                    if let Some(current) = reply.bandwidth {
+                                        let now = Local::now().timestamp();
+                                        dialog.set_status_text(maintenance::format_bandwidth_status(&current, now).into());
+                                        dialog.set_host_limits(ModelRc::new(VecModel::from(
+                                            maintenance::format_host_limits(&current.host_limits).into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+                                        )));
+                                        dialog.set_host_conns(ModelRc::new(VecModel::from(
+                                            maintenance::format_host_budgets(&current.host_connections).into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+                                        )));
+                                        dialog.set_global_limit(current.global_kib.map(|kib| kib.to_string()).unwrap_or_default().into());
+                                        dialog.set_quota_mib(if current.quota_mib == 0 { String::new() } else { current.quota_mib.to_string() }.into());
+                                        if current.quota_mib > 0 {
+                                            dialog.set_quota_hours((current.quota_window_seconds / 3600).max(1).to_string().into());
+                                        }
+                                        if let Ok(mut guard) = report.lock() {
+                                            *guard = current;
+                                        }
+                                    }
+                                    dialog.set_message(change_error.unwrap_or(done).into());
+                                }
+                                Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Status unavailable".into()).into()),
+                                Err(error) => dialog.set_message(format!("Daemon unavailable: {error}").into()),
+                            }
+                        });
+                    });
+                })
+            };
+            {
+                let weak = dialog.as_weak();
+                let run = run.clone();
+                dialog.on_apply_global(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    match maintenance::parse_optional_number(dialog.get_global_limit().as_str(), "Global limit") {
+                        Ok(kib) => run(Some(Command::SetGlobalLimit { kib }), "Global limit applied"),
+                        Err(error) => dialog.set_message(error.into()),
+                    }
+                });
+            }
+            {
+                let run = run.clone();
+                dialog.on_clear_global(move || run(Some(Command::SetGlobalLimit { kib: None }), "Global limit removed"));
+            }
+            {
+                let weak = dialog.as_weak();
+                let run = run.clone();
+                dialog.on_set_host_limit(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    let pattern = dialog.get_host_pattern().trim().to_owned();
+                    match maintenance::parse_optional_number(dialog.get_host_kib().as_str(), "Host limit") {
+                        Ok(Some(kib)) if !pattern.is_empty() => run(Some(Command::SetHostLimit { pattern, kib: Some(kib) }), "Host limit saved"),
+                        Ok(_) => dialog.set_message("Enter a host pattern and a KiB/s value (0 = unlimited)".into()),
+                        Err(error) => dialog.set_message(error.into()),
+                    }
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                let run = run.clone();
+                dialog.on_remove_host_limit(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    let pattern = dialog.get_host_pattern().trim().to_owned();
+                    if pattern.is_empty() {
+                        dialog.set_message("Pick or type the host pattern to remove".into());
+                    } else {
+                        run(Some(Command::SetHostLimit { pattern, kib: None }), "Host limit rule removed");
+                    }
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                let report = report.clone();
+                dialog.on_pick_host_limit(move |index| {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    if let Some((pattern, kib)) = report.lock().ok().and_then(|g| usize::try_from(index).ok().and_then(|i| g.host_limits.get(i).cloned())) {
+                        dialog.set_host_pattern(pattern.into());
+                        dialog.set_host_kib(kib.to_string().into());
+                    }
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                let run = run.clone();
+                dialog.on_set_host_conns(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    let pattern = dialog.get_conn_pattern().trim().to_owned();
+                    match maintenance::parse_optional_number(dialog.get_conn_count().as_str(), "Connection budget") {
+                        Ok(Some(count)) if !pattern.is_empty() => run(Some(Command::SetHostConnections { pattern, count: Some(count) }), "Connection budget saved"),
+                        Ok(_) => dialog.set_message("Enter a host pattern and a connection count".into()),
+                        Err(error) => dialog.set_message(error.into()),
+                    }
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                let run = run.clone();
+                dialog.on_remove_host_conns(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    let pattern = dialog.get_conn_pattern().trim().to_owned();
+                    if pattern.is_empty() {
+                        dialog.set_message("Pick or type the host pattern to remove".into());
+                    } else {
+                        run(Some(Command::SetHostConnections { pattern, count: None }), "Connection budget rule removed");
+                    }
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                let report = report.clone();
+                dialog.on_pick_host_conns(move |index| {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    if let Some((pattern, count)) = report.lock().ok().and_then(|g| usize::try_from(index).ok().and_then(|i| g.host_connections.get(i).cloned())) {
+                        dialog.set_conn_pattern(pattern.into());
+                        dialog.set_conn_count(count.to_string().into());
+                    }
+                });
+            }
+            {
+                let weak = dialog.as_weak();
+                let run = run.clone();
+                dialog.on_apply_quota(move || {
+                    let Some(dialog) = weak.upgrade() else { return; };
+                    match maintenance::parse_quota(dialog.get_quota_mib().as_str(), dialog.get_quota_hours().as_str()) {
+                        Ok((mib, window_seconds)) => run(Some(Command::SetQuota { mib, window_seconds }), if mib == 0 { "Quota off" } else { "Quota applied" }),
+                        Err(error) => dialog.set_message(error.into()),
+                    }
+                });
+            }
+            {
+                let run = run.clone();
+                dialog.on_disable_quota(move || run(Some(Command::SetQuota { mib: 0, window_seconds: 3600 }), "Quota off"));
+            }
+            {
+                let run = run.clone();
+                dialog.on_refresh(move || run(None, "Status refreshed"));
+            }
+            {
+                let weak = dialog.as_weak();
+                dialog.on_dismiss(move || {
+                    if let Some(dialog) = weak.upgrade() {
+                        let _ = dialog.hide();
+                    }
+                });
+            }
+            run(None, "Loaded from the daemon");
+            if let Some(previous) = bandwidth_window.borrow_mut().take() {
+                let _ = previous.hide();
+            }
+            if let Err(error) = dialog.show() {
+                ui.set_message(error.to_string().into());
+            }
+            *bandwidth_window.borrow_mut() = Some(dialog);
+        })
+    };
+    {
+        let open = open_bandwidth.clone();
+        ui.on_open_bandwidth(move || open());
     }
 
     // --- column visibility -------------------------------------------------
@@ -3043,6 +3908,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths_remove = paths.clone();
     let ids_remove = task_ids.clone();
     let sel_remove = selected_task_ids.clone();
+    let shared_remove = table_shared.clone();
     let refresh_remove = refresh.clone();
     let settings_remove = gui_settings.clone();
     ui.on_remove_task(move || {
@@ -3054,9 +3920,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_message("Select a task first".into());
             return;
         }
-        let remove_all = |paths: &Paths, targets: &[i64]| -> Result<(), String> {
+        // Unfinished tasks whose own .part/.part.meta the user may also delete.
+        let unfinished: std::collections::HashSet<i64> = targets
+            .iter()
+            .copied()
+            .filter(|id| shared_remove.status_of(*id).is_some_and(|status| !task_table::is_complete(&status)))
+            .collect();
+        let remove_all = |paths: &Paths, targets: &[i64], partial: &std::collections::HashSet<i64>| -> Result<(), String> {
             for task_id in targets {
-                match paths.request(Command::Remove { task_id: *task_id }) {
+                let command = if partial.contains(task_id) {
+                    Command::TaskRemoveEx { task_id: *task_id, delete_partial: true }
+                } else {
+                    Command::Remove { task_id: *task_id }
+                };
+                match paths.request(command) {
                     Ok(reply) if reply.ok => {}
                     Ok(reply) => {
                         return Err(reply.error.unwrap_or_else(|| "Remove rejected".into()));
@@ -3075,7 +3952,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let confirm = settings_remove.lock().map(|s| s.confirm_remove).unwrap_or(true);
         if !confirm {
-            match remove_all(&paths_remove, &targets) {
+            match remove_all(&paths_remove, &targets, &std::collections::HashSet::new()) {
                 Ok(()) => {
                     if let Ok(mut set) = sel_remove.lock() {
                         set.clear();
@@ -3103,6 +3980,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             .into(),
         );
+        dialog.set_partial_visible(!unfinished.is_empty());
         let paths = paths_remove.clone();
         let refresh = refresh_remove.clone();
         let sel_confirm = sel_remove.clone();
@@ -3112,7 +3990,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(dialog) = weak_dialog.upgrade() else {
                 return;
             };
-            match remove_all(&paths, &targets) {
+            let partial = if dialog.get_delete_partial() { unfinished.clone() } else { std::collections::HashSet::new() };
+            match remove_all(&paths, &targets, &partial) {
                 Ok(()) => {
                     let _ = dialog.hide();
                     if let Ok(mut set) = sel_confirm.lock() {
@@ -3841,7 +4720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let open_settings_for_queues = open_queue_settings.clone();
     ui.on_manage_queues(move || {
         let Some(ui) = weak_main.upgrade() else { return; };
-        let source_task = usize::try_from(ui.get_selected()).ok().and_then(|index| ids_main_queues.lock().ok().and_then(|guard| guard.get(index).copied()));
+        let source_task = usize::try_from(ui.get_selected()).ok().and_then(|index| ids_main_queues.lock().ok().and_then(|guard| id_at(&guard, index)));
         let dialog = match QueuesWindow::new() {
             Ok(dialog) => dialog,
             Err(error) => { ui.set_message(error.to_string().into()); return; }
@@ -3863,7 +4742,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let selected = previous.and_then(|id| reply.queues.iter().position(|queue| queue.id == id));
                         let labels = reply.queues.iter().map(|queue| {
                             let solo = if queue.started_alone { " [solo]" } else { "" };
-                            format!("#{}  {}  {}{solo}  {}/{} active  {} queued  {} paused", queue.id, queue.name, if queue.running {"enabled"} else {"stopped"}, queue.active, queue.limit, queue.queued, queue.paused).into()
+                            let sync = scheduler::format_sync_label(queue);
+                            format!("#{}  {}  {}{solo}{sync}  {}/{} active  {} queued  {} paused", queue.id, queue.name, if queue.running {"enabled"} else {"stopped"}, queue.active, queue.limit, queue.queued, queue.paused).into()
                         }).collect::<Vec<slint::SharedString>>();
                         dialog.set_queues(ModelRc::new(VecModel::from(labels)));
                         dialog.set_selected(selected.map_or(-1, |index| index as i32));
@@ -3885,6 +4765,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dialog.on_select_queue(move |index| {
             if let (Some(dialog), Some(queue)) = (weak.upgrade(), usize::try_from(index).ok().and_then(|index| rows_select.lock().ok().and_then(|guard| guard.get(index).cloned()))) {
                 dialog.set_name(queue.name.into()); dialog.set_limit(queue.limit.to_string().into());
+                if let Some(interval) = queue.sync_interval { dialog.set_sync_interval(interval.to_string().into()); }
             }
         });
         let refresh_button = refresh_queues.clone();
@@ -3910,13 +4791,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dialog.on_action(move |action| {
             let Some(dialog) = weak_dialog.upgrade() else { return; };
             let queue_id = usize::try_from(dialog.get_selected()).ok().and_then(|index| rows.lock().ok().and_then(|guard| guard.get(index).map(|queue| queue.id)));
-            if action != 0 && queue_id.is_none() { dialog.set_message("Select a queue first".into()); return; }
+            if action != 0 && action != 10 && queue_id.is_none() { dialog.set_message("Select a queue first".into()); return; }
             let queue_id = queue_id.unwrap_or(1);
             if action == 7 {
                 if let Some(ui) = weak_main.upgrade() { ui.set_queue_filter_id(queue_id.to_string().into()); }
                 refresh_main(); let _ = dialog.hide(); return;
             }
-            let limit = if action == 0 || action == 2 {
+            let limit = if action == 0 || action == 2 || action == 10 {
                 match dialog.get_limit().as_str().parse::<usize>() { Ok(limit) => limit, Err(_) => { dialog.set_message("Enter a job limit from 1 to 16".into()); return; } }
             } else { 2 };
             let command = match action {
@@ -3929,7 +4810,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 6 => { let Some(task_id) = source_task else { return; }; Command::AssignQueue { queue_id, task_ids: vec![task_id] } },
                 8 => Command::QueueStartOne { queue_id },
                 9 => Command::QueueStopOne { queue_id },
+                10 => Command::QueueCreateSync { name: dialog.get_name().to_string(), limit },
+                11 => match dialog.get_sync_interval().trim().parse::<u64>() {
+                    Ok(seconds) if seconds >= 1 => Command::QueueSetSync { queue_id, interval_seconds: Some(seconds) },
+                    _ => { dialog.set_message("Enter a check interval in whole seconds (at least 1)".into()); return; }
+                },
+                12 => Command::QueueSetSync { queue_id, interval_seconds: None },
+                13 => Command::QueueCheck { queue_id },
                 _ => return,
+            };
+            let note = match action {
+                10 => "Synchronization queue created",
+                11 => "Sync interval set",
+                12 => "Automatic checks off; use Check now",
+                13 => "Check started; the result appears under Scheduler & Settings > Recent Queue Events",
+                _ => "",
             };
             match paths_action.request(command) {
                 Ok(reply) if reply.ok => {
@@ -3937,6 +4832,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         *guard = reply.queue_id;
                     }
                     refresh_action(); refresh_main();
+                    if !note.is_empty() { dialog.set_message(note.into()); }
                 }
                 Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Queue command rejected".into()).into()),
                 Err(error) => dialog.set_message(error.to_string().into()),
@@ -4541,9 +5437,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let conns = settings_c.lock().map(|s| s.default_connections).unwrap_or(8);
                 ipc_load.execute(move |paths| {
                     let res = paths.request(Command::GetProxy);
+                    let stall = paths.request(Command::GetStallTimeout).ok().and_then(|reply| reply.stall_timeout_seconds);
                     let _ = slint::invoke_from_event_loop(move || {
                         let Some(dialog) = weak.upgrade() else { return; };
                         dialog.set_default_connections(conns.to_string().into());
+                        if let Some(seconds) = stall {
+                            dialog.set_stall_timeout(seconds.to_string().into());
+                        }
                         if let Ok(reply) = res {
                             if let Some(proxy_val) = reply.proxy {
                                 if let Ok(choice) = serde_json::from_value::<xdm_ipc::ProxyChoice>(proxy_val) {
@@ -4586,6 +5486,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             };
+            let stall_seconds = match dialog.get_stall_timeout().trim().parse::<u64>() {
+                Ok(seconds) if (1..=600).contains(&seconds) => seconds,
+                _ => {
+                    dialog.set_message("Stall timeout must be a number of seconds between 1 and 600".into());
+                    return;
+                }
+            };
             let mode = dialog.get_proxy_mode().to_string();
             let http = dialog.get_http_proxy().to_string();
             let https = dialog.get_https_proxy().to_string();
@@ -4604,12 +5511,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let weak = weak_dialog.clone();
             ipc_save.execute(move |paths| {
                 let res = paths.request(Command::SetProxy { proxy: proxy_choice });
+                let stall_res = match &res {
+                    Ok(reply) if reply.ok => Some(paths.request(Command::SetStallTimeout { seconds: stall_seconds })),
+                    _ => None,
+                };
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(dialog) = weak.upgrade() {
                         match res {
-                            Ok(reply) if reply.ok => {
-                                dialog.set_message("Connection and proxy settings saved successfully".into());
-                            }
+                            Ok(reply) if reply.ok => match stall_res {
+                                Some(Ok(stall)) if !stall.ok => {
+                                    dialog.set_message(stall.error.unwrap_or_else(|| "Stall timeout rejected".into()).into());
+                                }
+                                Some(Err(e)) => dialog.set_message(format!("Daemon unavailable: {e}").into()),
+                                _ => dialog.set_message("Connection and proxy settings saved successfully".into()),
+                            },
                             Ok(reply) => {
                                 dialog.set_message(reply.error.unwrap_or_else(|| "Proxy setting rejected".into()).into());
                             }
@@ -4624,6 +5539,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dialog.on_refresh_settings(move || {
             reload_c();
         });
+        let open_bandwidth_conn = open_bandwidth.clone();
+        dialog.on_open_bandwidth(move || open_bandwidth_conn());
 
         let weak_dialog = dialog.as_weak();
         dialog.on_dismiss(move || {
@@ -5343,18 +6260,17 @@ mod table_perf_tests {
     use std::collections::{HashMap, HashSet};
     use std::time::Instant;
 
-    fn summaries(count: usize, done_every: usize) -> Vec<xdm_ipc::TaskSummary> {
-        (1..=count)
+    fn summaries(first: usize, count: usize) -> Vec<xdm_ipc::TaskSummary> {
+        (first..first + count)
             .map(|i| {
-                let status = if i % done_every == 0 { "downloading" } else { "queued" };
                 serde_json::from_value(serde_json::json!({
                     "id": i,
-                    "url": format!("http://example.invalid/dir/file{:05}.bin", (i * 7919) % count),
-                    "output": format!("/tmp/xdm/file{:05}.bin", (i * 7919) % count),
-                    "status": status,
+                    "url": format!("http://example.invalid/dir/file{i:05}.bin"),
+                    "output": format!("/tmp/xdm/file{i:05}.bin"),
+                    "status": if i % 50 == 0 { "downloading" } else { "queued" },
                     "priority": 1,
                     "error": null,
-                    "downloaded": if status == "downloading" { Some(i as u64 * 10) } else { None },
+                    "downloaded": 10,
                     "total": 1_000_000u64,
                     "category": "Other",
                     "queue_id": 1,
@@ -5368,74 +6284,44 @@ mod table_perf_tests {
             .collect()
     }
 
-    /// Full refresh pipeline minus IPC and rendering: sort, filter, row build, model diff.
+    /// Row conversion for one 200-row page plus installing it into a 20,000-row
+    /// model: the per-page work done on the UI thread.
     #[test]
-    fn refresh_pipeline_handles_5000_tasks() {
-        let queue_map: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
-        let selected = HashSet::new();
-        let filter = RowFilter { queue_id: 0, category: "All", query: "" };
-        let model = VecModel::<TaskRow>::default();
-        let mut ids = Vec::new();
-
-        let run = |label: &str, mut tasks: Vec<xdm_ipc::TaskSummary>, column: &str, ids: &mut Vec<i64>| {
-            let start = Instant::now();
-            task_table::sort_tasks(&mut tasks, column, true, &queue_map);
-            let sorted = start.elapsed();
-            let rows = build_rows(tasks, &queue_map, &selected, &filter, ids);
-            let built = start.elapsed();
-            apply_rows(&model, rows);
-            let total = start.elapsed();
-            eprintln!(
-                "[perf] {label}: rows={} sort={sorted:?} sort+build={built:?} total={total:?}",
-                model.row_count()
-            );
-            total
-        };
-
-        let first = run("first fill, sort=filename", summaries(5000, 50), "filename", &mut ids);
-        assert_eq!(model.row_count(), 5000);
-        assert_eq!(ids.len(), 5000);
-        let name = |model: &VecModel<TaskRow>, i: usize| model.row_data(i).unwrap().filename.to_string();
-        assert!(name(&model, 0) <= name(&model, 1) && name(&model, 4998) <= name(&model, 4999));
-
-        let steady = run("steady refresh (nothing changed)", summaries(5000, 50), "filename", &mut ids);
-        let churn = run("refresh with 10% rows changed", summaries(5000, 10), "filename", &mut ids);
-        let by_size = run("resort by size", summaries(5000, 10), "size", &mut ids);
-        let by_status = run("resort by status", summaries(5000, 10), "status", &mut ids);
-        assert_eq!(model.row_count(), 5000);
-        for (label, took) in [("first", first), ("steady", steady), ("churn", churn), ("size", by_size), ("status", by_status)] {
-            // Generous bound that also holds for unoptimised debug test builds.
-            assert!(took.as_millis() < 2000, "{label} refresh took {took:?}");
+    fn paged_install_of_20k_task_table_is_fast() {
+        let queues: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
+        let model = PagedModel::<TaskRow>::new(loading_row());
+        let start = Instant::now();
+        for page in 0..3 {
+            let rows: Vec<TaskRow> = summaries(page * PAGE + 1, PAGE)
+                .into_iter()
+                .map(|task| row_from_summary(task, &queues, &HashSet::new()))
+                .collect();
+            assert!(model.apply(0, 20_000, vec![(page, rows)], false));
         }
+        let took = start.elapsed();
+        eprintln!("[perf] 3 pages x {PAGE} rows installed into a 20000-row model in {took:?}");
+        assert_eq!(model.row_count(), 20_000);
+        assert_eq!(model.row_data(PAGE + 5).unwrap().id, (PAGE + 6) as i32);
+        assert_eq!(model.row_data(19_999).unwrap().id, 0, "unloaded rows are placeholders");
+        assert!(took.as_millis() < 500, "installing pages took {took:?}");
     }
 
     #[test]
-    fn reapplying_rows_updates_in_place_and_shrinks() {
-        let queue_map: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
-        let filter = RowFilter { queue_id: 0, category: "All", query: "" };
-        let model = VecModel::<TaskRow>::default();
-        let mut ids = Vec::new();
-        apply_rows(&model, build_rows(summaries(200, 50), &queue_map, &HashSet::new(), &filter, &mut ids));
-        assert_eq!(model.row_count(), 200);
-        let changed = build_rows(summaries(150, 10), &queue_map, &HashSet::new(), &filter, &mut ids);
-        let expected = changed.clone();
-        apply_rows(&model, changed);
-        assert_eq!(model.row_count(), 150);
-        for (i, row) in expected.iter().enumerate() {
-            assert_eq!(model.row_data(i).as_ref(), Some(row));
-        }
-        assert_eq!(ids.len(), 150);
+    fn rows_show_quota_wait_and_restart_required_clearly() {
+        let queues = HashMap::new();
+        let mut task = summaries(1, 1).remove(0);
+        task.status = "quota_wait".into();
+        assert_eq!(row_from_summary(task.clone(), &queues, &HashSet::new()).status.as_str(), "Quota wait");
+        task.status = "restart_required".into();
+        assert_eq!(row_from_summary(task, &queues, &HashSet::new()).status.as_str(), "Needs restart");
     }
 
     #[test]
-    fn filters_by_query_and_queue() {
-        let queue_map: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
-        let mut ids = Vec::new();
-        let filter = RowFilter { queue_id: 0, category: "All", query: "file00007" };
-        let rows = build_rows(summaries(100, 50), &queue_map, &HashSet::new(), &filter, &mut ids);
-        assert_eq!(rows.len(), ids.len());
-        assert!(rows.iter().all(|r| r.filename.contains("file00007")));
-        let other_queue = RowFilter { queue_id: 9, category: "All", query: "" };
-        assert!(build_rows(summaries(10, 5), &queue_map, &HashSet::new(), &other_queue, &mut ids).is_empty());
+    fn sort_columns_map_to_daemon_keys() {
+        assert_eq!(daemon_sort("filename", true, false).as_deref(), Some("output"));
+        assert_eq!(daemon_sort("filename", false, false).as_deref(), Some("-output"));
+        assert_eq!(daemon_sort("id", true, true).as_deref(), Some("position"));
+        assert_eq!(daemon_sort("last_try_date", false, false).as_deref(), Some("-updated"));
+        assert_eq!(daemon_sort("size", true, false), None);
     }
 }

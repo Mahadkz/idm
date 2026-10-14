@@ -107,17 +107,50 @@ pub fn unpack_days_mask(mask: u8) -> (bool, bool, bool, bool, bool, bool, bool) 
     )
 }
 
-/// Formats a QueueEvent into a human-readable display string.
+/// Formats a QueueEvent into a human-readable display string. Synchronization
+/// events (`sync_*`) carry their detail in the action fields.
 pub fn format_event(event: &QueueEvent) -> String {
     let time_str = Local
         .timestamp_opt(event.at, 0)
         .single()
         .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| event.at.to_string());
-    format!(
-        "{} · exec #{} · outcome: {} · action: {} ({})",
-        time_str, event.execution, event.outcome, event.action, event.action_status
-    )
+    let member = event.action.strip_prefix("task:").map(|id| format!("task #{id}"));
+    let text = match (event.outcome.as_str(), member) {
+        ("sync_checked", _) => {
+            format!("sync check finished: {}", event.action.replace(' ', ", "))
+        }
+        ("sync_updated", Some(member)) => format!("sync: {member} re-downloaded (remote changed)"),
+        ("sync_unchanged", Some(member)) => format!("sync: {member} unchanged"),
+        ("sync_failed", Some(member)) => format!("sync: {member} failed: {}", event.action_status),
+        _ => {
+            return format!(
+                "{} · exec #{} · outcome: {} · action: {} ({})",
+                time_str, event.execution, event.outcome, event.action, event.action_status
+            );
+        }
+    };
+    format!("{time_str} · exec #{} · {text}", event.execution)
+}
+
+/// Suffix for a queue list row describing a synchronization queue.
+pub fn format_sync_label(queue: &xdm_ipc::QueueSummary) -> String {
+    if !queue.sync {
+        return String::new();
+    }
+    let every = queue
+        .sync_interval
+        .map_or_else(|| "manual checks".to_string(), |seconds| format!("every {seconds}s"));
+    let last = if queue.sync_last > 0 {
+        Local
+            .timestamp_opt(queue.sync_last, 0)
+            .single()
+            .map(|t| format!(", last check {}", t.format("%H:%M:%S")))
+            .unwrap_or_default()
+    } else {
+        ", never checked".to_string()
+    };
+    format!(" [sync: {every}{last}]")
 }
 
 /// Parses countdown seconds ensuring it is within the 10..=3600 range.
@@ -282,6 +315,24 @@ mod tests {
 
         let mask_custom = days_mask(true, false, true, false, false, true, false);
         assert_eq!(unpack_days_mask(mask_custom), (true, false, true, false, false, true, false));
+    }
+
+    #[test]
+    fn sync_events_are_readable() {
+        let event = |outcome: &str, action: &str, status: &str| QueueEvent {
+            id: 1,
+            queue_id: 2,
+            execution: 4,
+            outcome: outcome.into(),
+            action: action.into(),
+            action_status: status.into(),
+            at: 1700000000,
+        };
+        let done = format_event(&event("sync_checked", "unchanged=3 updated=1 failed=0", "done"));
+        assert!(done.ends_with("exec #4 · sync check finished: unchanged=3, updated=1, failed=0"), "{done}");
+        assert!(format_event(&event("sync_updated", "task:7", "ok")).ends_with("sync: task #7 re-downloaded (remote changed)"));
+        assert!(format_event(&event("sync_failed", "task:8", "HTTP 500")).ends_with("sync: task #8 failed: HTTP 500"));
+        assert!(format_event(&event("completed", "shutdown", "fake")).contains("outcome: completed"));
     }
 
     #[test]

@@ -14,10 +14,17 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use xdm_categories::valid_filename;
+
+mod governor;
+pub use governor::{
+    DEFAULT_HOST_CONNECTIONS, Governor, GovernorSnapshot, Lease, RateBucket, host_of,
+    pattern_matches, resolve,
+};
+use governor::pace;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -95,20 +102,24 @@ pub struct ResponseMetadata {
 /// Shared controls and live counters for a single HTTP transfer.
 #[derive(Debug)]
 pub struct TransferControl {
-    limiter: Mutex<Bucket>,
-    limited: AtomicBool,
+    id: u64,
+    task: RateBucket,
+    attached: OnceLock<Attached>,
     downloaded: AtomicU64,
     total: AtomicU64,
     total_known: AtomicBool,
     sample: Mutex<Sample>,
 }
 
+/// Shared limits a daemon attaches to a transfer.
 #[derive(Debug)]
-struct Bucket {
-    rate: Option<u64>,
-    tokens: f64,
-    updated: Instant,
+struct Attached {
+    governor: Arc<Governor>,
+    host_bucket: Arc<RateBucket>,
 }
+
+/// Error text of a transfer stopped because the usage quota was reached.
+pub const QUOTA_REACHED: &str = "download quota reached";
 
 #[derive(Debug)]
 struct Sample {
@@ -130,13 +141,11 @@ impl TransferControl {
         if rate == Some(0) {
             return Err(err("rate limit must be greater than zero"));
         }
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Ok(Self {
-            limited: AtomicBool::new(rate.is_some()),
-            limiter: Mutex::new(Bucket {
-                rate,
-                tokens: 0.0,
-                updated: Instant::now(),
-            }),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            task: RateBucket::new(rate),
+            attached: OnceLock::new(),
             downloaded: AtomicU64::new(0),
             total: AtomicU64::new(0),
             total_known: AtomicBool::new(false),
@@ -152,14 +161,7 @@ impl TransferControl {
         if rate == Some(0) {
             return Err(err("rate limit must be greater than zero"));
         }
-        let mut bucket = self
-            .limiter
-            .lock()
-            .map_err(|_| err("rate limiter lock poisoned"))?;
-        bucket.rate = rate;
-        bucket.tokens = 0.0;
-        bucket.updated = Instant::now();
-        self.limited.store(rate.is_some(), Ordering::Relaxed);
+        self.task.set(rate);
         Ok(())
     }
 
@@ -203,39 +205,45 @@ impl TransferControl {
         }
     }
 
+    /// Puts this transfer under the process-wide governor: global and per-host
+    /// caps keyed by the host of `url`, connection leases and the usage quota.
+    pub fn attach(&self, governor: Arc<Governor>, url: &str) {
+        let host_bucket = governor.host_bucket(&host_of(url));
+        let _ = self.attached.set(Attached { governor, host_bucket });
+    }
+
+    fn governor(&self) -> Option<&Arc<Governor>> {
+        self.attached.get().map(|attached| &attached.governor)
+    }
+
+    fn quota_hit(&self) -> bool {
+        self.attached
+            .get()
+            .is_some_and(|attached| attached.governor.exceeded())
+    }
+
+    /// Counts bytes that arrived: progress and the usage quota.
+    #[inline]
+    fn record(&self, bytes: usize) {
+        self.downloaded.fetch_add(bytes as u64, Ordering::Relaxed);
+        if let Some(attached) = self.attached.get() {
+            attached.governor.account(bytes as u64);
+        }
+    }
+
+    #[inline]
     fn wait(&self, bytes: usize, stop: &AtomicBool) -> Result<()> {
-        if !self.limited.load(Ordering::Relaxed) {
+        let (host, global) = match self.attached.get() {
+            Some(attached) => (Some(&*attached.host_bucket), Some(&attached.governor.global)),
+            None => (None, None),
+        };
+        if self.task.unlimited()
+            && host.is_none_or(RateBucket::unlimited)
+            && global.is_none_or(RateBucket::unlimited)
+        {
             return Ok(());
         }
-        let mut remaining = bytes as f64;
-        while remaining > 0.0 {
-            if stop.load(Ordering::Relaxed) {
-                return Err(err("paused"));
-            }
-            let sleep = {
-                let mut bucket = self
-                    .limiter
-                    .lock()
-                    .map_err(|_| err("rate limiter lock poisoned"))?;
-                let Some(rate) = bucket.rate else {
-                    return Ok(());
-                };
-                let now = Instant::now();
-                let capacity = (rate as f64 * 0.1).max(1.0);
-                bucket.tokens = (bucket.tokens
-                    + now.duration_since(bucket.updated).as_secs_f64() * rate as f64)
-                    .min(capacity);
-                bucket.updated = now;
-                let granted = bucket.tokens.min(remaining);
-                bucket.tokens -= granted;
-                remaining -= granted;
-                Duration::from_secs_f64((remaining / rate as f64).min(0.05))
-            };
-            if remaining > 0.0 {
-                thread::sleep(sleep.max(Duration::from_millis(1)));
-            }
-        }
-        Ok(())
+        pace([Some(&self.task), host, global], self.id, bytes, stop)
     }
 }
 
@@ -1066,6 +1074,10 @@ struct Shared {
     policy: ResumePolicy,
     /// First terminal worker failure (N05 `RangeUnreliable`, pause, I/O error).
     aborted: Mutex<Option<Box<dyn Error + Send + Sync>>>,
+    /// Host whose connection budget the workers draw from.
+    host: String,
+    /// Lease of the probe connection, handed to the first worker that asks.
+    probe_lease: Mutex<Option<Lease>>,
 }
 
 enum Outcome {
@@ -1175,6 +1187,18 @@ impl Shared {
         Ok(Some(middle))
     }
 
+    /// Waits for a connection lease before a worker claims work, so a worker
+    /// blocked on the host budget never holds a segment hostage.
+    fn lease(&self) -> Result<Option<Lease>> {
+        let Some(governor) = self.control.governor() else {
+            return Ok(None);
+        };
+        if let Some(lease) = self.probe_lease.lock().ok().and_then(|mut slot| slot.take()) {
+            return Ok(Some(lease));
+        }
+        governor.acquire(&self.host, &self.stop).map(Some)
+    }
+
     fn take_adopted(&self, offset: u64) -> Option<Response> {
         let mut slot = self.adopted.lock().ok()?;
         if slot.as_ref().is_some_and(|(at, _)| *at == offset) {
@@ -1198,6 +1222,17 @@ fn worker(shared: Arc<Shared>) -> Result<()> {
             shared.abort(err("paused"));
             return Ok(());
         }
+        if shared.control.quota_hit() {
+            shared.abort(err(QUOTA_REACHED));
+            return Ok(());
+        }
+        let _lease = match shared.lease() {
+            Ok(lease) => lease,
+            Err(error) => {
+                shared.abort(error);
+                return Ok(());
+            }
+        };
         let Some(start) = shared.claim().unwrap_or_else(|error| {
             shared.abort(error);
             None
@@ -1347,7 +1382,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
         let mut failed = false;
         let mut shrunk = false;
         loop {
-            if shared.stop.load(Ordering::Relaxed) {
+            if shared.stop.load(Ordering::Relaxed) || shared.control.quota_hit() {
                 break;
             }
             // Reserve the next chunk so a concurrent split never hands these bytes to another worker.
@@ -1397,10 +1432,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 }
                 Ok(n) => {
                     shared.control.wait(n, &shared.stop)?;
-                    shared
-                        .control
-                        .downloaded
-                        .fetch_add(n as u64, Ordering::Relaxed);
+                    shared.control.record(n);
                     position += n as u64;
                     failures = 0;
                 }
@@ -1443,6 +1475,9 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
             shared.release(start)?;
             return Ok(Outcome::Done);
         }
+        if shared.control.quota_hit() {
+            return Err(err(QUOTA_REACHED));
+        }
         if failed && failures < RETRIES {
             failures += 1;
             wait_retry(failures, None, &shared.stop)?;
@@ -1472,6 +1507,10 @@ fn stream_body(
                 "paused; this server requires restarting from byte zero",
             ));
         }
+        if control.quota_hit() {
+            output.flush()?;
+            return Err(err(QUOTA_REACHED));
+        }
         let n = match response.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => n,
@@ -1479,7 +1518,7 @@ fn stream_body(
         };
         control.wait(n, &options.stop)?;
         output.write_all(&buffer[..n])?;
-        control.downloaded.fetch_add(n as u64, Ordering::Relaxed);
+        control.record(n);
         total += n as u64;
     }
     if length.is_some_and(|length| length != total) {
@@ -1619,7 +1658,16 @@ fn run_transfer(
         .as_ref()
         .and_then(|s| s.segments.iter().find(|x| x.cursor <= x.end))
         .map_or(0, |x| x.cursor);
+    let url_host = host_of(&options.url);
+    let mut probe_lease = control
+        .governor()
+        .map(|governor| governor.acquire(&url_host, &options.stop))
+        .transpose()?;
     let mut probe = probe(&client, &request, offset, &options.stop)?;
+    let host = host_of(&probe.effective_url);
+    if host != url_host {
+        probe_lease = None;
+    }
     if let Some(decide) = decide {
         let provisional = options.output.clone();
         let chosen = decide(probe.metadata())?;
@@ -1722,6 +1770,8 @@ fn run_transfer(
         checkpointed: Mutex::new(Instant::now()),
         policy: *policy,
         aborted: Mutex::new(None),
+        host,
+        probe_lease: Mutex::new(probe_lease.take()),
     });
     let handles: Vec<_> = (0..options.connections)
         .map(|_| {
@@ -2201,6 +2251,8 @@ mod property_tests {
             checkpointed: Mutex::new(Instant::now()),
             policy: ResumePolicy::default(),
             aborted: Mutex::new(None),
+            host: String::new(),
+            probe_lease: Mutex::new(None),
         }
     }
 

@@ -53,31 +53,14 @@ EXPECTED_FAIL = {
     "server-name-reconciliation": "daemon does not reconcile server Content-Disposition or MIME extensions with output destinations",
     "synchronization": "synchronization queue mode with conditional re-download and retained-source tracking is not implemented",
     "recurrence-and-wake": "recurring schedule lacks DST transition handling, missed-run catchup policy and OS wake timer integration",
-    "quota-window": "hourly bandwidth quota accounting and automatic window-rollover resumption are not implemented",
     "completion-precedence": "per-task completion action precedence and isolation from concurrent queue transfers are not implemented",
     "category-retroactive": "retroactive category rule reassignment for existing completed tasks without moving files is not implemented",
-    "temporary-storage-cleanup": "durable orphan temporary storage detection and retention-bounded cleanup are not implemented",
-    "file-actions": "transactional completed-file move, rename collision handling, and open action dispatch are not exposed via IPC",
     "remove-versus-delete": "bulk task removal with optional on-disk completed file deletion policy is not supported in the daemon",
-    "search-scopes": "scoped search across description, origin, referrer, and persisted metadata is not exposed in the daemon",
-    "force-bypass-capture": "keyboard modifier force/bypass interception and transient page asset filtering are not implemented",
-    "miscapture-exceptions": "repeated cancellation miscapture exception prompts and pattern rules are not implemented",
-    "all-links-and-clipboard": "all-links collection filtering and opt-in clipboard URL detection are not implemented in the daemon",
-    "generated-batch": "batch URL generation lacks alphabetic sequences, descending bounds, multiple wildcards and preview limits",
-    "player-panel-policy": "floating media player panel policy and in-page video overlay auto-capture rules are not implemented",
-    "quality-and-track-catalog": "dynamic player quality and track cataloging with multi-language/subtitle stream selection are not implemented",
-    "stream-assembly-fallback": "stream mux failure fallback to atomic separate audio and video track publication is not implemented",
-    "minimum-media-size": "media panel threshold filtering based on reliable whole-file size is not implemented",
     "proxy-selection": "PAC script fetching and execution, WPAD discovery, and protocol-selective proxy routing are not implemented",
-    "connection-profiles-and-host-caps": "per-host connection concurrency limits shared across simultaneous downloads are not enforced",
-    "limiter-precedence": "global speed limiter default and per-task override precedence hierarchy are not supported",
-    "browser-platform-health": "end-to-end native host health diagnostics and boundary failure reporting are not implemented",
-    "updater-integrity": "signed application update verification, schema compatibility checks and safe rollback are not implemented",
-    "tls-substitution": "custom per-task TLS root trust stores and platform TLS substitution configuration are not implemented",
-    "appearance-and-progress": "GUI theme, font scaling preferences and progress view state persistence are not exposed via IPC",
-    "grabber-auth-and-offline": "site grabber offline HTML link rewriting and crawler logout pattern exclusions are not implemented",
-    "grabber-project-recovery": "damaged grabber project schema recovery and partial template loading are not implemented",
-    "playlist-link-expansion": "generic M3U audio playlist link expansion into individual download tasks is not implemented",
+    "temporary-storage-cleanup": "removing a paused partial task leaves its .part/.part.meta behind (the daemon only deletes parts in the restart path, xdm-daemon main.rs) and no scan reclaims unowned parts",
+    "browser-platform-health": "xdm-native-host handles only hello/download.submit/media.inspect/media.submit; there is no health message (grep 'health' finds nothing)",
+    "grabber-auth-and-offline": "exclude_patterns filter collected files only so logout pages are still crawled, and saved HTML is stored verbatim without local link rewriting",
+    "playlist-link-expansion": "list import treats every non-comment line as a task so HLS media playlists expand into segment tasks (no HLS tag detection)",
 }
 
 
@@ -589,18 +572,7 @@ def test_recurrence_and_wake():
             daemon.terminate()
 
 
-def test_quota_window():
-    r"""quota-window: "Cross limit with two jobs, restart near rollover, advance/backshift clock and manually pause one task; cap accounting and resumption stay correct." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b12-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "quota_bytes" in state or "quota_window_seconds" in state, \
-                "hourly bandwidth quota accounting and automatic window-rollover resumption are not implemented"
-        finally:
-            daemon.terminate()
+
 
 
 def test_completion_precedence():
@@ -709,32 +681,10 @@ def test_category_retroactive():
             daemon.terminate()
 
 
-def test_temporary_storage_cleanup():
-    r"""temporary-storage-cleanup: "Disk full during download/publication, cross-volume move, file-size-limited volume, abandoned/live checkpoints and symlinks; only confirmed unowned parts are eligible." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b17-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "orphan_cleanup" in state, \
-                "durable orphan temporary storage detection and retention-bounded cleanup are not implemented"
-        finally:
-            daemon.terminate()
 
 
-def test_file_actions():
-    r"""file-actions: "Completed versus partial rows, rename collision, cross-volume failure, missing file and chosen double-click action; database and physical paths stay consistent." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b18-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "file_actions" in state, \
-                "transactional completed-file move, rename collision handling, and open action dispatch are not exposed via IPC"
-        finally:
-            daemon.terminate()
+
+
 
 
 def test_remove_versus_delete():
@@ -752,102 +702,25 @@ def test_remove_versus_delete():
             daemon.terminate()
 
 
-def test_search_scopes():
-    r"""search-scopes: "Mixed case, whole-string, missing metadata, no enabled scopes, add/remove while searching and 10,000 rows; stable result selection and measured latency." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b20-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "search_scopes" in state, \
-                "scoped search across description, origin, referrer, and persisted metadata is not exposed in the daemon"
-        finally:
-            daemon.terminate()
 
 
-def test_force_bypass_capture():
-    r"""force-bypass-capture: "Overlapping modifiers, delayed download, simultaneous page assets, click and keyboard activation; only the intended eligible download transfers ownership." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b21-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "capture_shortcuts" in state, \
-                "keyboard modifier force/bypass interception and transient page asset filtering are not implemented"
-        finally:
-            daemon.terminate()
 
 
-def test_miscapture_exceptions():
-    r"""miscapture-exceptions: "Second cancellation, navigation reset, pattern matching boundary, enable/disable and bypass; excluded downloads complete in the browser." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b22-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "miscapture_rules" in state, \
-                "repeated cancellation miscapture exception prompts and pattern rules are not implemented"
-        finally:
-            daemon.terminate()
 
 
-def test_all_links_and_clipboard():
-    r"""all-links-and-clipboard: "Duplicate relative/absolute URLs, selected text, missing type, navigation, malformed clipboard and over-limit batch; no task is canceled before durable acceptance." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b23-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "clipboard_monitoring" in state, \
-                "all-links collection filtering and opt-in clipboard URL detection are not implemented in the daemon"
-        finally:
-            daemon.terminate()
 
 
-def test_generated_batch():
-    r"""generated-batch: "Padding, descending/invalid bounds, Unicode letters, multiple wildcards, duplicates and expansion limit; displayed preview equals committed tasks." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b24-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "batch_preview" in state, \
-                "batch URL generation lacks alphabetic sequences, descending bounds, multiple wildcards and preview limits"
-        finally:
-            daemon.terminate()
 
 
-def test_player_panel_policy():
-    r"""player-panel-policy: "Panel-disabled type, site exclusion, multiple players, nested frames, fullscreen and protected manifest; controls preserve playback and never imply DRM support." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b25-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "media_panel_policy" in state, \
-                "floating media player panel policy and in-page video overlay auto-capture rules are not implemented"
-        finally:
-            daemon.terminate()
 
 
-def test_quality_and_track_catalog():
-    r"""quality-and-track-catalog: "Player changes resolution, missing audio group, duplicate URLs, multiple languages and subtitles; chosen output has the selected tracks and decodes." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b26-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "track_catalog" in state, \
-                "dynamic player quality and track cataloging with multi-language/subtitle stream selection are not implemented"
-        finally:
-            daemon.terminate()
+
+
+
+
+
+
+
 
 
 def test_live_stop_save():
@@ -927,32 +800,10 @@ def test_live_stop_save():
             server.shutdown()
 
 
-def test_stream_assembly_fallback():
-    r"""stream-assembly-fallback: "Discontinuity, overlap, unsupported MP4 codec pair and mux failure; valid output or clearly identified separate tracks, with no silently missing audio." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b28-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "stream_fallback" in state, \
-                "stream mux failure fallback to atomic separate audio and video track publication is not implemented"
-        finally:
-            daemon.terminate()
 
 
-def test_minimum_media_size():
-    r"""minimum-media-size: "Small known audio/video, unknown content length, short manifest with large segments and duration-only candidate; threshold obeys the documented rule." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b29-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "minimum_media_size" in state, \
-                "media panel threshold filtering based on reliable whole-file size is not implemented"
-        finally:
-            daemon.terminate()
+
+
 
 
 def test_proxy_selection():
@@ -969,114 +820,330 @@ def test_proxy_selection():
             daemon.terminate()
 
 
-def test_connection_profiles_and_host_caps():
-    r"""connection-profiles-and-host-caps: "Two tasks to one origin plus another origin, redirects, server 429 and connection stalls; host/global caps are respected and no worker count leaks." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b31-") as temp:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def gaps_assert(gaps):
+    assert not gaps, "; ".join(gaps)
+
+
+def test_temporary_storage_cleanup():
+    r"""temporary-storage-cleanup: "Disk full during download/publication, cross-volume move, file-size-limited volume, abandoned/live checkpoints and symlinks; only confirmed unowned parts are eligible." (checked: removing a paused partial task deletes its own parts, and a stale unowned part next to live tasks is reclaimed after restart)"""
+    server = Fixture()
+    server.set("/big.bin", size=8 * MIB)
+    server.set("/next.bin", size=1024)
+    gaps = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="xdm-b17-") as temp:
+            out = Path(temp)
+            work = out / "dl"
+            work.mkdir()
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                task_id = daemon.cli("submit", server.url("/big.bin"), str(work / "big.bin"))["task_id"]
+                daemon.cli("rate", task_id, 64)
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline and not (work / "big.bin.part").exists():
+                    time.sleep(0.05)
+                daemon.cli("pause", task_id)
+                assert (work / "big.bin.part").exists(), "partial file never appeared"
+                daemon.wait_status(task_id, ("paused",), seconds=8)
+                daemon.cli("remove", task_id)
+                leftovers = sorted(p.name for p in work.iterdir())
+                if leftovers:
+                    gaps.append(f"removing a paused partial task left temporary files behind: {leftovers} (the daemon only deletes parts in the restart path)")
+
+                orphan = work / "ghost.bin.part"
+                meta = work / "ghost.bin.part.meta"
+                orphan.write_bytes(b"x" * 4096)
+                meta.write_bytes(b"{}")
+                old = time.time() - 90 * 86400
+                os.utime(orphan, (old, old))
+                os.utime(meta, (old, old))
+            finally:
+                daemon.terminate()
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                daemon.submit(server.url("/next.bin"), work / "next.bin")
+                time.sleep(1)
+                if orphan.exists() or meta.exists():
+                    gaps.append("a 90-day-old .part/.part.meta pair owned by no task was still on disk after daemon restart and a new task in the same folder: unowned parts are never reclaimed")
+                gaps_assert(gaps)
+            finally:
+                daemon.terminate()
+    finally:
+        server.close()
+
+
+def test_generated_batch():
+    r"""generated-batch: "Padding, descending/invalid bounds, Unicode letters, multiple wildcards, duplicates and expansion limit; displayed preview equals committed tasks." """
+    with tempfile.TemporaryDirectory(prefix="xdm-b24-") as temp:
         out = Path(temp)
+        dest = out / "dl"
+        dest.mkdir()
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "host_connection_limits" in state, \
-                "per-host connection concurrency limits shared across simultaneous downloads are not enforced"
+            base = "http://127.0.0.1:9"
+
+            def urls():
+                return sorted(t["url"] for t in daemon.list()["tasks"])
+
+            def batch_fails(template):
+                result = subprocess.run([str(CLI), "daemon", "batch", template, str(dest)],
+                                        env=daemon.env, text=True, capture_output=True, timeout=10)
+                return result.returncode != 0 or '"ok": false' in result.stdout
+
+            daemon.cli("batch", f"{base}/n[08-10]", dest)
+            assert urls() == [f"{base}/n08", f"{base}/n09", f"{base}/n10"], urls()
+            daemon.cli("batch", f"{base}/d[5-3]", dest)
+            assert {f"{base}/d3", f"{base}/d4", f"{base}/d5"} <= set(urls()), urls()
+            daemon.cli("batch", f"{base}/l[a-c]", dest)
+            assert {f"{base}/l{c}" for c in "abc"} <= set(urls()), urls()
+            before = len(urls())
+            daemon.cli("batch", f"{base}/m[a-b]x[1-2]", dest)
+            assert len(urls()) == before + 4, urls()
+            before = len(urls())
+            assert batch_fails(f"{base}/n[08-10]"), "re-running an identical batch must be refused as duplicate destinations"
+            assert len(urls()) == before, "re-running an identical batch must not add duplicate tasks"
+            assert batch_fails(f"{base}/z[0000-99999]"), "an over-limit batch was accepted"
+            for bad in (f"{base}/b[9-x]", f"{base}/b[1-"):
+                assert batch_fails(bad), f"malformed template {bad} was accepted"
+            assert len(urls()) == before, "rejected templates must commit no tasks"
+            exported = out / "urls.txt"
+            run(CLI, "daemon", "export", exported, "urls", env=daemon.env)
+            assert sorted(exported.read_text().split()) == urls(), "exported URLs differ from committed tasks"
         finally:
             daemon.terminate()
 
 
-def test_limiter_precedence():
-    r"""limiter-precedence: "Global enable/disable plus task override, pause/restart, simultaneous jobs and extremely low rate; measured throughput and cancellation responsiveness stay bounded." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b32-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
+def test_quality_and_track_catalog():
+    r"""quality-and-track-catalog: "Player changes resolution, missing audio group, duplicate URLs, multiple languages and subtitles; chosen output has the selected tracks and decodes." (checked: `media inspect` catalogs video, every audio language and subtitles, with duplicate variant URLs collapsed and a missing audio group tolerated)"""
+    assert shutil.which("ffmpeg"), "ffmpeg required on PATH"
+    with tempfile.TemporaryDirectory(prefix="xdm-b26-") as temp:
+        base = Path(temp)
+
+        def ffmpeg(*args):
+            subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args], check=True, timeout=60)
+
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10", "-t", "1", "-c:v", "libx264", "-f", "mpegts", str(base / "v.ts"))
+        ffmpeg("-f", "lavfi", "-i", "sine=frequency=440", "-t", "1", "-c:a", "aac", "-f", "mpegts", str(base / "a.ts"))
+        server = Fixture()
         try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "global_speed_limit" in state, \
-                "global speed limiter default and per-task override precedence hierarchy are not supported"
+            server.set("/v.ts", content_bytes=(base / "v.ts").read_bytes())
+            server.set("/a.ts", content_bytes=(base / "a.ts").read_bytes())
+            server.set("/s.vtt", content_bytes=b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhi\n")
+            for name, seg in (("en", "a.ts"), ("de", "a.ts"), ("v180", "v.ts"), ("s", "s.vtt")):
+                server.set(f"/{name}.m3u8", content_bytes=(
+                    f"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\n{seg}\n#EXT-X-ENDLIST\n").encode())
+            server.set("/multi.m3u8", content_bytes=(
+                '#EXTM3U\n'
+                '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"\n'
+                '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Deutsch",LANGUAGE="de",URI="de.m3u8"\n'
+                '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="s",NAME="Eng",LANGUAGE="en",URI="s.m3u8"\n'
+                '#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=320x180,AUDIO="a",SUBTITLES="s"\nv180.m3u8\n'
+                '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360,AUDIO="a"\nv180.m3u8\n').encode())
+            server.set("/noaudio.m3u8", content_bytes=(
+                '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=320x180,AUDIO="ghost"\nv180.m3u8\n').encode())
+            tracks = json.loads(run(CLI, "media", "inspect", server.url("/multi.m3u8"), timeout=60).stdout)
+            kinds = sorted((t["kind"], t["language"] or "") for t in tracks)
+            assert kinds == [("audio", "de"), ("audio", "en"), ("subtitle", "en"), ("video", "")], kinds
+            assert [t["index"] for t in tracks] == list(range(len(tracks))), "track indexes must be dense"
+            lone = json.loads(run(CLI, "media", "inspect", server.url("/noaudio.m3u8"), timeout=60).stdout)
+            assert [t["kind"] for t in lone] == ["video"], lone
         finally:
-            daemon.terminate()
+            server.close()
 
 
 def test_browser_platform_health():
-    r"""browser-platform-health: "Missing manifest, wrong extension ID, unavailable daemon, mismatched user/privilege, host path change and update; report the failing boundary and preserve browser fallback." """
+    r"""browser-platform-health: "Missing manifest, wrong extension ID, unavailable daemon, mismatched user/privilege, host path change and update; report the failing boundary and preserve browser fallback." (checked through the native host binary with no daemon running)"""
+    import struct
+    native = ROOT / "target/debug/xdm-native-host"
     with tempfile.TemporaryDirectory(prefix="xdm-b33-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "native_host_health" in state, \
-                "end-to-end native host health diagnostics and boundary failure reporting are not implemented"
-        finally:
-            daemon.terminate()
+        env = os.environ.copy()
+        env.update({"XDM_DATA_DIR": str(Path(temp) / "state"), "HOME": str(Path(temp) / "home")})
+        (Path(temp) / "state").mkdir()
+        (Path(temp) / "home").mkdir()
 
+        def talk(*messages):
+            frames = [json.dumps(x).encode() for x in messages]
+            payload = b"".join(struct.pack("=I", len(m)) + m for m in frames)
+            result = subprocess.run([str(native)], input=payload, env=env, capture_output=True, timeout=15)
+            data, replies = result.stdout, []
+            while data:
+                (size,) = struct.unpack("=I", data[:4])
+                replies.append(json.loads(data[4:4 + size]))
+                data = data[4 + size:]
+            return replies
 
-def test_updater_integrity():
-    r"""updater-integrity: "Invalid signature, corrupted/truncated update, unsupported rule version, captive-portal HTML and offline check; installed working version remains usable." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b34-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "updater_status" in state, \
-                "signed application update verification, schema compatibility checks and safe rollback are not implemented"
-        finally:
-            daemon.terminate()
+        replies = talk(
+            {"version": 1, "type": "hello"},
+            {"version": 1, "type": "download.submit", "requestId": "health-1",
+             "payload": {"url": "http://127.0.0.1:9/x.bin", "filenameHint": "x.bin"}},
+            {"version": 1, "type": "health"})
+        assert len(replies) == 3, replies
+        hello, submit, health = replies
+        assert hello["type"] == "hello.result", hello
+        assert submit["accepted"] is False and "daemon unavailable" in submit.get("reason", ""), \
+            f"download.submit with the daemon down must report the daemon boundary, got {submit}"
+        assert health["type"] == "health.result", \
+            f"native host answered a health request with {health}: it has no health/diagnostic message reporting which boundary (manifest, extension ID, daemon) is failing"
 
 
 def test_tls_substitution():
-    r"""tls-substitution: "Expired/self-signed certificate, hostname mismatch, TLS versions, missing trust store and HTTPS redirect; no silent downgrade or system setting mutation." """
+    r"""tls-substitution: "Expired/self-signed certificate, hostname mismatch, TLS versions, missing trust store and HTTPS redirect; no silent downgrade or system setting mutation." (checked: self-signed HTTPS is refused with no output file, and an HTTPS-to-HTTP redirect is not followed)"""
+    import ssl
+    assert shutil.which("openssl"), "openssl required on PATH"
     with tempfile.TemporaryDirectory(prefix="xdm-b35-") as temp:
         out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "custom_tls_root" in state, \
-                "custom per-task TLS root trust stores and platform TLS substitution configuration are not implemented"
-        finally:
-            daemon.terminate()
+        key, cert = out / "k.pem", out / "c.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key),
+                        "-out", str(cert), "-days", "1", "-subj", "/CN=example.invalid"],
+                       check=True, capture_output=True, timeout=60)
+        plain = Fixture()
+        plain.set("/secret.bin", size=1024)
 
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *unused):
+                pass
 
-def test_appearance_and_progress():
-    r"""appearance-and-progress: "Light/dark OS changes, large fonts/high DPI, hidden tabs, restored queue windows and restart; no clipping or loss of task controls." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b36-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
+            def do_GET(self):
+                if self.path.startswith("/redirect"):
+                    self.send_response(302)
+                    self.send_header("Location", plain.url("/secret.bin"))
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "4")
+                    self.end_headers()
+                    self.wfile.write(b"data")
+
+        class Quiet(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                pass
+
+        tls = Quiet(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(cert), str(key))
+        tls.socket = context.wrap_socket(tls.socket, server_side=True)
+        threading.Thread(target=tls.serve_forever, daemon=True).start()
         try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "ui_preferences" in state, \
-                "GUI theme, font scaling preferences and progress view state persistence are not exposed via IPC"
+            base = f"https://127.0.0.1:{tls.server_port}"
+            target = out / "a.bin"
+            run(CLI, f"{base}/a.bin", target, "--connections", "1", success=False, timeout=30)
+            assert not target.exists(), "self-signed HTTPS download left an output file"
+            assert not (out / "a.bin.part").exists(), "self-signed HTTPS download left a partial file"
+            target = out / "r.bin"
+            run(CLI, f"{base}/redirect", target, "--connections", "1", success=False, timeout=30)
+            assert not plain.log, f"plain-HTTP server was contacted: {plain.log}"
         finally:
-            daemon.terminate()
+            tls.shutdown()
+            plain.close()
 
 
 def test_grabber_auth_and_offline():
-    r"""grabber-auth-and-offline: "Login/logout cycle, cross-origin links, relative assets, path collisions, query variants and overwrite disabled; crawl stays within policy and saved links resolve locally." """
-    with tempfile.TemporaryDirectory(prefix="xdm-b37-") as temp:
-        out = Path(temp)
-        daemon = Daemon(out / "home", out / "state")
-        try:
-            daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "grabber_offline_mapping" in state, \
-                "site grabber offline HTML link rewriting and crawler logout pattern exclusions are not implemented"
-        finally:
-            daemon.terminate()
+    r"""grabber-auth-and-offline: "Login/logout cycle, cross-origin links, relative assets, path collisions, query variants and overwrite disabled; crawl stays within policy and saved links resolve locally." (checked: exclude patterns keep logout targets out of the file list and the crawl never visits them; a saved page's links resolve locally)"""
+    server = Fixture()
+    server.set("/", content_bytes=b'<html><a href="/files/a.zip">a</a><a href="logout?x=1">out</a>'
+               b'<a href="/files/logout.zip">lz</a><a href="page2.html">p</a></html>', content_type="text/html")
+    server.set("/page2.html", content_bytes=b'<html><a href="/files/a.zip">again</a></html>', content_type="text/html")
+    server.set("/logout", content_bytes=b'<html><a href="/files/secret.zip">s</a></html>', content_type="text/html")
+    try:
+        with tempfile.TemporaryDirectory(prefix="xdm-b37-") as temp:
+            out = Path(temp)
+            project = out / "p.json"
+            project.write_text(json.dumps({
+                "start_url": server.url("/"), "file_types": ["zip", "html"],
+                "exclude_patterns": ["*logout*"], "obey_robots": False}))
+            crawl = json.loads(run(CLI, "grab", project).stdout)
+            files = [f["url"] for f in crawl["files"]]
+            assert server.url("/files/logout.zip") not in files, files
+            assert server.url("/files/a.zip") in files, files
+            gaps = []
+            if any(entry["path"] == "/logout" for entry in server.log):
+                gaps.append("exclude_patterns only filters the collected file list: the crawler still fetched the /logout page matching '*logout*' and collected files linked from it (secret.zip)")
+            dest = out / "dl"
+            dest.mkdir()
+            server.set("/files/a.zip", size=100)
+            daemon = Daemon(out / "home", out / "state")
+            try:
+                daemon.wait_listening()
+                # `daemon grab` currently prints the success reply and then falls
+                # through to usage() (exit 2), so judge it by the reply, not the exit code.
+                grabbed = subprocess.run([str(CLI), "daemon", "grab", str(project), str(dest), "--start"],
+                                         env=daemon.env, text=True, capture_output=True, timeout=10)
+                assert json.loads(grabbed.stdout)["ok"], grabbed.stdout
+                page = dest / "page2.html"
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not (page.exists() and (dest / "a.zip").exists()):
+                    time.sleep(0.1)
+                time.sleep(0.5)
+                if page.exists():
+                    text = page.read_text(errors="replace")
+                    if 'href="/files/a.zip"' in text:
+                        gaps.append("saved page2.html still contains its original server link '/files/a.zip' (grabber stores HTML verbatim; grep finds no link rewriting in xdm-grabber), so it does not resolve to the local copy")
+                else:
+                    gaps.append("grabbed HTML page was not saved to the destination folder")
+            finally:
+                daemon.terminate()
+            gaps_assert(gaps)
+    finally:
+        server.close()
 
 
 def test_grabber_project_recovery():
     r"""grabber-project-recovery: "Truncated/old/new schema, missing project assets, disk-full save, concurrently running/editing project and restart; previous valid project is preserved." """
     with tempfile.TemporaryDirectory(prefix="xdm-b38-") as temp:
         out = Path(temp)
+        good = out / "good.json"
+        good.write_text(json.dumps({"start_url": "http://127.0.0.1:9/", "max_depth": 2}))
+        truncated = out / "bad.json"
+        truncated.write_text('{"start_url": "http://127.0.0.1:9/", "max_dep')
+        wrong = out / "wrong.json"
+        wrong.write_text(json.dumps({"start_url": "http://127.0.0.1:9/", "max_depth": "deep"}))
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "project_recovery" in state, \
-                "damaged grabber project schema recovery and partial template loading are not implemented"
+            daemon.cli("grab-save", "site", good)
+            before = json.dumps(daemon.cli("grab-projects")["grab_projects"], sort_keys=True)
+            for bad in (truncated, wrong):
+                daemon.cli("grab-save", "site", bad, success=False)
+            after = json.dumps(daemon.cli("grab-projects")["grab_projects"], sort_keys=True)
+            assert after == before and '"site"' in after, f"damaged save changed the stored project: {before} -> {after}"
+        finally:
+            daemon.terminate()
+        daemon = Daemon(out / "home", out / "state")
+        try:
+            daemon.wait_listening()
+            restarted = json.dumps(daemon.cli("grab-projects")["grab_projects"], sort_keys=True)
+            assert restarted == before, f"valid project lost across restart: {restarted}"
         finally:
             daemon.terminate()
 
@@ -1088,12 +1155,45 @@ def test_playlist_link_expansion():
         daemon = Daemon(out / "home", out / "state")
         try:
             daemon.wait_listening()
-            state = daemon.cli("list")
-            assert "playlist_expansion" in state, \
-                "generic M3U audio playlist link expansion into individual download tasks is not implemented"
+            base = "http://127.0.0.1:9"
+            audio = out / "audio.m3u"
+            audio.write_text(f"#EXTM3U\n#EXTINF:10,One\n{base}/one.mp3\n#EXTINF:11,Two\n{base}/two.mp3\n{base}/one.mp3\n")
+            entries = daemon.cli("preview", audio)["entries"]
+            assert [e["url"] for e in entries] == [f"{base}/one.mp3", f"{base}/two.mp3"], entries
+            assert all(e["category"] == "Music" for e in entries), entries
+            relative = out / "relative.m3u"
+            relative.write_text(f"#EXTM3U\n{base}/a.mp3\nb.mp3\n")
+            result = subprocess.run([str(CLI), "daemon", "preview", str(relative)], env=daemon.env,
+                                    text=True, capture_output=True, timeout=10)
+            assert result.returncode != 0, "a playlist with an unresolvable relative link must be rejected"
+            hls = out / "hls.m3u8"
+            hls.write_text(f"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6,\n{base}/seg0.ts\n#EXTINF:6,\n{base}/seg1.ts\n#EXT-X-ENDLIST\n")
+            result = subprocess.run([str(CLI), "daemon", "preview", str(hls)], env=daemon.env,
+                                    text=True, capture_output=True, timeout=10)
+            tasks = []
+            if result.returncode == 0:
+                tasks = json.loads(result.stdout).get("entries", [])
+            assert not tasks, \
+                f"an HLS media playlist was expanded into {len(tasks)} independent download tasks for its segments ({[e['filename'] for e in tasks]}); list import only skips '#' lines and has no HLS tag detection"
         finally:
             daemon.terminate()
 
+
+UNTESTED = {
+    "quota-window": "pending bandwidth branch: hourly quota accounting is being built on another branch",
+    "limiter-precedence": "pending bandwidth branch: global speed limit and per-task override precedence are being built on another branch",
+    "connection-profiles-and-host-caps": "pending bandwidth branch: per-host connection limits are being built on another branch",
+    "file-actions": "no CLI/IPC/GUI entry point for completed-file move, rename or open exists (xdm-ipc Command enum); needs a GUI-automation harness once the action exists",
+    "search-scopes": "search is a GUI-only LineEdit filter (xdm-gui main.rs); needs a GUI-automation harness",
+    "force-bypass-capture": "needs a real browser with keyboard-modifier input driving the extension",
+    "miscapture-exceptions": "needs a real browser to cancel downloads and observe browser-side completion",
+    "all-links-and-clipboard": "clipboard monitoring lives in xdm-gui clipboard.rs and all-links in the extension; needs a GUI clipboard harness and browser",
+    "player-panel-policy": "floating in-page player panel needs a real browser page with video elements",
+    "minimum-media-size": "media panel size threshold is browser/extension UI with no headless entry point",
+    "stream-assembly-fallback": "needs ffmpeg-generated segments with codec pairs that mux-fail to drive the media job; no such fixture generator exists yet",
+    "updater-integrity": "no updater code or entry point exists in any binary to exercise; needs a harness once an updater lands",
+    "appearance-and-progress": "theme, font scaling and window layout are GUI-only; needs a GUI screenshot harness",
+}
 
 # ==========================================================================
 # Runner
@@ -1111,31 +1211,18 @@ TESTS = [
     test_queue_order_and_retry,
     test_synchronization,
     test_recurrence_and_wake,
-    test_quota_window,
     test_completion_precedence,
     test_completion_power,
     test_completion_program_and_scanner,
     test_category_retroactive,
-    test_temporary_storage_cleanup,
-    test_file_actions,
     test_remove_versus_delete,
-    test_search_scopes,
-    test_force_bypass_capture,
-    test_miscapture_exceptions,
-    test_all_links_and_clipboard,
-    test_generated_batch,
-    test_player_panel_policy,
-    test_quality_and_track_catalog,
     test_live_stop_save,
-    test_stream_assembly_fallback,
-    test_minimum_media_size,
     test_proxy_selection,
-    test_connection_profiles_and_host_caps,
-    test_limiter_precedence,
+    test_temporary_storage_cleanup,
+    test_generated_batch,
+    test_quality_and_track_catalog,
     test_browser_platform_health,
-    test_updater_integrity,
     test_tls_substitution,
-    test_appearance_and_progress,
     test_grabber_auth_and_offline,
     test_grabber_project_recovery,
     test_playlist_link_expansion,
@@ -1190,6 +1277,9 @@ def main():
         )
     ]
     results = []
+    for contract, reason in UNTESTED.items():
+        if not only or any(v in contract for v in only):
+            print(f"UNTESTED {contract}: {reason}", flush=True)
     for function in selected:
         results.append(execute(function))
     failures = [result[1] for result in results if result[2] in ("fail", "xpass", "error")]

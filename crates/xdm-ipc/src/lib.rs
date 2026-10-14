@@ -101,6 +101,15 @@ pub enum Command {
         entries: Vec<ImportEntry>,
         enqueue: bool,
     },
+    /// Like `ImportList`, with an explicit duplicate-URL override.
+    ImportListEx {
+        request_id: String,
+        directory: String,
+        entries: Vec<ImportEntry>,
+        enqueue: bool,
+        #[serde(default)]
+        allow_duplicate: bool,
+    },
     ExportList,
     GetTask {
         task_id: i64,
@@ -112,6 +121,14 @@ pub enum Command {
         task_id: i64,
         request_id: String,
         output: String,
+    },
+    /// Like `Redownload`, but with an explicit duplicate-URL override.
+    RedownloadEx {
+        task_id: i64,
+        request_id: String,
+        output: String,
+        #[serde(default)]
+        allow_duplicate: bool,
     },
     Pause {
         task_id: i64,
@@ -135,6 +152,22 @@ pub enum Command {
     QueueCreate {
         name: String,
         limit: usize,
+    },
+    /// Creates a synchronization queue: completed members stay and each
+    /// check re-downloads only members whose remote object changed (Q01/Q10).
+    QueueCreateSync {
+        name: String,
+        limit: usize,
+    },
+    /// Sets (or with `None` clears) a synchronization queue's automatic
+    /// check interval in seconds.
+    QueueSetSync {
+        queue_id: i64,
+        interval_seconds: Option<u64>,
+    },
+    /// Runs a synchronization check of one queue now.
+    QueueCheck {
+        queue_id: i64,
     },
     QueueSetRunning {
         queue_id: i64,
@@ -522,6 +555,9 @@ pub struct GrabReport {
     pub error: Option<String>,
     #[serde(default)]
     pub task_ids: Vec<i64>,
+    /// Files skipped because their URL already belongs to a task.
+    #[serde(default)]
+    pub skipped_duplicates: Vec<SkippedDuplicate>,
 }
 
 /// A persisted grabber project returned by `GrabProjects`.
@@ -623,6 +659,25 @@ pub struct QueueSummary {
     pub run_state: String,
     #[serde(default)]
     pub run_exec: i64,
+    /// Synchronization queue (completed members stay, checked for changes).
+    #[serde(default)]
+    pub sync: bool,
+    /// Automatic check interval in seconds; `None` means manual checks only.
+    #[serde(default)]
+    pub sync_interval: Option<u64>,
+    /// Unix time the last synchronization check started (0 = never).
+    #[serde(default)]
+    pub sync_last: i64,
+}
+
+/// One import/grab entry skipped because its URL already belongs to a task
+/// (or to an earlier entry of the same batch).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedDuplicate {
+    pub index: usize,
+    pub url: String,
+    pub duplicate_of: Option<i64>,
+    pub duplicate_of_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -711,6 +766,9 @@ pub struct Reply {
     /// Limits and quota usage; set by the bandwidth commands.
     #[serde(default)]
     pub bandwidth: Option<BandwidthReport>,
+    /// Entries of an import skipped as duplicates (not an error).
+    #[serde(default)]
+    pub skipped_duplicates: Vec<SkippedDuplicate>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -757,6 +815,7 @@ impl Reply {
             logins: Vec::new(),
             duplicate_of: None,
             bandwidth: None,
+            skipped_duplicates: Vec::new(),
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -783,6 +842,7 @@ impl Reply {
             logins: Vec::new(),
             duplicate_of: None,
             bandwidth: None,
+            skipped_duplicates: Vec::new(),
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -818,6 +878,7 @@ impl Reply {
             logins: Vec::new(),
             duplicate_of: None,
             bandwidth: None,
+            skipped_duplicates: Vec::new(),
         }
     }
 }
@@ -1239,6 +1300,7 @@ mod tests {
             errors: 0,
             error: None,
             task_ids: vec![7, 8],
+            skipped_duplicates: Vec::new(),
         });
         reply.grab_projects = vec![GrabProjectRecord {
             name: "docs".into(),

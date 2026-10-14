@@ -5775,6 +5775,7 @@ dependencies = [
  "interprocess",
  "libc",
  "percent-encoding",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

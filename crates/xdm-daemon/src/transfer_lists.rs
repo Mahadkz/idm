@@ -29,6 +29,7 @@ impl Service {
         directory: String,
         entries: Vec<ImportEntry>,
         enqueue: bool,
+        allow_duplicate: bool,
     ) -> Result<Reply> {
         if request_id.is_empty()
             || request_id.len() > 64
@@ -54,12 +55,12 @@ impl Service {
         let previous = inner
             .db
             .query_row(
-                "SELECT payload_json,task_ids_json FROM imports WHERE request_id=?1",
+                "SELECT payload_json,task_ids_json,skipped_json FROM imports WHERE request_id=?1",
                 [&request_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
             )
             .optional()?;
-        if let Some((old_payload, ids)) = previous {
+        if let Some((old_payload, ids, old_skipped)) = previous {
             if old_payload != payload_json {
                 return Ok(Reply::error(
                     "import request ID belongs to a different batch",
@@ -80,8 +81,22 @@ impl Service {
             }
             let mut reply = Reply::list(Vec::new());
             reply.task_ids = ids;
+            reply.skipped_duplicates = serde_json::from_str(&old_skipped).unwrap_or_default();
             return Ok(reply);
         }
+        // Entries whose URL already belongs to a task (or repeats an earlier
+        // entry) are skipped and reported instead of failing the import.
+        let (kept, skipped) = if allow_duplicate {
+            ((0..entries.len()).collect(), Vec::new())
+        } else {
+            crate::split_duplicates(
+                &inner.db,
+                &entries.iter().map(|entry| entry.url.as_str()).collect::<Vec<_>>(),
+                None,
+            )?
+        };
+        let original_indexes = kept.clone();
+        let entries = kept.iter().map(|&index| entries[index].clone()).collect::<Vec<_>>();
         let outputs = entries
             .iter()
             .map(|entry| {
@@ -136,13 +151,13 @@ impl Service {
                 .ok_or("task ID exhausted")?;
             transaction.execute(
                 "INSERT INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,media_video,media_audio,category,rate_limit) VALUES (?1,?2,?3,?4,'[]',?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![id,format!("import:{request_id}:{index}"),entry.url,output,entry.priority,entry.connections as i64,if enqueue {"queued"} else {"paused"},entry.kind,entry.video.map(|i| i as i64),entry.audio.map(|i| i as i64),&categories[index],entry.rate_limit.map(|rate| rate as i64)],
+                params![id,format!("import:{request_id}:{}", original_indexes[index]),entry.url,output,entry.priority,entry.connections as i64,if enqueue {"queued"} else {"paused"},entry.kind,entry.video.map(|i| i as i64),entry.audio.map(|i| i as i64),&categories[index],entry.rate_limit.map(|rate| rate as i64)],
             )?;
             ids.push(id);
         }
         transaction.execute(
-            "INSERT INTO imports(request_id,payload_json,task_ids_json) VALUES (?1,?2,?3)",
-            params![request_id, payload_json, serde_json::to_string(&ids)?],
+            "INSERT INTO imports(request_id,payload_json,task_ids_json,skipped_json) VALUES (?1,?2,?3,?4)",
+            params![request_id, payload_json, serde_json::to_string(&ids)?, serde_json::to_string(&skipped)?],
         )?;
         transaction.commit()?;
         drop(inner);
@@ -151,6 +166,7 @@ impl Service {
         }
         let mut reply = Reply::list(Vec::new());
         reply.task_ids = ids;
+        reply.skipped_duplicates = skipped;
         Ok(reply)
     }
 

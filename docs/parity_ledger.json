@@ -2,16 +2,16 @@
   "schema_version": 1,
   "summary": {
     "idm_core_queue_contracts.md": {
-      "implemented": 10,
-      "partial": 41,
+      "implemented": 11,
+      "partial": 42,
       "different": 5,
-      "missing": 13
+      "missing": 11
     },
     "idm_browser_behavior_contracts.md": {
-      "implemented": 35,
+      "implemented": 37,
       "different": 8,
-      "missing": 11,
-      "partial": 8
+      "missing": 3,
+      "partial": 14
     },
     "idm_behavior_review.md": {
       "partial": 27,
@@ -64,10 +64,11 @@
       "id": "N05",
       "title": "Ignored or malformed partial response",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): malformed probe can fall back to full transfer; a server that stops honoring ranges during a segmented transfer fails with a typed `RangeUnreliable` error (at offset + reason), stops all workers, and leaves a resumable checkpoint instead of mixed data. [Engine fixture](../tests/integration/http_engine.py) verifies wrong-range handling, the `flip.bin` stall/flip case with `RangeUnreliable`, and flaky non-range retry from zero.",
+      "current_behavior": "Partial: Malformed probe falls back to full transfer; a server that stops honoring ranges during a segmented transfer triggers a typed `RangeUnreliable` error (at offset + reason), stops all workers, and parks the task in `restart_required` with a recorded `restart_reason`, keeping the partial data. `TaskRestart` (IPC/CLI) deletes only that task's `.part` and `.part.meta` and requeues it from byte zero. [Engine fixture](../tests/integration/http_engine.py) verifies wrong-range handling and RangeUnreliable; [restart_required.py](../tests/integration/restart_required.py) verifies restart_required parking, retry suppression, and TaskRestart from byte zero. Suspect bytes are not isolated.",
       "status": "partial",
       "test_refs": [
         "tests/integration/http_engine.py",
+        "tests/integration/restart_required.py",
         "tests/integration/http_fixture.py",
         "crates/xdm-http/src/lib.rs"
       ]
@@ -150,8 +151,8 @@
       "id": "N13",
       "title": "Ignore modification-time preference",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Gap: no configurable ignore-date preference; engine refuses incompatible saved identity.",
-      "status": "missing",
+      "current_behavior": "Implemented: `ResumePolicy { ignore_modification_date: true }` (set per task through `submit_ex` and persisted in the daemon database) lets a resume ignore a changed `Last-Modified` only when the saved length, effective URL and a strong `ETag` all still match. A changed strong ETag or length always refuses. Without a strong ETag (absent or weak) the modification date stays binding. Refusal parks the task in `restart_required` instead of splicing bytes. Verified in `crates/xdm-http` unit tests and [naming_duplicates.py](../tests/integration/naming_duplicates.py) (ignore-date resume completes with matching ETag; default policy and changed ETag park in restart_required).",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/naming_duplicates.py",
         "crates/xdm-http/src/lib.rs",
@@ -163,8 +164,8 @@
       "id": "N14",
       "title": "User-visible filename/type changes",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiation prompt. Native host has independent filename sanitation.",
-      "status": "missing",
+      "current_behavior": "Partial: Resolves server-chosen filenames from `Content-Disposition` (RFC 6266 parameters; RFC 5987 `filename*=UTF-8''` takes precedence over `filename`), falling back to the redirected final URL's last path segment. Names are sanitized: path separators stripped, control and Windows-invalid characters replaced with `_`, trailing dots and spaces removed, and reserved device names such as CON or com1 disambiguated (`CON_`, `com1_.bin`). An occupied server-chosen name receives a ` (2)`-style suffix instead of overwriting. Direct `submit_ex` submissions refuse a normalized duplicate URL with the owning task ID unless `allow_duplicate` is set; legacy submissions keep the old behavior. No extension or MIME renegotiation and no consent prompt exists. Verified in [naming_duplicates.py](../tests/integration/naming_duplicates.py) (UTF-8 disposition, redirect-renamed file, reserved names, collision suffix, duplicate refusal) and `crates/xdm-http` unit tests (filename parsing and sanitization).",
+      "status": "partial",
       "test_refs": [
         "tests/integration/naming_duplicates.py",
         "crates/xdm-http/src/lib.rs",
@@ -334,10 +335,11 @@
       "id": "N31",
       "title": "Stall recovery and adaptive connections",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a connection that delivers no bytes, reopens from the worker's cursor, and counts toward the retry budget. A throttled transfer (rate-limited) is distinguished from a stall — the limiter waits between reads while the socket keeps delivering. [Engine fixture](../tests/integration/http_engine.py) verifies the `stall.bin` recovery (<25 s) and the `throttle.bin` cap holds for the whole file.",
+      "current_behavior": "Implemented: Configurable stall timeout (default 15 s, valid 1–600 s) aborts a connection that delivers no bytes, reopens from the worker's cursor, and counts toward the retry budget. The stall-timeout setting is persisted in the daemon database across restarts, adjustable via CLI / IPC (GetStallTimeout, SetStallTimeout), and available on direct CLI downloads via `--stall-timeout`. Rate-limited throttling is distinguished from stalls. Verified in [engine fixture](../tests/integration/http_engine.py) and [restart_required.py](../tests/integration/restart_required.py).",
       "status": "implemented",
       "test_refs": [
         "tests/integration/http_engine.py",
+        "tests/integration/restart_required.py",
         "tests/integration/http_fixture.py",
         "tests/integration/contracts_core.py",
         "crates/xdm-http/src/lib.rs",
@@ -384,10 +386,11 @@
       "id": "N36",
       "title": "Non-range pause/restart",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: single stream pause retains .part, no meta; next attempt restarts at zero. Disconnects during a full stream retry from zero (bounded four times). Daemon per-file automatic full retry is now governed by queue retry policy (Q07). [Engine fixture](../tests/integration/http_engine.py) verifies non-range pause leaves .part and restart from zero; flaky non-range retry from zero.",
+      "current_behavior": "Partial: Single-stream non-range pause retains .part without metadata; next attempt restarts at zero. Tasks encountering corrupted or non-resumable streams park in `restart_required` with an explicit reason, preventing retry loops until restarted via `TaskRestart` IPC/CLI (which deletes partial data and restarts from byte zero). Disconnects during a full stream retry from zero are bounded by queue retry policy. Verified in [engine fixture](../tests/integration/http_engine.py) and [restart_required.py](../tests/integration/restart_required.py).",
       "status": "partial",
       "test_refs": [
-        "tests/integration/http_engine.py"
+        "tests/integration/http_engine.py",
+        "tests/integration/restart_required.py"
       ]
     },
     {
@@ -506,7 +509,10 @@
       "current_behavior": "Partial: only Main + named ordinary queues; no fixed Synchronization queue or mode. [Daemon IPC fixture](../tests/integration/daemon_ipc.py) verifies queue creation, durable acceptance, and ordering/concurrency.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/daemon_ipc.py"
+        "tests/integration/daemon_ipc.py",
+        "tests/integration/sync_queues.py",
+        "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-ipc/src/lib.rs"
       ]
     },
     {
@@ -597,7 +603,12 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Missing: no conditional refresh/replacement or recurring validator watch.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/sync_queues.py",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "Q11",
@@ -938,8 +949,8 @@
       "id": "B25",
       "title": "B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/bypass key masks and cl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Content script does not attach keyboard or mouse modifier listeners to support keyboard force or bypass download capture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Partial: Content script tracks Alt, Ctrl, Shift and Meta state in `modifierState` from keydown/keyup listeners and clears it on window blur (tested in both content scripts). No extension code reads `modifierState` to force or bypass download capture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -988,8 +999,8 @@
       "id": "B30",
       "title": "B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links collected across fram",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Browser-side batch link collection across frames and selected text is not implemented; batch enqueue is currently supported only via desktop import. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Implemented: Content script `extractLinks` collects http(s) URLs from anchor and image elements, deduplicates them, filters non-HTTP schemes, and extracts URLs from selected text (tested in both content scripts; area and media collection exist in code but are not exercised). Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1008,8 +1019,8 @@
       "id": "B32",
       "title": "B `Db/Zb` + C mouse26: selected text can create desktop selection panel; count/t",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Does not implement selected-text tracking, coordinate calculation, or floating selection panel integration. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Partial: Content script `selectionHandler`, run on selectionchange and mouseup, reports selected text, its bounding client rect and matching link count, and clears state when the selection is empty or collapsed (tested in both content scripts). No desktop selection panel or context-menu integration consumes this state. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1098,8 +1109,8 @@
       "id": "B41",
       "title": "D message1229212981 property/selector extraction→1229212982; C `ka/Cc` rejects d",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Content script does not provide DOM property or selector query helpers for page player metadata extraction. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Implemented: Content script `queryElementMetadata` returns declared element properties (for example src, title and videoWidth) for connected elements and returns null for detached elements (tested in both content scripts). Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1108,8 +1119,8 @@
       "id": "B42",
       "title": "C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rules, dynamic player/li",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Does not implement per-site video adapters, player-specific decoders, or expiring media URL refresh mechanisms. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Partial: Content script defines two versioned site adapters, generic-html5 and embedded-stream, with URL matching and media extraction (tested for shape and lookup only). `refreshUrl` is a stub that returns the same URL with `expired: false`, so expiring streams are not refreshed; the adapters are not used by the inspection path, and there is no host-version gating or auth-expiry reporting. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1128,8 +1139,8 @@
       "id": "B44",
       "title": "C `R/ib/jb/wb/O`: stable element/site IDs, replacement-player association using ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Content script tracks only URLs in a Set without WeakRef player identities or removal cleanup observers. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Partial: Content script `playerRegistry` gives each video or audio element a stable ID through a WeakMap and holds the element through a WeakRef; explicit unregister removes the entry and its overlay panel (tested in both content scripts). The MutationObserver removal path that calls the same cleanup is in code but not exercised by the test. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1158,8 +1169,8 @@
       "id": "B47",
       "title": "C mutation/resize/intersection observers, 200 ms debounce `W/uc`; scroll29/resiz",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Content script lacks 200ms debouncing, resize observers, intersection observers, and detached-player removal event handling. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Partial: Content script runs DOM inspection behind a 200 ms debounce timer for childList/subtree mutations and src, style and class attribute changes (tested: the timer is set on mutation with a 200 ms delay). Removed-node unregistering is in code but not tested; resize and intersection observers, visibility handling and scroll re-inspection are not implemented. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1168,8 +1179,8 @@
       "id": "B48",
       "title": "B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/background, delayed hide;",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Missing: Does not inject an in-page floating video download panel overlay; media streams are listed exclusively in the extension action popup. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "missing",
+      "current_behavior": "Partial: Content script `playerPanel` builds a per-player overlay element with a \"Download with XDM\" button that sends media.download, and supports show, hide and remove (tested in both content scripts). The panel element is never attached to the page document and its position is updated only when called, so no visible overlay is injected into pages. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1320,7 +1331,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.properties: partial; task.resume: partial; task.wait: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "all-links-and-clipboard",
@@ -1328,7 +1341,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.all_links: pending; settings.general: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "appearance-and-progress",
@@ -1336,7 +1351,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "gui.appearance: pending; task.progress: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "browser-platform-health",
@@ -1344,7 +1361,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.integration: partial; platform.privilege: platform-pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "category-retroactive",
@@ -1352,7 +1371,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.categories: partial; settings.paths: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "completion-power",
@@ -1360,7 +1381,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "power.shutdown: pending; power.restart: pending; task.completion: pending; grabber.schedule: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "completion-precedence",
@@ -1368,7 +1391,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.completion: pending; app.exit: partial; queue.schedule: partial; task.progress: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "completion-program-and-scanner",
@@ -1376,7 +1401,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "security.scanner: pending; grabber.schedule: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "connection-profiles-and-host-caps",
@@ -1384,7 +1411,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.connections: partial; settings.host_connections: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "content-identity-recovery",
@@ -1392,7 +1421,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.resume: partial; settings.downloads: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "duplicate-policy",
@@ -1400,7 +1431,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.duplicate: partial; settings.downloads: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "eager-confirmation",
@@ -1408,7 +1441,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.add: partial; settings.downloads: partial; queue.assignment: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "file-actions",
@@ -1416,7 +1451,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.properties: partial; task.completion: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "force-bypass-capture",
@@ -1424,7 +1461,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.shortcuts: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "generated-batch",
@@ -1432,7 +1471,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "batch.generated: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "grabber-auth-and-offline",
@@ -1440,7 +1481,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "grabber.crawl: pending; grabber.destination: pending; grabber.project: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "grabber-project-recovery",
@@ -1448,7 +1491,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "grabber.load: pending; grabber.save: pending; grabber.schedule: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "limiter-precedence",
@@ -1456,7 +1501,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "speed.task: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "live-stop-save",
@@ -1464,7 +1511,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; task.resume: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "minimum-media-size",
@@ -1472,7 +1521,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.minimum: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "miscapture-exceptions",
@@ -1480,7 +1531,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.exceptions: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "player-panel-policy",
@@ -1488,7 +1541,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; browser.types: partial; browser.exceptions: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "playlist-link-expansion",
@@ -1496,7 +1551,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; browser.all_links: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "proxy-selection",
@@ -1504,7 +1561,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.proxy: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "quality-and-track-catalog",
@@ -1512,7 +1571,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "queue-independent-start",
@@ -1520,7 +1581,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.manage: partial; queue.master: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "queue-order-and-retry",
@@ -1528,7 +1591,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.files: partial; queue.schedule: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "quota-window",
@@ -1536,7 +1601,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.quota: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "recurrence-and-wake",
@@ -1544,7 +1611,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.schedule: partial; grabber.schedule: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "remove-versus-delete",
@@ -1552,7 +1621,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.remove: partial; task.remove_completed: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "search-scopes",
@@ -1560,7 +1631,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "gui.search: partial; gui.find_next: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "server-name-reconciliation",
@@ -1568,7 +1641,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.properties: partial; task.add: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "single-use-request",
@@ -1576,7 +1651,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "stream-assembly-fallback",
@@ -1584,7 +1661,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; task.progress: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "synchronization",
@@ -1592,7 +1671,14 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.files: partial; grabber.schedule: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py",
+        "tests/integration/sync_queues.py",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-daemon/src/queues.rs",
+        "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "temporary-storage-cleanup",
@@ -1600,7 +1686,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.paths: partial; task.resume: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "tls-substitution",
@@ -1608,7 +1696,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.connections: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "unknown-length-completion",
@@ -1616,7 +1706,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.progress: partial; task.completion: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "updater-integrity",
@@ -1624,7 +1716,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "app.update: pending; browser.integration: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     }
   ]
 }

@@ -454,20 +454,21 @@ fn daemon_command(args: Vec<String>) {
             }
             return;
         }
-        Some("import") if args.len() == 3 || (args.len() == 4 && args[3] == "--start") => {
+        Some("import") if (3..=5).contains(&args.len()) && args[3..].iter().all(|f| f == "--start" || f == "--allow-duplicates") => {
             let list = xdm_transfer_list::read(&PathBuf::from(&args[1])).unwrap_or_else(|error| {
                 eprintln!("import: {error}");
                 std::process::exit(1);
             });
-            send_daemon(Command::ImportList {
+            send_daemon(Command::ImportListEx {
                 request_id: new_request_id("cli-import"),
                 directory: args[2].clone(),
                 entries: list.entries,
-                enqueue: args.len() == 4,
+                enqueue: args[3..].iter().any(|f| f == "--start"),
+                allow_duplicate: args[3..].iter().any(|f| f == "--allow-duplicates"),
             });
             return;
         }
-        Some("batch") if args.len() == 3 || (args.len() == 4 && args[3] == "--start") => {
+        Some("batch") if (3..=5).contains(&args.len()) && args[3..].iter().all(|f| f == "--start" || f == "--allow-duplicates") => {
             // IDM-style batch download: expand `[001-100]`-style groups into a URL list.
             let list = xdm_transfer_list::expand_batch(&args[1], 10_000)
                 .and_then(|urls| xdm_transfer_list::parse(&urls.join("\n")))
@@ -475,11 +476,12 @@ fn daemon_command(args: Vec<String>) {
                     eprintln!("batch: {error}");
                     std::process::exit(1);
                 });
-            send_daemon(Command::ImportList {
+            send_daemon(Command::ImportListEx {
                 request_id: new_request_id("cli-batch"),
                 directory: args[2].clone(),
                 entries: list.entries,
-                enqueue: args.len() == 4,
+                enqueue: args[3..].iter().any(|f| f == "--start"),
+                allow_duplicate: args[3..].iter().any(|f| f == "--allow-duplicates"),
             });
             return;
         }
@@ -525,6 +527,7 @@ fn daemon_command(args: Vec<String>) {
                 queue_id,
                 enqueue,
             });
+            return;
         }
         Some("grab-status") if args.len() == 2 => {
             send_daemon(Command::GrabStatus { request_id: args[1].clone() });
@@ -687,6 +690,14 @@ fn daemon_command(args: Vec<String>) {
         Some("remove") if args.len() == 2 => Command::Remove {
             task_id: args[1].parse().unwrap_or_else(|_| usage()),
         },
+        Some("redownload") if args.len() == 4 && args[3] == "--allow-duplicate" => {
+            Command::RedownloadEx {
+                task_id: args[1].parse().unwrap_or_else(|_| usage()),
+                request_id: new_request_id("cli-redownload"),
+                output: args[2].clone(),
+                allow_duplicate: true,
+            }
+        }
         Some("redownload") if args.len() == 3 => Command::Redownload {
             task_id: args[1].parse().unwrap_or_else(|_| usage()),
             request_id: new_request_id("cli-redownload"),
@@ -726,6 +737,43 @@ fn daemon_command(args: Vec<String>) {
         },
         Some("queue") if args.len() == 2 && args[1] == "start" => Command::QueueStart,
         Some("queue") if args.len() == 2 && args[1] == "stop" => Command::QueueStop,
+        Some("queue")
+            if (4..=5).contains(&args.len())
+                && args[1] == "create"
+                && args.last().is_some_and(|flag| flag == "--sync") =>
+        {
+            Command::QueueCreateSync {
+                name: args[2].clone(),
+                limit: if args.len() == 5 {
+                    args[3].parse().unwrap_or_else(|_| usage())
+                } else {
+                    2
+                },
+            }
+        }
+        Some("queue") if args.len() == 4 && args[1] == "sync-interval" && args[3] == "off" => {
+            Command::QueueSetSync {
+                queue_id: args[2].parse().unwrap_or_else(|_| usage()),
+                interval_seconds: None,
+            }
+        }
+        Some("queue") if args.len() == 5 && args[1] == "sync-interval" => {
+            let queue_id = args[2].parse().unwrap_or_else(|_| usage());
+            let (a, b): (u64, u64) = (
+                args[3].parse().unwrap_or_else(|_| usage()),
+                args[4].parse().unwrap_or_else(|_| usage()),
+            );
+            Command::QueueSetSync { queue_id, interval_seconds: Some(a * 3600 + b * 60) }
+        }
+        Some("queue") if args.len() == 4 && args[1] == "sync-interval-seconds" => {
+            Command::QueueSetSync {
+                queue_id: args[2].parse().unwrap_or_else(|_| usage()),
+                interval_seconds: Some(args[3].parse().unwrap_or_else(|_| usage())),
+            }
+        }
+        Some("queue") if args.len() == 3 && args[1] == "check" => Command::QueueCheck {
+            queue_id: args[2].parse().unwrap_or_else(|_| usage()),
+        },
         Some("queue") if (args.len() == 3 || args.len() == 4) && args[1] == "create" => {
             Command::QueueCreate {
                 name: args[2].clone(),
@@ -1036,7 +1084,7 @@ fn send_daemon(command: Command) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT]|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
+        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
        xdm-cli daemon grab PROJECT.json ABSOLUTE_DIRECTORY [--start] [--queue ID]
        xdm-cli daemon grab-status REQUEST_ID|grab-save NAME PROJECT.json|grab-projects|grab-remove NAME
        xdm-cli daemon category list|save NAME EXT,EXT|- ABSOLUTE_DIRECTORY [*.site,...]|remove NAME

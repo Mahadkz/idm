@@ -67,7 +67,7 @@ pub(crate) fn valid_queue_name(name: &str) -> bool {
 }
 
 pub(crate) fn queue_summaries(inner: &Inner) -> Result<Vec<QueueSummary>> {
-    let mut statement = inner.db.prepare("SELECT q.id,q.name,q.running,q.max_concurrent,COALESCE(SUM(t.status IN ('queued','quota_wait')),0),COALESCE(SUM(t.status='paused'),0),COALESCE(SUM(t.status='failed'),0),(SELECT COUNT(*) FROM tasks c WHERE c.history_queue_id=q.id AND c.status='complete'),q.solo,q.retry_max,q.retry_delay,q.sched_kind,q.sched_start,q.sched_stop,q.sched_days,q.completion_action,q.run_state,q.run_exec FROM queues q LEFT JOIN tasks t ON t.queue_id=q.id GROUP BY q.id ORDER BY q.id")?;
+    let mut statement = inner.db.prepare("SELECT q.id,q.name,q.running,q.max_concurrent,COALESCE(SUM(t.status IN ('queued','quota_wait')),0),COALESCE(SUM(t.status='paused'),0),COALESCE(SUM(t.status='failed'),0),(SELECT COUNT(*) FROM tasks c WHERE c.status='complete' AND (c.history_queue_id=q.id OR c.queue_id=q.id)),q.solo,q.retry_max,q.retry_delay,q.sched_kind,q.sched_start,q.sched_stop,q.sched_days,q.completion_action,q.run_state,q.run_exec,q.sync,q.sync_interval,q.sync_last FROM queues q LEFT JOIN tasks t ON t.queue_id=q.id GROUP BY q.id ORDER BY q.id")?;
     Ok(statement
         .query_map([], |row| {
             let id = row.get::<_, i64>(0)?;
@@ -95,6 +95,9 @@ pub(crate) fn queue_summaries(inner: &Inner) -> Result<Vec<QueueSummary>> {
                 completion_action: row.get(15)?,
                 run_state: row.get(16)?,
                 run_exec: row.get(17)?,
+                sync: row.get(18)?,
+                sync_interval: row.get::<_, Option<i64>>(19)?.map(|v| v as u64),
+                sync_last: row.get(20)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -311,7 +314,7 @@ pub(crate) fn queue_reply(inner: &Inner, queue_id: i64) -> Result<Reply> {
 }
 
 impl Service {
-    pub(crate) fn queue_create(&self, name: String, limit: usize) -> Result<Reply> {
+    pub(crate) fn queue_create(&self, name: String, limit: usize, sync: bool) -> Result<Reply> {
         if !valid_queue_name(&name) || !(1..=16).contains(&limit) {
             return Ok(Reply::error(
                 "queue name must contain 1–64 bytes and limit must be 1–16",
@@ -328,9 +331,10 @@ impl Service {
             return Ok(Reply::error("at most 32 queues are supported"));
         }
         inner.db.execute(
-            "INSERT INTO queues(name,running,max_concurrent) VALUES (?1,0,?2)",
-            params![name, limit as i64],
+            "INSERT INTO queues(name,running,max_concurrent,sync) VALUES (?1,0,?2,?3)",
+            params![name, limit as i64, sync],
         )?;
+        self.notify_sync();
         queue_reply(&inner, inner.db.last_insert_rowid())
     }
 
@@ -427,6 +431,7 @@ impl Service {
             return Ok(Reply::error("queue not found"));
         }
         inner.pending.remove(&queue_id);
+        self.notify_sync();
         inner.db.execute(
             "UPDATE tasks SET history_queue_id=NULL WHERE history_queue_id=?1",
             [queue_id],
@@ -478,10 +483,17 @@ impl Service {
             match current {
                 None => return Ok(Reply::error("task not found; no tasks moved")),
                 // Completed tasks are not live members: only history moves.
+                // Into a synchronization queue a completed task becomes a live
+                // member (kept and re-checked); out of one it leaves.
                 Some((_, status)) if status == "complete" => {
+                    let target_sync: bool = transaction.query_row(
+                        "SELECT sync FROM queues WHERE id=?1",
+                        [queue_id],
+                        |row| row.get(0),
+                    )?;
                     transaction.execute(
-                        "UPDATE tasks SET history_queue_id=?1 WHERE id=?2",
-                        params![queue_id, id],
+                        "UPDATE tasks SET history_queue_id=?1,queue_id=?3,sync_etag=NULL,sync_lastmod=NULL,sync_len=NULL WHERE id=?2",
+                        params![queue_id, id, if target_sync { queue_id } else { 0 }],
                     )?;
                 }
                 Some((current, _)) if current == queue_id => {}

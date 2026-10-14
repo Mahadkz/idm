@@ -4,10 +4,10 @@
 
 | Document | Implemented | Partial | Different | Missing | Unknown | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| idm_core_queue_contracts.md | 10 | 41 | 5 | 13 | 0 | 69 |
-| idm_browser_behavior_contracts.md | 35 | 8 | 8 | 11 | 0 | 62 |
+| idm_core_queue_contracts.md | 11 | 42 | 5 | 11 | 0 | 69 |
+| idm_browser_behavior_contracts.md | 37 | 14 | 8 | 3 | 0 | 62 |
 | idm_behavior_review.md | 0 | 27 | 0 | 12 | 0 | 39 |
-| **Total** | **45** | **76** | **13** | **36** | **0** | **170** |
+| **Total** | **48** | **83** | **13** | **26** | **0** | **170** |
 
 ## Contract Details
 
@@ -17,7 +17,7 @@
 | N02 | HTTP methods and request bodies | partial | Partial: `Options.method/body` and CLI `--method/--data-file` replay the method … | tests/integration/request_context.py |
 | N03 | One-shot and expiring URLs | partial | Partial: request adoption means a ranged or full one-shot link is fetched by the… | tests/integration/http_engine.py |
 | N04 | Range capability and boundaries | implemented | Implemented static path: strict Content-Range parser, bounded segments, identity… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
-| N05 | Ignored or malformed partial response | partial | Partial (2026-10-13): malformed probe can fall back to full transfer; a server t… | tests/integration/http_engine.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs |
+| N05 | Ignored or malformed partial response | partial | Partial: Malformed probe falls back to full transfer; a server that stops honori… | tests/integration/http_engine.py, tests/integration/restart_required.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs |
 | N06 | Representation compression | different | Restricted: sends Accept-Encoding identity and rejects nonidentity final/range r… | — |
 | N07 | Known and unknown response length | partial | Partial: unknown size streams the adopted full response until EOF with total/ETA… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N08 | Redirect chains and credentials | partial | Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authoriz… | tests/integration/http_engine.py |
@@ -25,8 +25,8 @@
 | N10 | Origin/path login credentials | implemented | Implemented on Linux (2026-10-13): site/path credential store with pattern match… | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs, crates/xdm-daemon/src/main.rs |
 | N11 | Authentication retries and expiry | partial | Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, … | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs |
 | N12 | Remote-object validators | partial | Partial: checks size/final URL/header-context hash and available strong ETag/dat… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
-| N13 | Ignore modification-time preference | missing | Gap: no configurable ignore-date preference; engine refuses incompatible saved i… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
-| N14 | User-visible filename/type changes | missing | Gap in core: destination chosen up front; no Content-Disposition/MIME renegotiat… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N13 | Ignore modification-time preference | implemented | Implemented: `ResumePolicy { ignore_modification_date: true }` (set per task thr… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N14 | User-visible filename/type changes | partial | Partial: Resolves server-chosen filenames from `Content-Disposition` (RFC 6266 p… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N15 | Permission/permanent HTTP errors | partial | Partial:403/404 nonretryable; daemon records failed. Error is text rather than t… | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py |
 | N16 | Transient server/network retries | partial | Partial: probe/full requests retry up to four times on network/408/429/5xx honor… | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py |
 | N17 | Timeouts, DNS and diagnostics | partial | Partial: blocking client has30-second request timeout; network errors propagate.… | tests/integration/contracts_core.py |
@@ -43,12 +43,12 @@
 | N28 | Windows dial-up/VPN and redial | missing | Missing. | — |
 | N29 | Static segment allocation | implemented | Implemented independent static1–16 partitioning; one worker thread per segment,6… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N30 | Dynamic splitting and worker reuse | partial | Partial (2026-10-13): workers form a pool of the requested size that claims idle… | tests/integration/http_engine.py |
-| N31 | Stall recovery and adaptive connections | implemented | Implemented (2026-10-13): configurable stall timeout (default 15 s) aborts a con… | tests/integration/http_engine.py, tests/integration/http_fixture.py, tests/integration/contracts_core.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs |
+| N31 | Stall recovery and adaptive connections | implemented | Implemented: Configurable stall timeout (default 15 s, valid 1–600 s) aborts a c… | tests/integration/http_engine.py, tests/integration/restart_required.py, tests/integration/http_fixture.py, tests/integration/contracts_core.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs |
 | N32 | Overlap/data-corruption validation | partial | Partial safety: strict headers/body lengths/validators; no persisted interval ch… | — |
 | N33 | Preallocation and offset writes | different | Independent implementation: set_len plus positional write_at; not explicit Linux… | — |
 | N34 | Checkpoint schema and write ordering | partial | Partial: version2 JSON .part.meta, per-segment cursor, URLs/context hash/validat… | tests/integration/contracts_core.py |
 | N35 | Pause/resume with one connection | implemented | Implemented (2026-10-13): connections=1 uses a single range worker with a `.part… | tests/integration/http_engine.py |
-| N36 | Non-range pause/restart | partial | Partial: single stream pause retains .part, no meta; next attempt restarts at ze… | tests/integration/http_engine.py |
+| N36 | Non-range pause/restart | partial | Partial: Single-stream non-range pause retains .part without metadata; next atte… | tests/integration/http_engine.py, tests/integration/restart_required.py |
 | N37 | Crash recovery and stale running states | partial | Partial: daemon maps running/pausing→queued at open; segmented checkpoint valida… | tests/integration/contracts_core.py |
 | N38 | Separate temporary and final directories | missing | Missing: .part and.meta sit beside destination; no distinct temp-root setting or… | — |
 | N39 | Disk-full and access-denied assembly | partial | Partial (2026-10-13): disk-space preflight via `fstatvfs` and rollback of failed… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
@@ -106,14 +106,14 @@
 | B22 | B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-enc… | implemented | Implemented: Captures URL-encoded form POST bodies up to 1 MiB with repeated fie… | tests/integration/contracts_browser.mjs |
 | B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | partial | Partial: Declares webNavigation permission and collects initiator/documentUrl ac… | tests/integration/contracts_browser.mjs |
 | B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | partial | Partial: Declares proxy permission and provides a basic proxy diagnostic handsha… | tests/integration/contracts_browser.mjs |
-| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | missing | Missing: Content script does not attach keyboard or mouse modifier listeners to … | tests/integration/contracts_browser.mjs |
+| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | partial | Partial: Content script tracks Alt, Ctrl, Shift and Meta state in `modifierState… | tests/integration/contracts_browser.mjs |
 | B26 | B `Nb/Mb`, R: configured main-frame registration redirect us… | different | Different: Manifest declares declarativeNetRequest permission, but XDM intention… | tests/integration/contracts_browser.mjs |
 | B27 | B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/… | implemented | Implemented: Restricts interception strictly to valid HTTP(S) protocols; unsuppo… | tests/integration/contracts_browser.mjs |
 | B28 | B `Cb/Ea/pa`: link,image,video context download; page/frame/… | implemented | Implemented: Registers context menus for link, image, media (video/audio), and p… | tests/integration/contracts_browser.mjs |
 | B29 | B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor loo… | implemented | Implemented: Context menu link downloads query the DOM content script via page.g… | tests/integration/contracts_browser.mjs |
-| B30 | B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links c… | missing | Missing: Browser-side batch link collection across frames and selected text is n… | tests/integration/contracts_browser.mjs |
+| B30 | B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links c… | implemented | Implemented: Content script `extractLinks` collects http(s) URLs from anchor and… | tests/integration/contracts_browser.mjs |
 | B31 | B `ec`: multi-link type15 initialization, count and batch id… | different | Different: Implements batch.submit native messaging with UUID request IDs and it… | tests/integration/contracts_browser.mjs |
-| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | missing | Missing: Does not implement selected-text tracking, coordinate calculation, or f… | tests/integration/contracts_browser.mjs |
+| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | partial | Partial: Content script `selectionHandler`, run on selectionchange and mouseup, … | tests/integration/contracts_browser.mjs |
 | B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | partial | Partial: Registers a context menu entry for page downloads (xdm-downloads), but … | tests/integration/contracts_browser.mjs |
 | B34 | B `fc`: no host/no links produces browser-side error notific… | implemented | Implemented: Displays a browser notification via chrome.notifications.create whe… | tests/integration/contracts_browser.mjs |
 | B35 | B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, su… | implemented | Implemented: Classifies direct media (MP4, WebM, MP3, etc.) and streaming manife… | tests/integration/contracts_browser.mjs |
@@ -122,14 +122,14 @@
 | B38 | D `ua/Ka/La/Ja`: configured XHR open/header/send/loadend wra… | implemented | Implemented: Injects page_xhr.js at document_start to intercept streaming media … | tests/integration/contracts_browser.mjs |
 | B39 | D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arra… | implemented | Implemented: Injects page_fetch.js at document_start to monitor window.fetch for… | tests/integration/contracts_browser.mjs |
 | B40 | D message1229212978 config dynamically installs/restores wra… | implemented | Implemented: Reports installed hook capabilities and status via hook.status runt… | tests/integration/contracts_browser.mjs |
-| B41 | D message1229212981 property/selector extraction→1229212982;… | missing | Missing: Content script does not provide DOM property or selector query helpers … | tests/integration/contracts_browser.mjs |
-| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | missing | Missing: Does not implement per-site video adapters, player-specific decoders, o… | tests/integration/contracts_browser.mjs |
+| B41 | D message1229212981 property/selector extraction→1229212982;… | implemented | Implemented: Content script `queryElementMetadata` returns declared element prop… | tests/integration/contracts_browser.mjs |
+| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | partial | Partial: Content script defines two versioned site adapters, generic-html5 and e… | tests/integration/contracts_browser.mjs |
 | B43 | C `Tb/H/ib`: video/audio/object/embed/source-child associati… | implemented | Implemented: Scans video, audio, and source elements on initial load and observe… | tests/integration/contracts_browser.mjs |
-| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | missing | Missing: Content script tracks only URLs in a Set without WeakRef player identit… | tests/integration/contracts_browser.mjs |
+| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | partial | Partial: Content script `playerRegistry` gives each video or audio element a sta… | tests/integration/contracts_browser.mjs |
 | B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | partial | Partial: Suppresses 1x1 tracking pixels using getBoundingClientRect, but lacks f… | tests/integration/contracts_browser.mjs |
 | B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | Partial: Runs content scripts in all frames (all_frames: true), but does not tra… | tests/integration/contracts_browser.mjs |
-| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | missing | Missing: Content script lacks 200ms debouncing, resize observers, intersection o… | tests/integration/contracts_browser.mjs |
-| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | missing | Missing: Does not inject an in-page floating video download panel overlay; media… | tests/integration/contracts_browser.mjs |
+| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | Partial: Content script runs DOM inspection behind a 200 ms debounce timer for c… | tests/integration/contracts_browser.mjs |
+| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | Partial: Content script `playerPanel` builds a per-player overlay element with a… | tests/integration/contracts_browser.mjs |
 | B49 | B window listeners and `U/sc/pc/Oa`: window registration6, c… | missing | Missing: Does not register browser window listeners for geometry, fullscreen, DP… | tests/integration/contracts_browser.mjs |
 | B50 | B `ab/xb/Ob/xa`: navigation and history changes refresh site… | implemented | Implemented: Clears tab media catalogs and resets badge counts on navigation via… | tests/integration/contracts_browser.mjs |
 | B51 | C `C/$b/ob` + B `ec`: title from top page/og:title, source c… | implemented | Implemented: Derives human-readable media titles from player element titles, doc… | tests/integration/contracts_browser.mjs |
@@ -257,12 +257,13 @@
 |---|---|---|---|---|
 | N02 | HTTP methods and request bodies | partial | tests/integration/request_context.py | idm_core_queue_contracts.md |
 | N03 | One-shot and expiring URLs | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
-| N05 | Ignored or malformed partial response | partial | tests/integration/http_engine.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs | idm_core_queue_contracts.md |
+| N05 | Ignored or malformed partial response | partial | tests/integration/http_engine.py, tests/integration/restart_required.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs | idm_core_queue_contracts.md |
 | N07 | Known and unknown response length | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N08 | Redirect chains and credentials | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
 | N09 | Cookie/User-Agent/Referer/header forwarding | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N11 | Authentication retries and expiry | partial | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs | idm_core_queue_contracts.md |
 | N12 | Remote-object validators | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
+| N14 | User-visible filename/type changes | partial | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | N15 | Permission/permanent HTTP errors | partial | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N16 | Transient server/network retries | partial | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N17 | Timeouts, DNS and diagnostics | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
@@ -274,7 +275,7 @@
 | N25 | Proxy exclusions and host patterns | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
 | N30 | Dynamic splitting and worker reuse | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
 | N34 | Checkpoint schema and write ordering | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
-| N36 | Non-range pause/restart | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
+| N36 | Non-range pause/restart | partial | tests/integration/http_engine.py, tests/integration/restart_required.py | idm_core_queue_contracts.md |
 | N37 | Crash recovery and stale running states | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N39 | Disk-full and access-denied assembly | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
@@ -293,8 +294,14 @@
 | B15 | B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path ex… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 
-**Count: 41**
+**Count: 48**

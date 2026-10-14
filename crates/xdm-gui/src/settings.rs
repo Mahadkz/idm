@@ -48,6 +48,52 @@ fn default_monitor_clipboard_value() -> bool {
     false
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_language_value() -> String {
+    "en".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnSettings {
+    #[serde(default = "default_true")]
+    pub filename: bool,
+    #[serde(default = "default_true")]
+    pub size: bool,
+    #[serde(default = "default_true")]
+    pub status: bool,
+    #[serde(default = "default_true")]
+    pub time_left: bool,
+    #[serde(default = "default_true")]
+    pub transfer_rate: bool,
+    #[serde(default = "default_true")]
+    pub last_try_date: bool,
+    #[serde(default = "default_true")]
+    pub description: bool,
+    #[serde(default = "default_true")]
+    pub category: bool,
+    #[serde(default = "default_true")]
+    pub queue: bool,
+}
+
+impl Default for ColumnSettings {
+    fn default() -> Self {
+        Self {
+            filename: true,
+            size: true,
+            status: true,
+            time_left: true,
+            transfer_rate: true,
+            last_try_date: true,
+            description: true,
+            category: true,
+            queue: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuiSettings {
     #[serde(default = "default_connections_value")]
@@ -74,6 +120,10 @@ pub struct GuiSettings {
     pub monitor_clipboard: bool,
     #[serde(default = "default_clipboard_extensions_value")]
     pub clipboard_extensions: Vec<String>,
+    #[serde(default)]
+    pub columns: ColumnSettings,
+    #[serde(default = "default_language_value")]
+    pub language: String,
 }
 
 impl GuiSettings {
@@ -105,6 +155,8 @@ impl Default for GuiSettings {
             sound_queue_complete_path: String::new(),
             monitor_clipboard: false,
             clipboard_extensions: default_clipboard_extensions_value(),
+            columns: ColumnSettings::default(),
+            language: default_language_value(),
         }
     }
 }
@@ -116,6 +168,9 @@ pub fn load_settings(data_dir: &Path) -> GuiSettings {
             settings.default_connections = settings.default_connections.clamp(1, 16);
             if settings.theme != "light" && settings.theme != "dark" && settings.theme != "system" {
                 settings.theme = "system".to_string();
+            }
+            if settings.language != "en" && settings.language != "ur" {
+                settings.language = "en".to_string();
             }
             if settings.clipboard_extensions.is_empty() {
                 settings.clipboard_extensions = default_clipboard_extensions_value();
@@ -132,6 +187,9 @@ pub fn save_settings(data_dir: &Path, settings: &GuiSettings) -> Result<(), Stri
     valid.default_connections = valid.default_connections.clamp(1, 16);
     if valid.theme != "light" && valid.theme != "dark" && valid.theme != "system" {
         valid.theme = "system".to_string();
+    }
+    if valid.language != "en" && valid.language != "ur" {
+        valid.language = "en".to_string();
     }
     if valid.clipboard_extensions.is_empty() {
         valid.clipboard_extensions = default_clipboard_extensions_value();
@@ -150,6 +208,10 @@ mod tests {
         let s = GuiSettings::default();
         assert_eq!(s.default_connections, 8);
         assert_eq!(s.theme, "system");
+        assert_eq!(s.language, "en");
+        assert!(s.columns.filename);
+        assert!(s.columns.size);
+        assert!(s.columns.status);
         assert!(s.confirm_remove);
         assert!(!s.start_minimized);
         assert!(!s.monitor_clipboard);
@@ -164,6 +226,9 @@ mod tests {
     fn test_save_load_roundtrip() {
         let dir = std::env::temp_dir().join(format!("xdm-test-save-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+        let mut cols = ColumnSettings::default();
+        cols.size = false;
+        cols.description = false;
         let s = GuiSettings {
             default_connections: 12,
             theme: "dark".into(),
@@ -177,10 +242,16 @@ mod tests {
             sound_queue_complete_path: "/sounds/queue.wav".into(),
             monitor_clipboard: true,
             clipboard_extensions: vec!["iso".into(), "dmg".into()],
+            columns: cols,
+            language: "ur".into(),
         };
         save_settings(&dir, &s).unwrap();
         let loaded = load_settings(&dir);
         assert_eq!(loaded, s);
+        assert!(!loaded.columns.size);
+        assert!(!loaded.columns.description);
+        assert!(loaded.columns.filename);
+        assert_eq!(loaded.language, "ur");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -207,6 +278,9 @@ mod tests {
         let loaded = load_settings(&dir);
         assert_eq!(loaded.default_connections, 4);
         assert_eq!(loaded.theme, "system");
+        assert_eq!(loaded.language, "en");
+        assert!(loaded.columns.filename);
+        assert!(loaded.columns.size);
         assert!(loaded.confirm_remove);
         assert!(!loaded.start_minimized);
         assert!(!loaded.monitor_clipboard);

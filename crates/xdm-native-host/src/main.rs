@@ -484,14 +484,118 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
     }
 }
 
+/// Native messaging manifests this host can detect for the current user.
+fn manifest_report() -> Value {
+    const NAME: &str = "org.xdm.browser";
+    let exe = std::env::current_exe().ok();
+    let mut found = Vec::new();
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let places = [
+            ("firefox", ".mozilla/native-messaging-hosts"),
+            ("chrome", ".config/google-chrome/NativeMessagingHosts"),
+            ("chromium", ".config/chromium/NativeMessagingHosts"),
+            ("edge", ".config/microsoft-edge/NativeMessagingHosts"),
+        ];
+        for (browser, dir) in places {
+            let Some(home) = &home else { break };
+            let path = home.join(dir).join(format!("{NAME}.json"));
+            if !path.is_file() {
+                continue;
+            }
+            let manifest: Value = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(Value::Null);
+            let target = manifest.get("path").and_then(Value::as_str);
+            let target_exists = target.is_some_and(|p| std::path::Path::new(p).is_file());
+            let matches_self = match (target, &exe) {
+                (Some(target), Some(exe)) => {
+                    std::fs::canonicalize(target).ok() == std::fs::canonicalize(exe).ok()
+                }
+                _ => false,
+            };
+            found.push(json!({
+                "browser": browser,
+                "manifest": path.to_string_lossy(),
+                "valid": !manifest.is_null(),
+                "hostPath": target,
+                "hostPathExists": target_exists,
+                "hostPathIsThisBinary": matches_self,
+                "allowedOrigins": manifest.get("allowed_origins").cloned().unwrap_or(Value::Null),
+                "allowedExtensions": manifest.get("allowed_extensions").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let keys = [
+            ("firefox", r"HKCU\Software\Mozilla\NativeMessagingHosts"),
+            ("chrome", r"HKCU\Software\Google\Chrome\NativeMessagingHosts"),
+            ("chromium", r"HKCU\Software\Chromium\NativeMessagingHosts"),
+            ("edge", r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts"),
+        ];
+        for (browser, key) in keys {
+            let output = std::process::Command::new("reg")
+                .args(["query", &format!(r"{key}\{NAME}"), "/ve"])
+                .output();
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let manifest = text.split("REG_SZ").nth(1).map(|s| s.trim().to_owned());
+                    let exists = manifest
+                        .as_deref()
+                        .is_some_and(|p| std::path::Path::new(p).is_file());
+                    found.push(json!({"browser": browser, "manifest": manifest, "valid": exists}));
+                }
+            }
+        }
+    }
+    json!({"name": NAME, "registered": !found.is_empty(), "entries": found})
+}
+
+/// Reports which boundary is failing: manifest registration, the host
+/// itself, or the daemon. Browser fallback stays the extension's call.
+fn health(paths: &Paths) -> Value {
+    let daemon = match paths.request(Command::ListPage {
+        offset: 0,
+        limit: 1,
+        sort: None,
+        filter: None,
+    }) {
+        Ok(reply) if reply.ok => json!({"reachable": true, "version": reply.daemon_version, "tasks": reply.total}),
+        Ok(reply) => json!({"reachable": true, "error": reply.error}),
+        Err(error) => json!({"reachable": false, "error": format!("daemon unavailable: {error}")}),
+    };
+    let manifest = manifest_report();
+    let mut failing = Vec::new();
+    if daemon["reachable"] != json!(true) {
+        failing.push("daemon");
+    }
+    if manifest["registered"] != json!(true) {
+        failing.push("manifest");
+    }
+    json!({
+        "version": 1,
+        "type": "health.result",
+        "nativeHost": {"version": env!("CARGO_PKG_VERSION"), "path": std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned())},
+        "daemon": daemon,
+        "manifest": manifest,
+        "failing": failing,
+        "ok": failing.is_empty(),
+    })
+}
+
 fn process(message: Value, paths: &Paths) -> Value {
     if message.get("version").and_then(Value::as_u64) != Some(1) {
         return json!({"version":1,"type":"error","reason":"unsupported version"});
     }
     match message.get("type").and_then(Value::as_str) {
         Some("hello") => {
-            json!({"version":1,"type":"hello.result","capabilities":["download.submit","media.inspect","media.submit"]})
+            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","media.inspect","media.submit"]})
         }
+        Some("health") => health(paths),
         Some("download.submit") => submit(&message, paths),
         Some("media.inspect") => inspect_media(&message),
         Some("media.submit") => submit_media(&message, paths),

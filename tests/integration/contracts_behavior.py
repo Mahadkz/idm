@@ -57,8 +57,6 @@ EXPECTED_FAIL = {
     "category-retroactive": "retroactive category rule reassignment for existing completed tasks without moving files is not implemented",
     "remove-versus-delete": "bulk task removal with optional on-disk completed file deletion policy is not supported in the daemon",
     "proxy-selection": "PAC script fetching and execution, WPAD discovery, and protocol-selective proxy routing are not implemented",
-    "temporary-storage-cleanup": "removing a paused partial task leaves its .part/.part.meta behind (the daemon only deletes parts in the restart path, xdm-daemon main.rs) and no scan reclaims unowned parts",
-    "browser-platform-health": "xdm-native-host handles only hello/download.submit/media.inspect/media.submit; there is no health message (grep 'health' finds nothing)",
     "grabber-auth-and-offline": "exclude_patterns filter collected files only so logout pages are still crawled, and saved HTML is stored verbatim without local link rewriting",
     "playlist-link-expansion": "list import treats every non-comment line as a task so HLS media playlists expand into segment tasks (no HLS tag detection)",
 }
@@ -852,7 +850,7 @@ def gaps_assert(gaps):
 
 
 def test_temporary_storage_cleanup():
-    r"""temporary-storage-cleanup: "Disk full during download/publication, cross-volume move, file-size-limited volume, abandoned/live checkpoints and symlinks; only confirmed unowned parts are eligible." (checked: removing a paused partial task deletes its own parts, and a stale unowned part next to live tasks is reclaimed after restart)"""
+    r"""temporary-storage-cleanup: "Disk full during download/publication, cross-volume move, file-size-limited volume, abandoned/live checkpoints and symlinks; only confirmed unowned parts are eligible." (checked: removing a paused partial task with delete_partial removes its own parts, and an unowned pair is found by PartialScan and deleted through PartialDelete; disk-full, cross-volume and size-limited volume cases are not exercised here)"""
     server = Fixture()
     server.set("/big.bin", size=8 * MIB)
     server.set("/next.bin", size=1024)
@@ -873,10 +871,10 @@ def test_temporary_storage_cleanup():
                 daemon.cli("pause", task_id)
                 assert (work / "big.bin.part").exists(), "partial file never appeared"
                 daemon.wait_status(task_id, ("paused",), seconds=8)
-                daemon.cli("remove", task_id)
+                daemon.cli("remove", task_id, "--delete-partial")
                 leftovers = sorted(p.name for p in work.iterdir())
                 if leftovers:
-                    gaps.append(f"removing a paused partial task left temporary files behind: {leftovers} (the daemon only deletes parts in the restart path)")
+                    gaps.append(f"removing a paused partial task with --delete-partial left temporary files behind: {leftovers}")
 
                 orphan = work / "ghost.bin.part"
                 meta = work / "ghost.bin.part.meta"
@@ -885,15 +883,14 @@ def test_temporary_storage_cleanup():
                 old = time.time() - 90 * 86400
                 os.utime(orphan, (old, old))
                 os.utime(meta, (old, old))
-            finally:
-                daemon.terminate()
-            daemon = Daemon(out / "home", out / "state")
-            try:
-                daemon.wait_listening()
-                daemon.submit(server.url("/next.bin"), work / "next.bin")
-                time.sleep(1)
-                if orphan.exists() or meta.exists():
-                    gaps.append("a 90-day-old .part/.part.meta pair owned by no task was still on disk after daemon restart and a new task in the same folder: unowned parts are never reclaimed")
+                # An unowned pair is listed by a scan and only a scanned path may be deleted.
+                scan = daemon.cli("partials", work)["partials"]
+                if [Path(e["output"]).name for e in scan] != ["ghost.bin"]:
+                    gaps.append(f"scan of unowned parts returned {scan}")
+                else:
+                    daemon.cli("partials-delete", work, orphan, meta)
+                    if orphan.exists() or meta.exists():
+                        gaps.append("scanned unowned .part/.part.meta pair survived partials-delete")
                 gaps_assert(gaps)
             finally:
                 daemon.terminate()
@@ -1186,7 +1183,7 @@ UNTESTED = {
     "quota-window": "pending bandwidth branch: hourly quota accounting is being built on another branch",
     "limiter-precedence": "pending bandwidth branch: global speed limit and per-task override precedence are being built on another branch",
     "connection-profiles-and-host-caps": "pending bandwidth branch: per-host connection limits are being built on another branch",
-    "file-actions": "no CLI/IPC/GUI entry point for completed-file move, rename or open exists (xdm-ipc Command enum); needs a GUI-automation harness once the action exists",
+    "file-actions": "completed-file move/rename exists as IPC TaskMoveFile (tested in daemon_gaps.py); opening files and the GUI actions still need a GUI-automation harness",
     "search-scopes": "search is a GUI-only LineEdit filter (xdm-gui main.rs); needs a GUI-automation harness",
     "force-bypass-capture": "needs a real browser with keyboard-modifier input driving the extension",
     "miscapture-exceptions": "needs a real browser to cancel downloads and observe browser-side completion",

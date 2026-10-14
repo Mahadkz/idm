@@ -67,7 +67,7 @@ pub(crate) fn valid_queue_name(name: &str) -> bool {
 }
 
 pub(crate) fn queue_summaries(inner: &Inner) -> Result<Vec<QueueSummary>> {
-    let mut statement = inner.db.prepare("SELECT q.id,q.name,q.running,q.max_concurrent,COALESCE(SUM(t.status='queued'),0),COALESCE(SUM(t.status='paused'),0),COALESCE(SUM(t.status='failed'),0),(SELECT COUNT(*) FROM tasks c WHERE c.history_queue_id=q.id AND c.status='complete'),q.solo,q.retry_max,q.retry_delay,q.sched_kind,q.sched_start,q.sched_stop,q.sched_days,q.completion_action,q.run_state,q.run_exec FROM queues q LEFT JOIN tasks t ON t.queue_id=q.id GROUP BY q.id ORDER BY q.id")?;
+    let mut statement = inner.db.prepare("SELECT q.id,q.name,q.running,q.max_concurrent,COALESCE(SUM(t.status IN ('queued','quota_wait')),0),COALESCE(SUM(t.status='paused'),0),COALESCE(SUM(t.status='failed'),0),(SELECT COUNT(*) FROM tasks c WHERE c.history_queue_id=q.id AND c.status='complete'),q.solo,q.retry_max,q.retry_delay,q.sched_kind,q.sched_start,q.sched_stop,q.sched_days,q.completion_action,q.run_state,q.run_exec FROM queues q LEFT JOIN tasks t ON t.queue_id=q.id GROUP BY q.id ORDER BY q.id")?;
     Ok(statement
         .query_map([], |row| {
             let id = row.get::<_, i64>(0)?;
@@ -271,7 +271,7 @@ pub(crate) fn queue_tick(inner: &mut Inner) -> Result<()> {
     for (id, running, solo, state) in queues {
         let eligible = running && (global || solo);
         let pending: i64 = inner.db.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE queue_id=?1 AND status IN ('queued','running','pausing')",
+            "SELECT COUNT(*) FROM tasks WHERE queue_id=?1 AND status IN ('queued','running','pausing','quota_wait')",
             [id],
             |row| row.get(0),
         )?;
@@ -1149,6 +1149,41 @@ mod tests {
         assert_eq!(adapter.0.load(Ordering::Relaxed), 0);
         let events = service.command(Command::QueueEvents { queue_id: q }).unwrap().queue_events;
         assert_eq!(events[0].action_status, "suppressed");
+    }
+
+    #[test]
+    fn quota_wait_tasks_keep_the_queue_cycle_open() {
+        let (service, _, adapter) = service(1000);
+        let q = queue(&service, "Quota");
+        service
+            .command(Command::QueueSetCompletionAction {
+                queue_id: q,
+                action: CompletionAction::Shutdown,
+                confirm: true,
+                countdown_seconds: Some(60),
+            })
+            .unwrap();
+        let done = submit(&service, "qw-done");
+        let waiting = submit(&service, "qw-wait");
+        service.command(Command::AssignQueue { queue_id: q, task_ids: vec![done, waiting] }).unwrap();
+        service.command(Command::QueueStartOne { queue_id: q }).unwrap();
+        service.command(Command::List).unwrap();
+        service.command(Command::SetQuota { mib: 1, window_seconds: 3600 }).unwrap();
+        service.inner.lock().unwrap().governor.set_used(2 * 1024 * 1024);
+        finish(&service, waiting, "quota_wait", None);
+        finish(&service, done, "complete", None);
+        let reply = service.command(Command::List).unwrap();
+        assert_eq!(task_state(&service, waiting).0, "quota_wait");
+        assert!(service.command(Command::CompletionStatus).unwrap().completion_pending.is_empty());
+        assert!(service.command(Command::QueueEvents { queue_id: q }).unwrap().queue_events.is_empty());
+        assert_eq!(adapter.0.load(Ordering::Relaxed), 0);
+        let _ = reply;
+        let summaries = crate::queue_summaries(&service.inner.lock().unwrap()).unwrap();
+        assert_eq!(summaries.iter().find(|s| s.id == q).unwrap().queued, 1);
+        // Priority edits and pauses apply to a quota-waiting task.
+        assert!(service.command(Command::SetPriority { task_id: waiting, priority: 2 }).unwrap().ok);
+        assert!(service.command(Command::Pause { task_id: waiting }).unwrap().ok);
+        assert_eq!(task_state(&service, waiting).0, "paused");
     }
 
     #[test]

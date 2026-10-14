@@ -1273,7 +1273,7 @@ impl Service {
                     .lock()
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
                 let updated = inner.db.execute(
-                    "UPDATE tasks SET priority=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND status IN ('queued','paused','failed')",
+                    "UPDATE tasks SET priority=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND status IN ('queued','paused','failed','quota_wait')",
                     params![priority, task_id],
                 )?;
                 drop(inner);

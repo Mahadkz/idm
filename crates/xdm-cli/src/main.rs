@@ -525,6 +525,7 @@ fn daemon_command(args: Vec<String>) {
                 queue_id,
                 enqueue,
             });
+            return;
         }
         Some("grab-status") if args.len() == 2 => {
             send_daemon(Command::GrabStatus { request_id: args[1].clone() });

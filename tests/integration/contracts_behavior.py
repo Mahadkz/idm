@@ -1095,10 +1095,9 @@ def test_grabber_auth_and_offline():
             daemon = Daemon(out / "home", out / "state")
             try:
                 daemon.wait_listening()
-                # `daemon grab` currently prints the success reply and then falls
-                # through to usage() (exit 2), so judge it by the reply, not the exit code.
                 grabbed = subprocess.run([str(CLI), "daemon", "grab", str(project), str(dest), "--start"],
                                          env=daemon.env, text=True, capture_output=True, timeout=10)
+                assert grabbed.returncode == 0, grabbed.stderr
                 assert json.loads(grabbed.stdout)["ok"], grabbed.stdout
                 page = dest / "page2.html"
                 deadline = time.monotonic() + 10

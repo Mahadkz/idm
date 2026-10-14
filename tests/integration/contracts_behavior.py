@@ -930,7 +930,11 @@ def test_generated_batch():
             daemon.cli("batch", f"{base}/m[a-b]x[1-2]", dest)
             assert len(urls()) == before + 4, urls()
             before = len(urls())
-            assert batch_fails(f"{base}/n[08-10]"), "re-running an identical batch must be refused as duplicate destinations"
+            # Duplicate policy: an identical re-run is accepted but every entry is reported as a
+            # skipped duplicate and no task is added.
+            rerun = daemon.cli("batch", f"{base}/n[08-10]", dest)
+            skipped = {entry["url"] for entry in rerun.get("skipped_duplicates", [])}
+            assert {f"{base}/n08", f"{base}/n09", f"{base}/n10"} <= skipped, rerun
             assert len(urls()) == before, "re-running an identical batch must not add duplicate tasks"
             assert batch_fails(f"{base}/z[0000-99999]"), "an over-limit batch was accepted"
             for bad in (f"{base}/b[9-x]", f"{base}/b[1-"):

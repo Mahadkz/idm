@@ -22,6 +22,7 @@ pub(crate) struct GrabState {
     pub(crate) errors: usize,
     pub(crate) error: Option<String>,
     pub(crate) task_ids: Vec<i64>,
+    pub(crate) skipped: Vec<xdm_ipc::SkippedDuplicate>,
 }
 
 /// A crawl registered for launch by the worker loop, which owns the shared
@@ -46,6 +47,7 @@ impl GrabState {
             errors: self.errors,
             error: self.error.clone(),
             task_ids: self.task_ids.clone(),
+            skipped_duplicates: self.skipped.clone(),
         }
     }
 }
@@ -201,9 +203,10 @@ impl Service {
                     state.errors = result.errors.len();
                 }
                 match self.add_grab_tasks(&request_id, result, &directory, queue_id, enqueue) {
-                    Ok(task_ids) => {
+                    Ok((task_ids, skipped)) => {
                         if let Ok(mut state) = state.lock() {
                             state.task_ids = task_ids;
+                            state.skipped = skipped;
                             state.state = "done".into();
                         }
                     }
@@ -234,18 +237,20 @@ impl Service {
         directory: &str,
         queue_id: Option<i64>,
         enqueue: bool,
-    ) -> Result<Vec<i64>> {
+    ) -> Result<(Vec<i64>, Vec<xdm_ipc::SkippedDuplicate>)> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
         if !inner.grabs.contains_key(request_id) {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
+        let urls = result.files.iter().take(xdm_transfer_list::MAX_ENTRIES).map(|f| f.url.as_str()).collect::<Vec<_>>();
+        let (kept, skipped) = crate::split_duplicates(&inner.db, &urls, None)?;
         let rules = load_rules(&inner.db)?;
         let mut entries = Vec::new();
         let mut headers = Vec::new();
-        for file in result.files.iter().take(xdm_transfer_list::MAX_ENTRIES) {
+        for file in kept.iter().map(|&index| &result.files[index]) {
             let filename = grab_filename(&file.url);
             headers.push(if file.referer.is_empty() {
                 "[]".to_string()
@@ -274,7 +279,7 @@ impl Service {
         // filenames get the same treatment as imports.
         xdm_transfer_list::export_names(&mut entries);
         if entries.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), skipped));
         }
         let outputs = entries
             .iter()
@@ -311,7 +316,7 @@ impl Service {
                 "INSERT INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,category,queue_id,method) VALUES (?1,?2,?3,?4,?5,1,8,?6,'http',?7,?8,'GET')",
                 params![
                     id,
-                    format!("grab:{request_id}:{index}"),
+                    format!("grab:{request_id}:{}", kept[index]),
                     entry.url,
                     output,
                     &headers[index],
@@ -327,7 +332,7 @@ impl Service {
         if enqueue {
             self.wake.notify_one();
         }
-        Ok(task_ids)
+        Ok((task_ids, skipped))
     }
 
     pub(crate) fn grab_status(&self, request_id: &str) -> Result<Reply> {

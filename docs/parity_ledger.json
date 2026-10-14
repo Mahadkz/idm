@@ -1323,7 +1323,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.properties: partial; task.resume: partial; task.wait: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "all-links-and-clipboard",
@@ -1331,7 +1333,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.all_links: pending; settings.general: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "appearance-and-progress",
@@ -1339,7 +1343,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "gui.appearance: pending; task.progress: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "browser-platform-health",
@@ -1347,7 +1353,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.integration: partial; platform.privilege: platform-pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "category-retroactive",
@@ -1355,7 +1363,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.categories: partial; settings.paths: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "completion-power",
@@ -1363,7 +1373,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "power.shutdown: pending; power.restart: pending; task.completion: pending; grabber.schedule: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "completion-precedence",
@@ -1371,7 +1383,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.completion: pending; app.exit: partial; queue.schedule: partial; task.progress: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "completion-program-and-scanner",
@@ -1379,7 +1393,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "security.scanner: pending; grabber.schedule: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "connection-profiles-and-host-caps",
@@ -1387,7 +1403,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.connections: partial; settings.host_connections: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "content-identity-recovery",
@@ -1395,7 +1413,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.resume: partial; settings.downloads: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "duplicate-policy",
@@ -1403,7 +1423,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.duplicate: partial; settings.downloads: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "eager-confirmation",
@@ -1411,7 +1433,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.add: partial; settings.downloads: partial; queue.assignment: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "file-actions",
@@ -1419,7 +1443,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.properties: partial; task.completion: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "force-bypass-capture",
@@ -1427,7 +1453,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.shortcuts: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "generated-batch",
@@ -1435,7 +1463,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "batch.generated: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "grabber-auth-and-offline",
@@ -1443,7 +1473,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "grabber.crawl: pending; grabber.destination: pending; grabber.project: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "grabber-project-recovery",
@@ -1451,7 +1483,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "grabber.load: pending; grabber.save: pending; grabber.schedule: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "limiter-precedence",
@@ -1459,7 +1493,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "speed.task: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "live-stop-save",
@@ -1467,7 +1503,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; task.resume: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "minimum-media-size",
@@ -1475,7 +1513,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.minimum: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "miscapture-exceptions",
@@ -1483,7 +1523,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.exceptions: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "player-panel-policy",
@@ -1491,7 +1533,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; browser.types: partial; browser.exceptions: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "playlist-link-expansion",
@@ -1499,7 +1543,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; browser.all_links: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "proxy-selection",
@@ -1507,7 +1553,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.proxy: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "quality-and-track-catalog",
@@ -1515,7 +1563,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "queue-independent-start",
@@ -1523,7 +1573,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.manage: partial; queue.master: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "queue-order-and-retry",
@@ -1531,7 +1583,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.files: partial; queue.schedule: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "quota-window",
@@ -1539,7 +1593,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.quota: pending",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "recurrence-and-wake",
@@ -1547,7 +1603,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.schedule: partial; grabber.schedule: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "remove-versus-delete",
@@ -1555,7 +1613,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.remove: partial; task.remove_completed: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "search-scopes",
@@ -1563,7 +1623,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "gui.search: partial; gui.find_next: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "server-name-reconciliation",
@@ -1571,7 +1633,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.properties: partial; task.add: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "single-use-request",
@@ -1579,7 +1643,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "stream-assembly-fallback",
@@ -1587,7 +1653,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; task.progress: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "synchronization",
@@ -1595,7 +1663,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "queue.files: partial; grabber.schedule: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "temporary-storage-cleanup",
@@ -1603,7 +1673,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.paths: partial; task.resume: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "tls-substitution",
@@ -1611,7 +1683,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "settings.connections: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "unknown-length-completion",
@@ -1619,7 +1693,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "task.progress: partial; task.completion: pending",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     },
     {
       "id": "updater-integrity",
@@ -1627,7 +1703,9 @@
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "app.update: pending; browser.integration: partial",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/contracts_behavior.py"
+      ]
     }
   ]
 }

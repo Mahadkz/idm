@@ -144,45 +144,45 @@
 | B60 | B `$a`100: echo family when acknowledgment requested; defaul… | different | Different: Uses versioned, allowlisted JSON operations (version: 1, type: 'downl… | tests/integration/contracts_browser.mjs |
 | B61 | Native host `00402830` startup discovers Windows session/pro… | different | Different: Independent native host registered as org.xdm.browser communicating o… | tests/integration/contracts_browser.mjs |
 | B62 | Standard four-byte native-endian UTF-8 JSON length, outer JS… | different | Different: Uses standard native-messaging JSON framing with a 1 MiB bound and sc… | tests/integration/contracts_browser.mjs |
-| address-refresh | Expired task enters a wait-for-new-session/address flow; one… | partial | task.properties: partial; task.resume: partial; task.wait: partial | — |
-| all-links-and-clipboard | All-link collection can hide HTML/images/duplicates and use … | partial | browser.all_links: pending; settings.general: partial | — |
-| appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | gui.appearance: pending; task.progress: partial | — |
-| browser-platform-health | Original health depends on elevation, BFE, drivers/helpers a… | partial | browser.integration: partial; platform.privilege: platform-pending | — |
-| category-retroactive | Extension/site rules and last-used paths classify future fil… | partial | settings.categories: partial; settings.paths: partial | — |
-| completion-power | Task, queue and grabber completion can request shutdown/slee… | missing | power.shutdown: pending; power.restart: pending; task.completion: pending; grabb… | — |
-| completion-precedence | Per-file settings can be unavailable during queue processing… | partial | task.completion: pending; app.exit: partial; queue.schedule: partial; task.progr… | — |
-| completion-program-and-scanner | Completion can open a configured file; scanner arguments acc… | missing | security.scanner: pending; grabber.schedule: pending | — |
-| connection-profiles-and-host-caps | Default profile/connection count and per-server exceptions a… | partial | settings.connections: partial; settings.host_connections: pending | — |
-| content-identity-recovery | Changed date/size can restart a task; date checking can be d… | partial | task.resume: partial; settings.downloads: partial | — |
-| duplicate-policy | Remembered duplicate policies are ask, numbered duplicate, o… | partial | task.duplicate: partial; settings.downloads: partial | — |
-| eager-confirmation | Transfer may start while confirmation is visible, so Downloa… | partial | task.add: partial; settings.downloads: partial; queue.assignment: partial | — |
-| file-actions | Move/rename, open-with, configurable double-click and comple… | partial | task.properties: partial; task.completion: pending | — |
-| force-bypass-capture | Force and bypass modifier sets must not conflict; force capt… | missing | browser.shortcuts: pending | — |
-| generated-batch | A URL wildcard expands numeric/alphabetic sequences with wid… | missing | batch.generated: pending | — |
-| grabber-auth-and-offline | Crawler supports manual login, excludes logout patterns, use… | missing | grabber.crawl: pending; grabber.destination: pending; grabber.project: pending | — |
-| grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | missing | grabber.load: pending; grabber.save: pending; grabber.schedule: pending | — |
-| limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | speed.task: partial | — |
-| live-stop-save | Stopping live recording can finalize captured content, with … | partial | media.overlay: pending; task.resume: partial | — |
-| minimum-media-size | Separate audio/video panel thresholds only apply when total … | missing | media.minimum: pending | — |
-| miscapture-exceptions | Two cancellations or similar mistaken captures can prompt fo… | missing | browser.exceptions: pending | — |
-| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | media.overlay: pending; browser.types: partial; browser.exceptions: pending | — |
-| playlist-link-expansion | Downloaded M3U can offer its MP3 links as one download or a … | missing | media.overlay: pending; browser.all_links: pending | — |
-| proxy-selection | Manual, auto-detected, system and none modes; PAC, protocol-… | missing | settings.proxy: pending | — |
-| quality-and-track-catalog | Other quality may appear only after player selection; separa… | missing | media.overlay: pending | — |
-| queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | queue.manage: partial; queue.master: partial | — |
-| queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | queue.files: partial; queue.schedule: partial | — |
-| quota-window | A megabyte-per-hour-window budget can warn, stop downloads a… | missing | settings.quota: pending | — |
-| recurrence-and-wake | Daily/weekday and periodic jobs require the application runn… | partial | queue.schedule: partial; grabber.schedule: pending | — |
-| remove-versus-delete | Removing rows is separate from deleting completed files; inc… | partial | task.remove: partial; task.remove_completed: pending | — |
-| search-scopes | Name/description/source/site/parent/referrer search supports… | partial | gui.search: partial; gui.find_next: pending | — |
-| server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | task.properties: partial; task.add: partial | — |
-| single-use-request | A second request may return HTML instead of the file; origin… | partial | browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial | — |
-| stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | media.overlay: pending; task.progress: partial | — |
-| synchronization | Synchronization and grabber updates revisit sources, update … | partial | queue.files: partial; grabber.schedule: pending | — |
-| temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | settings.paths: partial; task.resume: partial | — |
-| tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | settings.connections: partial | — |
-| unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | task.progress: partial; task.completion: pending | — |
-| updater-integrity | Update metadata/signature/download validation and site-rule … | partial | app.update: pending; browser.integration: partial | — |
+| address-refresh | Expired task enters a wait-for-new-session/address flow; one… | partial | task.properties: partial; task.resume: partial; task.wait: partial | tests/integration/contracts_behavior.py |
+| all-links-and-clipboard | All-link collection can hide HTML/images/duplicates and use … | partial | browser.all_links: pending; settings.general: partial | tests/integration/contracts_behavior.py |
+| appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | gui.appearance: pending; task.progress: partial | tests/integration/contracts_behavior.py |
+| browser-platform-health | Original health depends on elevation, BFE, drivers/helpers a… | partial | browser.integration: partial; platform.privilege: platform-pending | tests/integration/contracts_behavior.py |
+| category-retroactive | Extension/site rules and last-used paths classify future fil… | partial | settings.categories: partial; settings.paths: partial | tests/integration/contracts_behavior.py |
+| completion-power | Task, queue and grabber completion can request shutdown/slee… | missing | power.shutdown: pending; power.restart: pending; task.completion: pending; grabb… | tests/integration/contracts_behavior.py |
+| completion-precedence | Per-file settings can be unavailable during queue processing… | partial | task.completion: pending; app.exit: partial; queue.schedule: partial; task.progr… | tests/integration/contracts_behavior.py |
+| completion-program-and-scanner | Completion can open a configured file; scanner arguments acc… | missing | security.scanner: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| connection-profiles-and-host-caps | Default profile/connection count and per-server exceptions a… | partial | settings.connections: partial; settings.host_connections: pending | tests/integration/contracts_behavior.py |
+| content-identity-recovery | Changed date/size can restart a task; date checking can be d… | partial | task.resume: partial; settings.downloads: partial | tests/integration/contracts_behavior.py |
+| duplicate-policy | Remembered duplicate policies are ask, numbered duplicate, o… | partial | task.duplicate: partial; settings.downloads: partial | tests/integration/contracts_behavior.py |
+| eager-confirmation | Transfer may start while confirmation is visible, so Downloa… | partial | task.add: partial; settings.downloads: partial; queue.assignment: partial | tests/integration/contracts_behavior.py |
+| file-actions | Move/rename, open-with, configurable double-click and comple… | partial | task.properties: partial; task.completion: pending | tests/integration/contracts_behavior.py |
+| force-bypass-capture | Force and bypass modifier sets must not conflict; force capt… | missing | browser.shortcuts: pending | tests/integration/contracts_behavior.py |
+| generated-batch | A URL wildcard expands numeric/alphabetic sequences with wid… | missing | batch.generated: pending | tests/integration/contracts_behavior.py |
+| grabber-auth-and-offline | Crawler supports manual login, excludes logout patterns, use… | missing | grabber.crawl: pending; grabber.destination: pending; grabber.project: pending | tests/integration/contracts_behavior.py |
+| grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | missing | grabber.load: pending; grabber.save: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | speed.task: partial | tests/integration/contracts_behavior.py |
+| live-stop-save | Stopping live recording can finalize captured content, with … | partial | media.overlay: pending; task.resume: partial | tests/integration/contracts_behavior.py |
+| minimum-media-size | Separate audio/video panel thresholds only apply when total … | missing | media.minimum: pending | tests/integration/contracts_behavior.py |
+| miscapture-exceptions | Two cancellations or similar mistaken captures can prompt fo… | missing | browser.exceptions: pending | tests/integration/contracts_behavior.py |
+| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | media.overlay: pending; browser.types: partial; browser.exceptions: pending | tests/integration/contracts_behavior.py |
+| playlist-link-expansion | Downloaded M3U can offer its MP3 links as one download or a … | missing | media.overlay: pending; browser.all_links: pending | tests/integration/contracts_behavior.py |
+| proxy-selection | Manual, auto-detected, system and none modes; PAC, protocol-… | missing | settings.proxy: pending | tests/integration/contracts_behavior.py |
+| quality-and-track-catalog | Other quality may appear only after player selection; separa… | missing | media.overlay: pending | tests/integration/contracts_behavior.py |
+| queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | queue.manage: partial; queue.master: partial | tests/integration/contracts_behavior.py |
+| queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | queue.files: partial; queue.schedule: partial | tests/integration/contracts_behavior.py |
+| quota-window | A megabyte-per-hour-window budget can warn, stop downloads a… | missing | settings.quota: pending | tests/integration/contracts_behavior.py |
+| recurrence-and-wake | Daily/weekday and periodic jobs require the application runn… | partial | queue.schedule: partial; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| remove-versus-delete | Removing rows is separate from deleting completed files; inc… | partial | task.remove: partial; task.remove_completed: pending | tests/integration/contracts_behavior.py |
+| search-scopes | Name/description/source/site/parent/referrer search supports… | partial | gui.search: partial; gui.find_next: pending | tests/integration/contracts_behavior.py |
+| server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | task.properties: partial; task.add: partial | tests/integration/contracts_behavior.py |
+| single-use-request | A second request may return HTML instead of the file; origin… | partial | browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial | tests/integration/contracts_behavior.py |
+| stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | media.overlay: pending; task.progress: partial | tests/integration/contracts_behavior.py |
+| synchronization | Synchronization and grabber updates revisit sources, update … | partial | queue.files: partial; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | settings.paths: partial; task.resume: partial | tests/integration/contracts_behavior.py |
+| tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | settings.connections: partial | tests/integration/contracts_behavior.py |
+| unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | task.progress: partial; task.completion: pending | tests/integration/contracts_behavior.py |
+| updater-integrity | Update metadata/signature/download validation and site-rule … | partial | app.update: pending; browser.integration: partial | tests/integration/contracts_behavior.py |
 
 ## Work Queue
 
@@ -209,47 +209,8 @@
 | Q18 | Force process termination setting | missing | idm_core_queue_contracts.md |
 | Q19 | Schedule/order/settings durability | partial | idm_core_queue_contracts.md |
 | Q20 | Pause/resume/redownload state semantics | partial | idm_core_queue_contracts.md |
-| address-refresh | Expired task enters a wait-for-new-session/address flow; one… | partial | idm_behavior_review.md |
-| all-links-and-clipboard | All-link collection can hide HTML/images/duplicates and use … | partial | idm_behavior_review.md |
-| appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | idm_behavior_review.md |
-| browser-platform-health | Original health depends on elevation, BFE, drivers/helpers a… | partial | idm_behavior_review.md |
-| category-retroactive | Extension/site rules and last-used paths classify future fil… | partial | idm_behavior_review.md |
-| completion-power | Task, queue and grabber completion can request shutdown/slee… | missing | idm_behavior_review.md |
-| completion-precedence | Per-file settings can be unavailable during queue processing… | partial | idm_behavior_review.md |
-| completion-program-and-scanner | Completion can open a configured file; scanner arguments acc… | missing | idm_behavior_review.md |
-| connection-profiles-and-host-caps | Default profile/connection count and per-server exceptions a… | partial | idm_behavior_review.md |
-| content-identity-recovery | Changed date/size can restart a task; date checking can be d… | partial | idm_behavior_review.md |
-| duplicate-policy | Remembered duplicate policies are ask, numbered duplicate, o… | partial | idm_behavior_review.md |
-| eager-confirmation | Transfer may start while confirmation is visible, so Downloa… | partial | idm_behavior_review.md |
-| file-actions | Move/rename, open-with, configurable double-click and comple… | partial | idm_behavior_review.md |
-| force-bypass-capture | Force and bypass modifier sets must not conflict; force capt… | missing | idm_behavior_review.md |
-| generated-batch | A URL wildcard expands numeric/alphabetic sequences with wid… | missing | idm_behavior_review.md |
-| grabber-auth-and-offline | Crawler supports manual login, excludes logout patterns, use… | missing | idm_behavior_review.md |
-| grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | missing | idm_behavior_review.md |
-| limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | idm_behavior_review.md |
-| live-stop-save | Stopping live recording can finalize captured content, with … | partial | idm_behavior_review.md |
-| minimum-media-size | Separate audio/video panel thresholds only apply when total … | missing | idm_behavior_review.md |
-| miscapture-exceptions | Two cancellations or similar mistaken captures can prompt fo… | missing | idm_behavior_review.md |
-| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | idm_behavior_review.md |
-| playlist-link-expansion | Downloaded M3U can offer its MP3 links as one download or a … | missing | idm_behavior_review.md |
-| proxy-selection | Manual, auto-detected, system and none modes; PAC, protocol-… | missing | idm_behavior_review.md |
-| quality-and-track-catalog | Other quality may appear only after player selection; separa… | missing | idm_behavior_review.md |
-| queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | idm_behavior_review.md |
-| queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | idm_behavior_review.md |
-| quota-window | A megabyte-per-hour-window budget can warn, stop downloads a… | missing | idm_behavior_review.md |
-| recurrence-and-wake | Daily/weekday and periodic jobs require the application runn… | partial | idm_behavior_review.md |
-| remove-versus-delete | Removing rows is separate from deleting completed files; inc… | partial | idm_behavior_review.md |
-| search-scopes | Name/description/source/site/parent/referrer search supports… | partial | idm_behavior_review.md |
-| server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | idm_behavior_review.md |
-| single-use-request | A second request may return HTML instead of the file; origin… | partial | idm_behavior_review.md |
-| stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | idm_behavior_review.md |
-| synchronization | Synchronization and grabber updates revisit sources, update … | partial | idm_behavior_review.md |
-| temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | idm_behavior_review.md |
-| tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | idm_behavior_review.md |
-| unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | idm_behavior_review.md |
-| updater-integrity | Update metadata/signature/download validation and site-rule … | partial | idm_behavior_review.md |
 
-**Count: 58**
+**Count: 19**
 
 ### Partial contracts WITH tests (next priority)
 
@@ -303,5 +264,32 @@
 | B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
+| address-refresh | Expired task enters a wait-for-new-session/address flow; one… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| all-links-and-clipboard | All-link collection can hide HTML/images/duplicates and use … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| browser-platform-health | Original health depends on elevation, BFE, drivers/helpers a… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| category-retroactive | Extension/site rules and last-used paths classify future fil… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| completion-precedence | Per-file settings can be unavailable during queue processing… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| connection-profiles-and-host-caps | Default profile/connection count and per-server exceptions a… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| content-identity-recovery | Changed date/size can restart a task; date checking can be d… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| duplicate-policy | Remembered duplicate policies are ask, numbered duplicate, o… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| eager-confirmation | Transfer may start while confirmation is visible, so Downloa… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| file-actions | Move/rename, open-with, configurable double-click and comple… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| live-stop-save | Stopping live recording can finalize captured content, with … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| recurrence-and-wake | Daily/weekday and periodic jobs require the application runn… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| remove-versus-delete | Removing rows is separate from deleting completed files; inc… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| search-scopes | Name/description/source/site/parent/referrer search supports… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| single-use-request | A second request may return HTML instead of the file; origin… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| synchronization | Synchronization and grabber updates revisit sources, update … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| updater-integrity | Update metadata/signature/download validation and site-rule … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 
-**Count: 48**
+**Count: 75**

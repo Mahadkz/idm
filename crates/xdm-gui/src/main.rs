@@ -1,11 +1,13 @@
 mod clipboard;
 mod dialog_helpers;
+mod i18n;
 mod scheduler;
 mod settings;
 mod sound;
+mod task_table;
 
 use chrono::{Local, NaiveDateTime, TimeZone};
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,12 +20,48 @@ slint::slint! {
     import { Button, CheckBox, LineEdit, ListView, ScrollView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
     import "assets/DejaVuSans.ttf";
 
-    export struct TaskRow { label: string, progress: float }
+    export global Tr {
+        in-out property <string> lang: "en";
+        pure callback t(string, string) -> string;
+    }
+
+    export struct TaskRow {
+        id: int,
+        filename: string,
+        size: string,
+        status: string,
+        time_left: string,
+        transfer_rate: string,
+        last_try_date: string,
+        description: string,
+        category: string,
+        queue: string,
+        progress: float,
+        selected: bool,
+    }
+
+    component HeaderCell inherits Rectangle {
+        in property <string> text;
+        callback clicked;
+        height: 28px;
+        border-radius: 3px;
+        background: ta.has-hover ? (Palette.color-scheme == ColorScheme.dark ? #3a4250 : #d3dcea) : (Palette.color-scheme == ColorScheme.dark ? #2c313a : #e3e9f2);
+        Text {
+            x: 6px;
+            width: parent.width - 12px;
+            text: root.text;
+            overflow: elide;
+            vertical-alignment: center;
+            font-weight: 700;
+            color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+        }
+        ta := TouchArea { clicked => { root.clicked(); } }
+    }
 
     export component MainWindow inherits Window {
         title: "XDM — Downloads";
         width: 900px;
-        height: 620px;
+        height: 780px;
         background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
         default-font-family: "DejaVu Sans";
         public function apply-theme(theme: string) {
@@ -54,6 +92,19 @@ slint::slint! {
         in-out property <int> pending-queue-id: 0;
         in-out property <int> pending-seconds-remaining: 0;
         in-out property <string> pause-button-text: "Pause";
+        in-out property <bool> col-filename: true;
+        in-out property <bool> col-size: true;
+        in-out property <bool> col-status: true;
+        in-out property <bool> col-time-left: true;
+        in-out property <bool> col-transfer-rate: true;
+        in-out property <bool> col-last-try-date: true;
+        in-out property <bool> col-description: true;
+        in-out property <bool> col-category: true;
+        in-out property <bool> col-queue: true;
+        in-out property <string> sort-column: "id";
+        in-out property <bool> sort-asc: true;
+        in-out property <length> context-menu-x: 100px;
+        in-out property <length> context-menu-y: 200px;
         callback cancel-completion(int);
         callback add-task();
         callback pause-task();
@@ -83,142 +134,369 @@ slint::slint! {
         callback open-add-media();
         callback task-selected(int);
         callback show-clipboard-prompt(string);
+        callback sort-by-column(string);
+        callback open-columns();
+        callback open-task();
+        callback open-task-folder();
+        callback move-rename-task();
+        callback task-clicked(int, bool, bool);
+        callback task-right-clicked(int, length, length);
+        callback key-delete();
+        callback key-enter();
+        callback key-up();
+        callback key-down();
+        callback key-select-all();
 
-        VerticalBox {
-            padding: 14px;
-            spacing: 10px;
-            if root.has-pending-completion: Rectangle {
-                background: #ffcdd2;
-                border-width: 2px;
-                border-color: #b71c1c;
-                border-radius: 4px;
-                height: 44px;
+        forward-focus: fs;
+        fs := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Delete) {
+                    root.key-delete();
+                    return accept;
+                }
+                if (event.text == Key.Return) {
+                    root.key-enter();
+                    return accept;
+                }
+                if (event.text == Key.UpArrow) {
+                    root.key-up();
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.key-down();
+                    return accept;
+                }
+                if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                    root.key-select-all();
+                    return accept;
+                }
+                return reject;
+            }
+            VerticalBox {
+                padding: 14px;
+                spacing: 10px;
+                if root.has-pending-completion: Rectangle {
+                    background: #ffcdd2;
+                    border-width: 2px;
+                    border-color: #b71c1c;
+                    border-radius: 4px;
+                    height: 44px;
+                    HorizontalBox {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 16px;
+                        alignment: space-between;
+                        Text {
+                            text: "⚠ WARNING: " + root.pending-action-text;
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #b71c1c;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Cancel";
+                            clicked => { root.cancel-completion(root.pending-queue-id); }
+                        }
+                    }
+                }
                 HorizontalBox {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 16px;
-                    alignment: space-between;
-                    Text {
-                        text: "⚠ WARNING: " + root.pending-action-text;
-                        font-size: 13px;
-                        font-weight: 700;
-                        color: #b71c1c;
-                        vertical-alignment: center;
-                    }
-                    Button {
-                        text: "Cancel";
-                        clicked => { root.cancel-completion(root.pending-queue-id); }
-                    }
+                    padding: 0px;
+                    Text { text: Tr.t(@tr("XDM"), Tr.lang); font-size: 26px; font-weight: 700; color: #143f73; }
+                    Button { text: Tr.t(@tr("All queues"), Tr.lang); clicked => { root.queue-filter-id = "0"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Queues…"), Tr.lang); clicked => { root.manage-queues(); } }
                 }
-            }
-            HorizontalBox {
-                padding: 0px;
-                Text { text: "XDM"; font-size: 26px; font-weight: 700; color: #143f73; }
-                Button { text: "All queues"; clicked => { root.queue-filter-id = "0"; root.refresh(); } }
-                Button { text: "Queues…"; clicked => { root.manage-queues(); } }
-            }
-            HorizontalBox {
-                spacing: 8px;
-                Button { text: "Add URL"; clicked => { root.open-add-url(); } }
-                Button { text: "Batch…"; clicked => { root.open-batch(); } }
-                Button { text: "Grabber…"; clicked => { root.open-grabber(); } }
-                Button { text: "Categories…"; clicked => { root.open-categories(); } }
-                Button { text: "Connection…"; clicked => { root.open-connection(); } }
-                Button { text: root.pause-button-text; clicked => { root.pause-task(); } }
-                Button { text: "Resume"; clicked => { root.resume-task(); } }
-                Button { text: "Refresh"; clicked => { root.refresh(); } }
-            }
-            HorizontalBox {
-                spacing: 8px;
-                Button { text: "Details"; clicked => { root.task-details(); } }
-                Button { text: "Redownload…"; clicked => { root.redownload-task(); } }
-                Button { text: "Remove from list…"; clicked => { root.remove-task(); } }
-            }
-            HorizontalBox {
-                spacing: 8px;
-                Button { text: "Start all"; clicked => { root.queue-start(); } }
-                Button { text: "Stop all"; clicked => { root.queue-stop(); } }
-                Button { text: "Import / Export…"; clicked => { root.transfer-lists(); } }
-                Button { text: "Add media…"; clicked => { root.open-add-media(); } }
-                Text { text: root.queue-state; color: #38536f; vertical-alignment: center; }
-                Button { text: root.tools-expanded ? "Hide controls" : "More controls"; clicked => { root.tools-expanded = !root.tools-expanded; } }
-            }
-            if root.tools-expanded: Rectangle {
-                height: 220px;
-                ScrollView {
-                    VerticalBox {
-                        padding: 4px;
-                        spacing: 6px;
-                        HorizontalBox {
-                            Text { text: "URL"; vertical-alignment: center; }
-                            LineEdit { text <=> root.url; placeholder-text: "https://example.com/file.zip or ftp://..."; }
-                        }
-                        HorizontalBox {
-                            Text { text: "Save as"; vertical-alignment: center; }
-                            LineEdit { text <=> root.destination; placeholder-text: "/home/user/Downloads/file.zip"; }
-                            Button { text: "Download"; clicked => { root.add-task(); } }
-                        }
-                        HorizontalBox {
-                            Text { text: "Priority:"; vertical-alignment: center; }
-                            Button { text: "Immediate"; clicked => { root.set-priority(2); } }
-                            Button { text: "Normal"; clicked => { root.set-priority(1); } }
-                            Button { text: "Low"; clicked => { root.set-priority(0); } }
-                        }
-                        HorizontalBox {
-                            LineEdit { text <=> root.schedule-start; placeholder-text: "YYYY-MM-DD HH:MM"; }
-                            Button { text: "Schedule start"; clicked => { root.schedule-queue-start(); } }
-                            LineEdit { text <=> root.schedule-stop; placeholder-text: "Stop at YYYY-MM-DD HH:MM"; }
-                            Button { text: "Schedule stop"; clicked => { root.schedule-queue-stop(); } }
-                        }
-                        HorizontalBox {
-                            Text { text: "Selected limit (KiB/s)"; vertical-alignment: center; }
-                            LineEdit { text <=> root.rate-kib; }
-                            Button { text: "Apply limit"; clicked => { root.set-task-rate(true); } }
-                            Button { text: "Unlimited"; clicked => { root.set-task-rate(false); } }
+                HorizontalBox {
+                    spacing: 8px;
+                    Button { text: Tr.t(@tr("Add URL"), Tr.lang); clicked => { root.open-add-url(); } }
+                    Button { text: Tr.t(@tr("Batch…"), Tr.lang); clicked => { root.open-batch(); } }
+                    Button { text: Tr.t(@tr("Grabber…"), Tr.lang); clicked => { root.open-grabber(); } }
+                    Button { text: Tr.t(@tr("Categories…"), Tr.lang); clicked => { root.open-categories(); } }
+                    Button { text: Tr.t(@tr("Connection…"), Tr.lang); clicked => { root.open-connection(); } }
+                    Button { text: root.pause-button-text == "Pause" ? Tr.t(@tr("Pause"), Tr.lang) : Tr.t(@tr("Stop and save"), Tr.lang); clicked => { root.pause-task(); } }
+                    Button { text: Tr.t(@tr("Resume"), Tr.lang); clicked => { root.resume-task(); } }
+                    Button { text: Tr.t(@tr("Refresh"), Tr.lang); clicked => { root.refresh(); } }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Button { text: Tr.t(@tr("Details"), Tr.lang); clicked => { root.task-details(); } }
+                    Button { text: Tr.t(@tr("Redownload…"), Tr.lang); clicked => { root.redownload-task(); } }
+                    Button { text: Tr.t(@tr("Remove from list…"), Tr.lang); clicked => { root.remove-task(); } }
+                    Button { text: Tr.t(@tr("Open"), Tr.lang); clicked => { root.open-task(); } }
+                    Button { text: Tr.t(@tr("Open folder"), Tr.lang); clicked => { root.open-task-folder(); } }
+                    Button { text: Tr.t(@tr("Move / Rename…"), Tr.lang); clicked => { root.move-rename-task(); } }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Button { text: Tr.t(@tr("Start all"), Tr.lang); clicked => { root.queue-start(); } }
+                    Button { text: Tr.t(@tr("Stop all"), Tr.lang); clicked => { root.queue-stop(); } }
+                    Button { text: Tr.t(@tr("Import / Export…"), Tr.lang); clicked => { root.transfer-lists(); } }
+                    Button { text: Tr.t(@tr("Add media…"), Tr.lang); clicked => { root.open-add-media(); } }
+                    Text { text: root.queue-state; color: #38536f; vertical-alignment: center; }
+                    Button { text: root.tools-expanded ? Tr.t(@tr("Hide controls"), Tr.lang) : Tr.t(@tr("More controls"), Tr.lang); clicked => { root.tools-expanded = !root.tools-expanded; } }
+                }
+                if root.tools-expanded: Rectangle {
+                    height: 220px;
+                    ScrollView {
+                        VerticalBox {
+                            padding: 4px;
+                            spacing: 6px;
+                            HorizontalBox {
+                                Text { text: "URL"; vertical-alignment: center; }
+                                LineEdit { text <=> root.url; placeholder-text: "https://example.com/file.zip or ftp://..."; }
+                            }
+                            HorizontalBox {
+                                Text { text: "Save as"; vertical-alignment: center; }
+                                LineEdit { text <=> root.destination; placeholder-text: "/home/user/Downloads/file.zip"; }
+                                Button { text: Tr.t(@tr("Download"), Tr.lang); clicked => { root.add-task(); } }
+                            }
+                            HorizontalBox {
+                                Text { text: "Priority:"; vertical-alignment: center; }
+                                Button { text: Tr.t(@tr("Immediate"), Tr.lang); clicked => { root.set-priority(2); } }
+                                Button { text: Tr.t(@tr("Normal"), Tr.lang); clicked => { root.set-priority(1); } }
+                                Button { text: Tr.t(@tr("Low"), Tr.lang); clicked => { root.set-priority(0); } }
+                            }
+                            HorizontalBox {
+                                LineEdit { text <=> root.schedule-start; placeholder-text: "YYYY-MM-DD HH:MM"; }
+                                Button { text: Tr.t(@tr("Schedule start"), Tr.lang); clicked => { root.schedule-queue-start(); } }
+                                LineEdit { text <=> root.schedule-stop; placeholder-text: "Stop at YYYY-MM-DD HH:MM"; }
+                                Button { text: Tr.t(@tr("Schedule stop"), Tr.lang); clicked => { root.schedule-queue-stop(); } }
+                            }
+                            HorizontalBox {
+                                Text { text: "Selected limit (KiB/s)"; vertical-alignment: center; }
+                                LineEdit { text <=> root.rate-kib; }
+                                Button { text: Tr.t(@tr("Apply limit"), Tr.lang); clicked => { root.set-task-rate(true); } }
+                                Button { text: Tr.t(@tr("Unlimited"), Tr.lang); clicked => { root.set-task-rate(false); } }
+                            }
                         }
                     }
                 }
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit { text <=> root.search-query; placeholder-text: "Find URL, filename, status, or category"; }
+                    Button { text: Tr.t(@tr("Find"), Tr.lang); clicked => { root.refresh(); } }
+                    Button { text: Tr.t(@tr("Clear"), Tr.lang); clicked => { root.search-query = ""; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Columns…"), Tr.lang); clicked => { root.open-columns(); } }
+                    Button { text: Tr.t(@tr("Preferences…"), Tr.lang); clicked => { root.open-preferences(); } }
+                }
+                Rectangle { height: 1px; background: #c8d0db; }
+                HorizontalBox {
+                    spacing: 4px;
+                    Button { text: Tr.t(@tr("All"), Tr.lang); clicked => { root.category-filter = "All"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Video"), Tr.lang); clicked => { root.category-filter = "Video"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Music"), Tr.lang); clicked => { root.category-filter = "Music"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Documents"), Tr.lang); clicked => { root.category-filter = "Documents"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Compressed"), Tr.lang); clicked => { root.category-filter = "Compressed"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Programs"), Tr.lang); clicked => { root.category-filter = "Programs"; root.refresh(); } }
+                    Button { text: Tr.t(@tr("Other"), Tr.lang); clicked => { root.category-filter = "Other"; root.refresh(); } }
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    Text { text: Tr.t(@tr("Downloads"), Tr.lang) + "  ·  " + root.queue-caption; font-size: 14px; color: #38536f; vertical-alignment: center; }
+                    Button { text: Tr.t(@tr("Start queue"), Tr.lang); enabled: root.queue-filter-id != "0"; clicked => { root.queue-start-one(); } }
+                    Button { text: Tr.t(@tr("Stop queue"), Tr.lang); enabled: root.queue-filter-id != "0"; clicked => { root.queue-stop-one(); } }
+                    Button { text: Tr.t(@tr("Scheduler…"), Tr.lang); clicked => { root.queue-settings(); } }
+                    Button { text: Tr.t(@tr("Top"), Tr.lang); clicked => { root.move-task("top"); } }
+                    Button { text: Tr.t(@tr("Up"), Tr.lang); clicked => { root.move-task("up"); } }
+                    Button { text: Tr.t(@tr("Down"), Tr.lang); clicked => { root.move-task("down"); } }
+                    Button { text: Tr.t(@tr("Bottom"), Tr.lang); clicked => { root.move-task("bottom"); } }
+                }
+                HorizontalLayout {
+                    height: 28px;
+                    padding-left: 6px;
+                    padding-right: 20px;
+                    spacing: 6px;
+                    if root.col-filename: HeaderCell {
+                        text: Tr.t(@tr("File name"), Tr.lang) + (root.sort-column == "filename" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        horizontal-stretch: 3;
+                        clicked => { root.sort-by-column("filename"); }
+                    }
+                    if root.col-size: HeaderCell {
+                        text: Tr.t(@tr("Size"), Tr.lang) + (root.sort-column == "size" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 70px;
+                        max-width: 70px;
+                        clicked => { root.sort-by-column("size"); }
+                    }
+                    if root.col-status: HeaderCell {
+                        text: Tr.t(@tr("Status"), Tr.lang) + (root.sort-column == "status" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 100px;
+                        max-width: 100px;
+                        clicked => { root.sort-by-column("status"); }
+                    }
+                    if root.col-time-left: HeaderCell {
+                        text: Tr.t(@tr("Time left"), Tr.lang) + (root.sort-column == "time_left" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 70px;
+                        max-width: 70px;
+                        clicked => { root.sort-by-column("time_left"); }
+                    }
+                    if root.col-transfer-rate: HeaderCell {
+                        text: Tr.t(@tr("Transfer rate"), Tr.lang) + (root.sort-column == "transfer_rate" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 90px;
+                        max-width: 90px;
+                        clicked => { root.sort-by-column("transfer_rate"); }
+                    }
+                    if root.col-last-try-date: HeaderCell {
+                        text: Tr.t(@tr("Last try date"), Tr.lang) + (root.sort-column == "last_try_date" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 160px;
+                        max-width: 160px;
+                        clicked => { root.sort-by-column("last_try_date"); }
+                    }
+                    if root.col-description: HeaderCell {
+                        text: Tr.t(@tr("Description"), Tr.lang) + (root.sort-column == "description" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        horizontal-stretch: 2;
+                        clicked => { root.sort-by-column("description"); }
+                    }
+                    if root.col-category: HeaderCell {
+                        text: Tr.t(@tr("Category"), Tr.lang) + (root.sort-column == "category" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 70px;
+                        max-width: 70px;
+                        clicked => { root.sort-by-column("category"); }
+                    }
+                    if root.col-queue: HeaderCell {
+                        text: Tr.t(@tr("Queue"), Tr.lang) + (root.sort-column == "queue" ? (root.sort-asc ? " ▲" : " ▼") : "");
+                        min-width: 60px;
+                        max-width: 60px;
+                        clicked => { root.sort-by-column("queue"); }
+                    }
+                    
+                }
+                ListView {
+                    for task[index] in root.tasks: Rectangle {
+                        height: 40px;
+                        background: task.selected ? (Palette.color-scheme == ColorScheme.dark ? #2c4260 : #d8eaff)
+                            : (root.selected == index ? (Palette.color-scheme == ColorScheme.dark ? #28374a : #eef4fc)
+                            : (Math.mod(index, 2) == 0 ? (Palette.color-scheme == ColorScheme.dark ? #1e2227 : #ffffff)
+                                                       : (Palette.color-scheme == ColorScheme.dark ? #21252b : #f7f9fc)));
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            if root.col-filename: Text {
+                                horizontal-stretch: 3;
+                                preferred-width: 1px;
+                                text: task.filename;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-size: Text {
+                                min-width: 70px;
+                                max-width: 70px;
+                                text: task.size;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-status: Text {
+                                min-width: 100px;
+                                max-width: 100px;
+                                text: task.status;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-time-left: Text {
+                                min-width: 70px;
+                                max-width: 70px;
+                                text: task.time-left;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-transfer-rate: Text {
+                                min-width: 90px;
+                                max-width: 90px;
+                                text: task.transfer-rate;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-last-try-date: Text {
+                                min-width: 160px;
+                                max-width: 160px;
+                                text: task.last-try-date;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-description: Text {
+                                horizontal-stretch: 2;
+                                preferred-width: 1px;
+                                text: task.description;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-category: Text {
+                                min-width: 70px;
+                                max-width: 70px;
+                                text: task.category;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            if root.col-queue: Text {
+                                min-width: 60px;
+                                max-width: 60px;
+                                text: task.queue;
+                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            y: parent.height - 3px;
+                            width: parent.width * task.progress / 100;
+                            height: 3px;
+                            background: #2874c7;
+                        }
+                        TouchArea {
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                    root.selected = index;
+                                    fs.focus();
+                                    root.task-clicked(index, event.modifiers.control, event.modifiers.shift);
+                                    root.task-selected(index);
+                                }
+                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.selected = index;
+                                    root.context-menu-x = min(root.width - 180px, max(10px, self.absolute-position.x + self.mouse-x - root.absolute-position.x));
+                                    root.context-menu-y = min(root.height - 220px, max(10px, self.absolute-position.y + self.mouse-y - root.absolute-position.y));
+                                    root.task-right-clicked(index, self.mouse-x, self.mouse-y);
+                                    context-popup.show();
+                                }
+                            }
+                        }
+                    }
+                }
+                Text { text: root.message; color: #52677c; }
             }
-            HorizontalBox {
-                spacing: 8px;
-                LineEdit { text <=> root.search-query; placeholder-text: "Find URL, filename, status, or category"; }
-                Button { text: "Find"; clicked => { root.refresh(); } }
-                Button { text: "Clear"; clicked => { root.search-query = ""; root.refresh(); } }
-                Button { text: "Preferences…"; clicked => { root.open-preferences(); } }
-            }
-            Rectangle { height: 1px; background: #c8d0db; }
-            HorizontalBox {
-                spacing: 4px;
-                Button { text: "All"; clicked => { root.category-filter = "All"; root.refresh(); } }
-                Button { text: "Video"; clicked => { root.category-filter = "Video"; root.refresh(); } }
-                Button { text: "Music"; clicked => { root.category-filter = "Music"; root.refresh(); } }
-                Button { text: "Documents"; clicked => { root.category-filter = "Documents"; root.refresh(); } }
-                Button { text: "Compressed"; clicked => { root.category-filter = "Compressed"; root.refresh(); } }
-                Button { text: "Programs"; clicked => { root.category-filter = "Programs"; root.refresh(); } }
-                Button { text: "Other"; clicked => { root.category-filter = "Other"; root.refresh(); } }
-            }
-            HorizontalBox {
-                padding: 0px;
-                spacing: 8px;
-                Text { text: "Downloads  ·  " + root.queue-caption; font-size: 14px; color: #38536f; vertical-alignment: center; }
-                Button { text: "Start queue"; enabled: root.queue-filter-id != "0"; clicked => { root.queue-start-one(); } }
-                Button { text: "Stop queue"; enabled: root.queue-filter-id != "0"; clicked => { root.queue-stop-one(); } }
-                Button { text: "Scheduler…"; clicked => { root.queue-settings(); } }
-                Button { text: "Top"; clicked => { root.move-task("top"); } }
-                Button { text: "Up"; clicked => { root.move-task("up"); } }
-                Button { text: "Down"; clicked => { root.move-task("down"); } }
-                Button { text: "Bottom"; clicked => { root.move-task("bottom"); } }
-            }
-            ListView {
-                for task[index] in root.tasks: Rectangle {
-                    height: 42px;
-                    background: root.selected == index ? #d8eaff : (Math.mod(index, 2) == 0 ? #ffffff : #f7f9fc);
-                    Text { x: 12px; y: 10px; width: parent.width - 24px; text: task.label; color: #172a3f; overflow: elide; }
-                    Rectangle { y: parent.height - 3px; width: parent.width * task.progress / 100; height: 3px; background: #2874c7; }
-                    TouchArea { clicked => { root.selected = index; root.task-selected(index); } }
+        }
+
+        context-popup := PopupWindow {
+            x: root.context-menu-x;
+            y: root.context-menu-y;
+            width: 170px;
+            height: 200px;
+            close-policy: close-on-click-outside;
+            Rectangle {
+                background: Palette.color-scheme == ColorScheme.dark ? #282c34 : #ffffff;
+                border-width: 1px;
+                border-color: Palette.color-scheme == ColorScheme.dark ? #3e4451 : #c8d0db;
+                border-radius: 4px;
+                drop-shadow-blur: 8px;
+                drop-shadow-color: #00000033;
+                VerticalBox {
+                    padding: 4px;
+                    spacing: 2px;
+                    Button { text: Tr.t(@tr("Open"), Tr.lang); clicked => { context-popup.close(); root.open-task(); } }
+                    Button { text: Tr.t(@tr("Open folder"), Tr.lang); clicked => { context-popup.close(); root.open-task-folder(); } }
+                    Button { text: Tr.t(@tr("Move / Rename…"), Tr.lang); clicked => { context-popup.close(); root.move-rename-task(); } }
+                    Button { text: Tr.t(@tr("Redownload…"), Tr.lang); clicked => { context-popup.close(); root.redownload-task(); } }
+                    Button { text: Tr.t(@tr("Delete"), Tr.lang); clicked => { context-popup.close(); root.remove-task(); } }
+                    Button { text: Tr.t(@tr("Properties"), Tr.lang); clicked => { context-popup.close(); root.task-details(); } }
                 }
             }
-            Text { text: root.message; color: #52677c; }
         }
     }
 
@@ -270,6 +548,68 @@ slint::slint! {
             HorizontalBox {
                 Button { text: "Remove from list"; clicked => { root.confirm(); } }
                 Button { text: "Cancel"; clicked => { root.dismiss(); } }
+            }
+        }
+    }
+
+    export component MoveRenameWindow inherits Window {
+        title: Tr.t(@tr("XDM — Move / Rename completed download"), Tr.lang);
+        width: 600px;
+        height: 220px;
+        background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
+        default-font-family: "DejaVu Sans";
+        in-out property <string> current-path;
+        in-out property <string> target-path;
+        in-out property <string> message: Tr.t(@tr("Select a new destination path for the completed file."), Tr.lang);
+        callback submit();
+        callback dismiss();
+        VerticalBox {
+            padding: 14px;
+            spacing: 8px;
+            Text { text: Tr.t(@tr("Current path: "), Tr.lang) + root.current-path; overflow: elide; color: #52677c; }
+            Text { text: Tr.t(@tr("New destination path:"), Tr.lang); }
+            LineEdit { text <=> root.target-path; }
+            Text { text: root.message; wrap: word-wrap; color: #d32f2f; }
+            HorizontalBox {
+                Button { text: Tr.t(@tr("Move / Rename"), Tr.lang); clicked => { root.submit(); } }
+                Button { text: Tr.t(@tr("Cancel"), Tr.lang); clicked => { root.dismiss(); } }
+            }
+        }
+    }
+
+    export component ColumnsWindow inherits Window {
+        title: Tr.t(@tr("XDM — Customize columns"), Tr.lang);
+        width: 380px;
+        height: 480px;
+        background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
+        default-font-family: "DejaVu Sans";
+        in-out property <bool> col-filename: true;
+        in-out property <bool> col-size: true;
+        in-out property <bool> col-status: true;
+        in-out property <bool> col-time-left: true;
+        in-out property <bool> col-transfer-rate: true;
+        in-out property <bool> col-last-try-date: true;
+        in-out property <bool> col-description: true;
+        in-out property <bool> col-category: true;
+        in-out property <bool> col-queue: true;
+        callback apply-columns();
+        callback dismiss();
+        VerticalBox {
+            padding: 16px;
+            spacing: 8px;
+            Text { text: Tr.t(@tr("Select columns to display:"), Tr.lang); font-size: 16px; font-weight: 700; }
+            CheckBox { text: Tr.t(@tr("File name"), Tr.lang); checked <=> root.col-filename; }
+            CheckBox { text: Tr.t(@tr("Size"), Tr.lang); checked <=> root.col-size; }
+            CheckBox { text: Tr.t(@tr("Status"), Tr.lang); checked <=> root.col-status; }
+            CheckBox { text: Tr.t(@tr("Time left"), Tr.lang); checked <=> root.col-time-left; }
+            CheckBox { text: Tr.t(@tr("Transfer rate"), Tr.lang); checked <=> root.col-transfer-rate; }
+            CheckBox { text: Tr.t(@tr("Last try date"), Tr.lang); checked <=> root.col-last-try-date; }
+            CheckBox { text: Tr.t(@tr("Description / URL"), Tr.lang); checked <=> root.col-description; }
+            CheckBox { text: Tr.t(@tr("Category"), Tr.lang); checked <=> root.col-category; }
+            CheckBox { text: Tr.t(@tr("Queue"), Tr.lang); checked <=> root.col-queue; }
+            HorizontalBox {
+                Button { text: Tr.t(@tr("Save"), Tr.lang); clicked => { root.apply-columns(); } }
+                Button { text: Tr.t(@tr("Close"), Tr.lang); clicked => { root.dismiss(); } }
             }
         }
     }
@@ -951,6 +1291,7 @@ slint::slint! {
         in-out property <string> sound-download-failed-path: "";
         in-out property <bool> sound-queue-complete: false;
         in-out property <string> sound-queue-complete-path: "";
+        in-out property <string> language: "en";
         in-out property <string> message: "Configure appearance, sounds, and general options.";
 
         public function apply-theme(theme: string) {
@@ -964,6 +1305,8 @@ slint::slint! {
         }
 
         callback select-theme(string);
+        callback select-language(string);
+        callback open-columns();
         callback test-sound(string);
         callback save-preferences();
         callback dismiss();
@@ -1079,6 +1422,26 @@ slint::slint! {
                                 enabled: root.sound-queue-complete;
                                 clicked => { root.test-sound("queue"); }
                             }
+                        }
+                    }
+                    Rectangle { height: 1px; background: Palette.color-scheme == ColorScheme.dark ? #3e4451 : #c8d0db; }
+                    Text { text: "Language & Columns"; font-size: 15px; font-weight: 700; color: Palette.color-scheme == ColorScheme.dark ? #70a5f5 : #143f73; }
+                    HorizontalBox {
+                        spacing: 8px;
+                        Text { text: "Language:"; vertical-alignment: center; color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f; }
+                        Button {
+                            text: root.language == "en" ? "[ English ]" : "English";
+                            clicked => { root.select-language("en"); }
+                        }
+                        Button {
+                            text: root.language == "ur" ? "[ اردو (Urdu) ]" : "اردو (Urdu)";
+                            clicked => { root.select-language("ur"); }
+                        }
+                    }
+                    HorizontalBox {
+                        Button {
+                            text: "Customize columns…";
+                            clicked => { root.open-columns(); }
                         }
                     }
                 }
@@ -1362,6 +1725,46 @@ fn selected_task(ui: &MainWindow, ids: &Arc<Mutex<Vec<i64>>>) -> Option<i64> {
     task_id
 }
 
+/// Ids the current action applies to: the multi-selection (in list order) or,
+/// failing that, the single highlighted row.
+fn target_ids(
+    ui: &MainWindow,
+    ids: &Arc<Mutex<Vec<i64>>>,
+    set: &Arc<Mutex<std::collections::HashSet<usize>>>,
+) -> Vec<i64> {
+    let ids = match ids.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Vec::new(),
+    };
+    let set = set.lock().map(|s| s.clone()).unwrap_or_default();
+    let multi: Vec<i64> = ids.iter().copied().filter(|id| set.contains(&(*id as usize))).collect();
+    if !multi.is_empty() {
+        return multi;
+    }
+    usize::try_from(ui.get_selected())
+        .ok()
+        .and_then(|i| ids.get(i).copied())
+        .into_iter()
+        .collect()
+}
+
+/// Push the selection flags of `set` into the visible model rows (only changed rows).
+fn sync_selection(ui: &MainWindow, set: &std::collections::HashSet<usize>) {
+    let model_rc = ui.get_tasks();
+    let Some(model) = model_rc.as_any().downcast_ref::<VecModel<TaskRow>>() else {
+        return;
+    };
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            let want = set.contains(&(row.id as usize));
+            if row.selected != want {
+                row.selected = want;
+                model.set_row_data(i, row);
+            }
+        }
+    }
+}
+
 /// Off-UI thread IPC worker keeping the interface responsive.
 #[derive(Clone)]
 struct IpcClient {
@@ -1425,6 +1828,99 @@ fn is_live_task(
     false
 }
 
+struct RowFilter<'a> {
+    queue_id: i64,
+    category: &'a str,
+    query: &'a str,
+}
+
+/// Filters `tasks` and converts them to table rows, recording the visible ids in order.
+fn build_rows(
+    tasks: Vec<xdm_ipc::TaskSummary>,
+    queue_map: &std::collections::HashMap<i64, String>,
+    selected_set: &std::collections::HashSet<usize>,
+    filter: &RowFilter,
+    ids: &mut Vec<i64>,
+) -> Vec<TaskRow> {
+    ids.clear();
+    tasks
+        .into_iter()
+        .filter(|task| filter.queue_id == 0 || task.queue_id == filter.queue_id)
+        .filter(|task| filter.category == "All" || task.category == filter.category)
+        .filter(|task| {
+            filter.query.is_empty()
+                || task.url.to_lowercase().contains(filter.query)
+                || task.output.to_lowercase().contains(filter.query)
+                || task.status.to_lowercase().contains(filter.query)
+                || task.category.to_lowercase().contains(filter.query)
+                || task.id.to_string().contains(filter.query)
+        })
+        .map(|task| {
+                ids.push(task.id);
+                let progress = match (task.downloaded, task.total) {
+                    (Some(done), Some(total)) if total > 0 => {
+                        (done.saturating_mul(100) / total).min(100)
+                    }
+                    _ => 0,
+                };
+                let is_selected = selected_set.contains(&(task.id as usize));
+                let q_name = queue_map.get(&task.queue_id).cloned().unwrap_or_else(|| {
+                    if task.queue_id == 1 {
+                        "Default".into()
+                    } else {
+                        format!("#{}", task.queue_id)
+                    }
+                });
+                TaskRow {
+                    id: task.id as i32,
+                    filename: task_table::format_filename(&task.output, &task.url).into(),
+                    size: task_table::format_size(task.downloaded, task.total).into(),
+                    status: task_table::format_status(&task.status, task.downloaded, task.total).into(),
+                    time_left: task_table::format_time_left(&task.status, task.eta_seconds).into(),
+                    transfer_rate: task_table::format_rate(task.bytes_per_second).into(),
+                    last_try_date: task_table::format_date(&task.updated_at, &task.created_at).into(),
+                    description: (if !task.output.is_empty() {
+                        task.output
+                    } else {
+                        task.url
+                    })
+                    .into(),
+                    category: task.category.into(),
+                    queue: q_name.into(),
+                    progress: progress as f32,
+                    selected: is_selected,
+                }
+        })
+        .collect()
+}
+
+/// Updates `model` in place: only rows whose content changed are written, so a
+/// steady-state refresh of an unchanged list notifies the view of nothing.
+fn apply_rows(model: &VecModel<TaskRow>, rows: Vec<TaskRow>) {
+    let cur_len = model.row_count();
+    let new_len = rows.len();
+    for i in (new_len..cur_len).rev() {
+        model.remove(i);
+    }
+    for (i, row) in rows.into_iter().enumerate() {
+        if i < model.row_count() {
+            if model.row_data(i).as_ref() != Some(&row) {
+                model.set_row_data(i, row);
+            }
+        } else {
+            model.push(row);
+        }
+    }
+}
+
+macro_rules! install_tr {
+    ($win:expr) => {{
+        let tr = $win.global::<Tr>();
+        tr.on_t(|text, _lang| i18n::translate(text.as_str()).into());
+        tr.set_lang(i18n::current_language().into());
+    }};
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::open()?;
     let ipc = IpcClient::new(paths.clone());
@@ -1438,6 +1934,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if initial_settings.start_minimized {
         ui.window().set_minimized(true);
     }
+    i18n::set_language(&initial_settings.language);
+    install_tr!(ui);
+    ui.set_col_filename(initial_settings.columns.filename);
+    ui.set_col_size(initial_settings.columns.size);
+    ui.set_col_status(initial_settings.columns.status);
+    ui.set_col_time_left(initial_settings.columns.time_left);
+    ui.set_col_transfer_rate(initial_settings.columns.transfer_rate);
+    ui.set_col_last_try_date(initial_settings.columns.last_try_date);
+    ui.set_col_description(initial_settings.columns.description);
+    ui.set_col_category(initial_settings.columns.category);
+    ui.set_col_queue(initial_settings.columns.queue);
+
+    let sort_state = Arc::new(Mutex::new(("id".to_string(), true)));
+    let selected_task_ids = Arc::new(Mutex::new(std::collections::HashSet::<usize>::new()));
+    let tasks_model = Rc::new(VecModel::<TaskRow>::default());
+    ui.set_tasks(ModelRc::from(tasks_model.clone()));
 
     let previous_task_statuses = Arc::new(Mutex::new(std::collections::HashMap::<i64, String>::new()));
     let previous_queue_statuses = Arc::new(Mutex::new(std::collections::HashMap::<i64, bool>::new()));
@@ -1508,6 +2020,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings_sound_refresh = gui_settings.clone();
     let live_ids_refresh = live_task_ids.clone();
     let db_path_refresh = paths.dir.join("tasks.sqlite3");
+    let sort_state_refresh = sort_state.clone();
+    let selected_ids_refresh = selected_task_ids.clone();
     let refresh: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if is_refreshing.swap(true, Ordering::SeqCst) {
             return;
@@ -1521,9 +2035,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sound_settings = settings_sound_refresh.clone();
         let live_ids_refresh = live_ids_refresh.clone();
         let db_path_refresh = db_path_refresh.clone();
+        let sort_state = sort_state_refresh.clone();
+        let selected_ids = selected_ids_refresh.clone();
         ipc_refresh.execute(move |paths| {
             let reply_res = paths.request(Command::List);
+            let ipc_done = std::time::Instant::now();
             let _ = slint::invoke_from_event_loop(move || {
+                let ui_start = std::time::Instant::now();
                 is_refreshing.store(false, Ordering::SeqCst);
                 let Some(ui) = weak.upgrade() else {
                     return;
@@ -1611,62 +2129,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let filter = ui.get_category_filter().to_string();
                         let query = ui.get_search_query().to_string().to_lowercase();
                         let mut task_list = reply.tasks;
-                        if queue_filter != 0 {
+                        let queue_map: std::collections::HashMap<i64, String> =
+                            reply.queues.iter().map(|q| (q.id, q.name.clone())).collect();
+                        let (sort_col, sort_asc) = sort_state
+                            .lock()
+                            .map(|s| s.clone())
+                            .unwrap_or(("id".into(), true));
+                        if queue_filter != 0 && sort_col == "id" {
                             task_list.sort_by_key(|t| (t.position, t.id));
+                        } else {
+                            task_table::sort_tasks(&mut task_list, &sort_col, sort_asc, &queue_map);
                         }
                         let mut task_media_secs: std::collections::HashMap<i64, Option<u64>> =
                             std::collections::HashMap::new();
                         for t in &task_list {
                             task_media_secs.insert(t.id, t.media_seconds);
                         }
-                        let rows = task_list
-                            .into_iter()
-                            .filter(|task| queue_filter == 0 || task.queue_id == queue_filter)
-                            .filter(|task| filter == "All" || task.category == filter)
-                            .filter(|task| {
-                                query.is_empty()
-                                    || task.url.to_lowercase().contains(&query)
-                                    || task.output.to_lowercase().contains(&query)
-                                    || task.status.to_lowercase().contains(&query)
-                                    || task.category.to_lowercase().contains(&query)
-                                    || task.id.to_string().contains(&query)
-                            })
-                            .map(|task| {
-                                ids.push(task.id);
-                                let progress = match (task.downloaded, task.total) {
-                                    (Some(done), Some(total)) if total > 0 => {
-                                        (done.saturating_mul(100) / total).min(100)
-                                    }
-                                    _ => 0,
-                                };
-                                let pos_str = if queue_filter != 0 {
-                                    format!("pos {:<2}  ", task.position)
-                                } else {
-                                    String::new()
-                                };
-                                TaskRow {
-                                    label: format!(
-                                        "#{:<5}  {}{:<10}  P{}  {:>3}%  {}  ETA {}  {}",
-                                        task.id,
-                                        pos_str,
-                                        task.status,
-                                        task.priority,
-                                        progress,
-                                        task.bytes_per_second.map_or_else(
-                                            || "—".into(),
-                                            |rate| format!("{:.1} KiB/s", rate as f64 / 1024.0)
-                                        ),
-                                        task.eta_seconds.map_or_else(
-                                            || "—".into(),
-                                            |seconds| format!("{}m {}s", seconds / 60, seconds % 60)
-                                        ),
-                                        task.output
-                                    )
-                                    .into(),
-                                    progress: progress as f32,
-                                }
-                            })
-                            .collect::<Vec<_>>();
+                        let selected_set = selected_ids
+                            .lock()
+                            .map(|s| s.clone())
+                            .unwrap_or_default();
+                        let row_filter = RowFilter {
+                            queue_id: queue_filter,
+                            category: &filter,
+                            query: &query,
+                        };
+                        let rows = build_rows(task_list, &queue_map, &selected_set, &row_filter, &mut ids);
+
+                        let diff_start = std::time::Instant::now();
+                        let model_rc = ui.get_tasks();
+                        let Some(tasks_model) = model_rc.as_any().downcast_ref::<VecModel<TaskRow>>() else { return; };
+                        let new_len = rows.len();
+                        apply_rows(tasks_model, rows);
+                        let diff_duration = diff_start.elapsed();
+                        if new_len >= 1000 && std::env::var_os("XDM_GUI_PERF").is_some() {
+                            eprintln!(
+                                "[xdm-gui] refresh rows={} ui_thread_total={:?} (sort+filter+row build {:?}, model diff {:?}) event_loop_wait={:?}",
+                                new_len,
+                                ui_start.elapsed(),
+                                diff_start.duration_since(ui_start),
+                                diff_duration,
+                                ui_start.duration_since(ipc_done),
+                            );
+                        }
+
                         let new_selected_index = previous_selection
                             .and_then(|id| ids.iter().position(|candidate| *candidate == id))
                             .map_or(-1, |index| index as i32);
@@ -1679,7 +2185,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             is_live_task(&db_path_refresh, id, media_sec, &live_ids_refresh)
                         });
                         ui.set_pause_button_text(if is_live { "Stop and save".into() } else { "Pause".into() });
-                        ui.set_tasks(ModelRc::new(VecModel::from(rows)));
                         ui.set_message(format!("{} task(s)", ids.len()).into());
                     }
                     Ok(reply) => ui.set_message(reply.error.unwrap_or_else(|| "List failed".into()).into()),
@@ -1947,6 +2452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         let weak = ui.as_weak();
         let ids = task_ids.clone();
+        let sel_set = selected_task_ids.clone();
         let ipc = ipc.clone();
         let refresh = refresh.clone();
         callback(
@@ -1955,23 +2461,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(ui) = weak.upgrade() else {
                     return;
                 };
-                let index = ui.get_selected();
-                let Some(id) = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| ids.lock().ok().and_then(|guard| guard.get(index).copied()))
-                else {
+                let targets = target_ids(&ui, &ids, &sel_set);
+                if targets.is_empty() {
                     ui.set_message("Select a task first".into());
                     return;
-                };
-                let command = if pause {
-                    Command::Pause { task_id: id }
-                } else {
-                    Command::Resume { task_id: id }
-                };
+                }
                 let weak = weak.clone();
                 let refresh = refresh.clone();
                 ipc.execute(move |paths| {
-                    let result = request(paths, command);
+                    let mut last = String::new();
+                    for id in &targets {
+                        let command = if pause {
+                            Command::Pause { task_id: *id }
+                        } else {
+                            Command::Resume { task_id: *id }
+                        };
+                        last = request(paths, command);
+                    }
+                    let result = if targets.len() > 1 {
+                        format!("{} {} task(s)", if pause { "Paused" } else { "Resumed" }, targets.len())
+                    } else {
+                        last
+                    };
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.set_message(result.into());
@@ -2067,6 +2578,311 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         });
     });
+
+    // --- selection, sorting, keyboard -------------------------------------
+    let anchor = Rc::new(std::cell::Cell::new(-1i32));
+    {
+        let ids = task_ids.clone();
+        let set = selected_task_ids.clone();
+        let anchor = anchor.clone();
+        let weak = ui.as_weak();
+        ui.on_task_clicked(move |index, ctrl, shift| {
+            let Some(ui) = weak.upgrade() else { return; };
+            let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
+            let Some(id) = usize::try_from(index).ok().and_then(|i| ids.get(i).copied()) else { return; };
+            let Ok(mut set) = set.lock() else { return; };
+            let prev = anchor.get();
+            if shift && prev >= 0 {
+                let (lo, hi) = (prev.min(index) as usize, prev.max(index) as usize);
+                set.clear();
+                for i in lo..=hi.min(ids.len().saturating_sub(1)) {
+                    set.insert(ids[i] as usize);
+                }
+            } else if ctrl {
+                if set.is_empty() {
+                    if let Some(pid) = usize::try_from(prev).ok().and_then(|i| ids.get(i).copied()) {
+                        set.insert(pid as usize);
+                    }
+                }
+                if !set.remove(&(id as usize)) {
+                    set.insert(id as usize);
+                }
+                anchor.set(index);
+            } else {
+                set.clear();
+                set.insert(id as usize);
+                anchor.set(index);
+            }
+            sync_selection(&ui, &set);
+        });
+    }
+    {
+        let sort_state = sort_state.clone();
+        let weak = ui.as_weak();
+        let refresh = refresh.clone();
+        ui.on_sort_by_column(move |col| {
+            let Some(ui) = weak.upgrade() else { return; };
+            if let Ok(mut state) = sort_state.lock() {
+                if state.0 == col.as_str() {
+                    state.1 = !state.1;
+                } else {
+                    *state = (col.to_string(), true);
+                }
+                ui.set_sort_column(state.0.clone().into());
+                ui.set_sort_asc(state.1);
+            }
+            refresh();
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_key_delete(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_remove_task();
+            }
+        });
+        let weak = ui.as_weak();
+        ui.on_key_enter(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_task_details();
+            }
+        });
+        let weak = ui.as_weak();
+        let ids = task_ids.clone();
+        let set = selected_task_ids.clone();
+        let anchor_all = anchor.clone();
+        ui.on_key_select_all(move || {
+            let Some(ui) = weak.upgrade() else { return; };
+            let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
+            if let Ok(mut set) = set.lock() {
+                *set = ids.iter().map(|id| *id as usize).collect();
+                sync_selection(&ui, &set);
+            }
+            if !ids.is_empty() && ui.get_selected() < 0 {
+                ui.set_selected(0);
+                anchor_all.set(0);
+            }
+            ui.set_message(format!("{} task(s) selected", ids.len()).into());
+        });
+        for delta in [-1i32, 1] {
+            let weak = ui.as_weak();
+            let ids = task_ids.clone();
+            let set = selected_task_ids.clone();
+            let anchor = anchor.clone();
+            let handler = move || {
+                let Some(ui) = weak.upgrade() else { return; };
+                let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
+                if ids.is_empty() {
+                    return;
+                }
+                let cur = ui.get_selected();
+                let next = if cur < 0 {
+                    if delta > 0 { 0 } else { ids.len() as i32 - 1 }
+                } else {
+                    (cur + delta).clamp(0, ids.len() as i32 - 1)
+                };
+                ui.set_selected(next);
+                anchor.set(next);
+                if let Ok(mut set) = set.lock() {
+                    set.clear();
+                    set.insert(ids[next as usize] as usize);
+                    sync_selection(&ui, &set);
+                }
+                ui.invoke_task_selected(next);
+            };
+            if delta < 0 {
+                ui.on_key_up(handler);
+            } else {
+                ui.on_key_down(handler);
+            }
+        }
+    }
+
+    // --- open / open folder / move-rename ---------------------------------
+    for folder in [false, true] {
+        let weak = ui.as_weak();
+        let paths_open = paths.clone();
+        let ids_open = task_ids.clone();
+        let handler = move || {
+            let Some(ui) = weak.upgrade() else { return; };
+            let Some(task_id) = selected_task(&ui, &ids_open) else { return; };
+            match paths_open.request(Command::GetTask { task_id }) {
+                Ok(reply) if reply.ok => {
+                    let Some(task) = reply.tasks.first() else { return; };
+                    if task.output.is_empty() {
+                        ui.set_message("Task has no output path".into());
+                    } else if folder {
+                        task_table::open_folder(&task.output);
+                        ui.set_message(format!("Opening folder of {}", task.output).into());
+                    } else if task.status != "completed" {
+                        ui.set_message("Only completed downloads can be opened".into());
+                    } else {
+                        task_table::open_file(&task.output);
+                        ui.set_message(format!("Opening {}", task.output).into());
+                    }
+                }
+                Ok(reply) => ui.set_message(reply.error.unwrap_or_else(|| "Task not found".into()).into()),
+                Err(error) => ui.set_message(error.to_string().into()),
+            }
+        };
+        if folder {
+            ui.on_open_task_folder(handler);
+        } else {
+            ui.on_open_task(handler);
+        }
+    }
+
+    let move_window = Rc::new(RefCell::new(None::<MoveRenameWindow>));
+    {
+        let weak = ui.as_weak();
+        let paths_move = paths.clone();
+        let ids_move = task_ids.clone();
+        let refresh_move = refresh.clone();
+        ui.on_move_rename_task(move || {
+            let Some(ui) = weak.upgrade() else { return; };
+            let Some(task_id) = selected_task(&ui, &ids_move) else { return; };
+            let task = match paths_move.request(Command::GetTask { task_id }) {
+                Ok(reply) if reply.ok => reply.tasks.into_iter().next(),
+                Ok(reply) => {
+                    ui.set_message(reply.error.unwrap_or_else(|| "Task not found".into()).into());
+                    return;
+                }
+                Err(error) => {
+                    ui.set_message(error.to_string().into());
+                    return;
+                }
+            };
+            let Some(task) = task else { return; };
+            if task.status != "completed" {
+                ui.set_message("Move / Rename is only available for completed downloads".into());
+                return;
+            }
+            let dialog = match MoveRenameWindow::new() {
+                Ok(d) => d,
+                Err(error) => {
+                    ui.set_message(error.to_string().into());
+                    return;
+                }
+            };
+            install_tr!(dialog);
+            dialog.set_current_path(task.output.clone().into());
+            dialog.set_target_path(task.output.clone().into());
+            let weak_dialog = dialog.as_weak();
+            let weak_ui = ui.as_weak();
+            let refresh = refresh_move.clone();
+            let source = task.output.clone();
+            dialog.on_submit(move || {
+                let Some(dialog) = weak_dialog.upgrade() else { return; };
+                let target = dialog.get_target_path().to_string();
+                if target.trim().is_empty() || target == source {
+                    dialog.set_message("Enter a different destination path".into());
+                    return;
+                }
+                match task_table::move_file(std::path::Path::new(&source), std::path::Path::new(target.trim())) {
+                    Ok(()) => {
+                        let _ = dialog.hide();
+                        if let Some(ui) = weak_ui.upgrade() {
+                            ui.set_message(format!("Moved to {target} (daemon task record keeps the old path)").into());
+                        }
+                        refresh();
+                    }
+                    Err(error) => dialog.set_message(error.into()),
+                }
+            });
+            let weak_dialog = dialog.as_weak();
+            dialog.on_dismiss(move || {
+                if let Some(d) = weak_dialog.upgrade() {
+                    let _ = d.hide();
+                }
+            });
+            if let Some(prev) = move_window.borrow_mut().take() {
+                let _ = prev.hide();
+            }
+            if let Err(error) = dialog.show() {
+                ui.set_message(error.to_string().into());
+            }
+            *move_window.borrow_mut() = Some(dialog);
+        });
+    }
+
+    // --- column visibility -------------------------------------------------
+    let columns_window = Rc::new(RefCell::new(None::<ColumnsWindow>));
+    {
+        let weak = ui.as_weak();
+        let settings_cols = gui_settings.clone();
+        let dir_cols = paths.dir.clone();
+        ui.on_open_columns(move || {
+            let Some(ui) = weak.upgrade() else { return; };
+            let dialog = match ColumnsWindow::new() {
+                Ok(d) => d,
+                Err(error) => {
+                    ui.set_message(error.to_string().into());
+                    return;
+                }
+            };
+            install_tr!(dialog);
+            dialog.set_col_filename(ui.get_col_filename());
+            dialog.set_col_size(ui.get_col_size());
+            dialog.set_col_status(ui.get_col_status());
+            dialog.set_col_time_left(ui.get_col_time_left());
+            dialog.set_col_transfer_rate(ui.get_col_transfer_rate());
+            dialog.set_col_last_try_date(ui.get_col_last_try_date());
+            dialog.set_col_description(ui.get_col_description());
+            dialog.set_col_category(ui.get_col_category());
+            dialog.set_col_queue(ui.get_col_queue());
+            let weak_dialog = dialog.as_weak();
+            let weak_ui = ui.as_weak();
+            let settings = settings_cols.clone();
+            let dir = dir_cols.clone();
+            dialog.on_apply_columns(move || {
+                let (Some(d), Some(ui)) = (weak_dialog.upgrade(), weak_ui.upgrade()) else { return; };
+                ui.set_col_filename(d.get_col_filename());
+                ui.set_col_size(d.get_col_size());
+                ui.set_col_status(d.get_col_status());
+                ui.set_col_time_left(d.get_col_time_left());
+                ui.set_col_transfer_rate(d.get_col_transfer_rate());
+                ui.set_col_last_try_date(d.get_col_last_try_date());
+                ui.set_col_description(d.get_col_description());
+                ui.set_col_category(d.get_col_category());
+                ui.set_col_queue(d.get_col_queue());
+                let mut new_settings = settings.lock().map(|s| s.clone()).unwrap_or_default();
+                new_settings.columns = settings::ColumnSettings {
+                    filename: d.get_col_filename(),
+                    size: d.get_col_size(),
+                    status: d.get_col_status(),
+                    time_left: d.get_col_time_left(),
+                    transfer_rate: d.get_col_transfer_rate(),
+                    last_try_date: d.get_col_last_try_date(),
+                    description: d.get_col_description(),
+                    category: d.get_col_category(),
+                    queue: d.get_col_queue(),
+                };
+                match settings::save_settings(&dir, &new_settings) {
+                    Ok(()) => {
+                        if let Ok(mut guard) = settings.lock() {
+                            *guard = new_settings;
+                        }
+                        ui.set_message("Columns saved".into());
+                        let _ = d.hide();
+                    }
+                    Err(error) => ui.set_message(format!("Failed to save columns: {error}").into()),
+                }
+            });
+            let weak_dialog = dialog.as_weak();
+            dialog.on_dismiss(move || {
+                if let Some(d) = weak_dialog.upgrade() {
+                    let _ = d.hide();
+                }
+            });
+            if let Some(prev) = columns_window.borrow_mut().take() {
+                let _ = prev.hide();
+            }
+            if let Err(error) = dialog.show() {
+                ui.set_message(error.to_string().into());
+            }
+            *columns_window.borrow_mut() = Some(dialog);
+        });
+    }
 
     let details_window = Rc::new(RefCell::new(None::<DetailsWindow>));
     let weak = ui.as_weak();
@@ -2226,29 +3042,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = ui.as_weak();
     let paths_remove = paths.clone();
     let ids_remove = task_ids.clone();
+    let sel_remove = selected_task_ids.clone();
     let refresh_remove = refresh.clone();
     let settings_remove = gui_settings.clone();
     ui.on_remove_task(move || {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let Some(task_id) = selected_task(&ui, &ids_remove) else {
+        let targets = target_ids(&ui, &ids_remove, &sel_remove);
+        if targets.is_empty() {
+            ui.set_message("Select a task first".into());
             return;
+        }
+        let remove_all = |paths: &Paths, targets: &[i64]| -> Result<(), String> {
+            for task_id in targets {
+                match paths.request(Command::Remove { task_id: *task_id }) {
+                    Ok(reply) if reply.ok => {}
+                    Ok(reply) => {
+                        return Err(reply.error.unwrap_or_else(|| "Remove rejected".into()));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Ok(())
+        };
+        let done_message = |targets: &[i64]| {
+            if targets.len() == 1 {
+                format!("Task #{} removed; files kept", targets[0])
+            } else {
+                format!("{} tasks removed; files kept", targets.len())
+            }
         };
         let confirm = settings_remove.lock().map(|s| s.confirm_remove).unwrap_or(true);
         if !confirm {
-            match paths_remove.request(Command::Remove { task_id }) {
-                Ok(reply) if reply.ok => {
+            match remove_all(&paths_remove, &targets) {
+                Ok(()) => {
+                    if let Ok(mut set) = sel_remove.lock() {
+                        set.clear();
+                    }
+                    ui.set_selected(-1);
                     refresh_remove();
-                    ui.set_message(format!("Task #{task_id} removed; files kept").into());
+                    ui.set_message(done_message(&targets).into());
                 }
-                Ok(reply) => ui.set_message(
-                    reply
-                        .error
-                        .unwrap_or_else(|| "Remove rejected".into())
-                        .into(),
-                ),
-                Err(error) => ui.set_message(error.to_string().into()),
+                Err(error) => ui.set_message(error.into()),
             }
             return;
         }
@@ -2259,30 +3095,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
         };
-        dialog.set_message(format!("Remove task #{task_id} from the download list?").into());
+        dialog.set_message(
+            if targets.len() == 1 {
+                format!("Remove task #{} from the download list?", targets[0])
+            } else {
+                format!("Remove {} tasks from the download list?", targets.len())
+            }
+            .into(),
+        );
         let paths = paths_remove.clone();
         let refresh = refresh_remove.clone();
+        let sel_confirm = sel_remove.clone();
         let weak_dialog = dialog.as_weak();
         let weak_ui = ui.as_weak();
         dialog.on_confirm(move || {
             let Some(dialog) = weak_dialog.upgrade() else {
                 return;
             };
-            match paths.request(Command::Remove { task_id }) {
-                Ok(reply) if reply.ok => {
+            match remove_all(&paths, &targets) {
+                Ok(()) => {
                     let _ = dialog.hide();
-                    refresh();
-                    if let Some(ui) = weak_ui.upgrade() {
-                        ui.set_message(format!("Task #{task_id} removed; files kept").into());
+                    if let Ok(mut set) = sel_confirm.lock() {
+                        set.clear();
                     }
+                    if let Some(ui) = weak_ui.upgrade() {
+                        ui.set_selected(-1);
+                        ui.set_message(done_message(&targets).into());
+                    }
+                    refresh();
                 }
-                Ok(reply) => dialog.set_message(
-                    reply
-                        .error
-                        .unwrap_or_else(|| "Remove rejected".into())
-                        .into(),
-                ),
-                Err(error) => dialog.set_message(error.to_string().into()),
+                Err(error) => dialog.set_message(error.into()),
             }
         });
         let weak_dialog = dialog.as_weak();
@@ -4263,7 +5105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => { main_ui.set_message(e.to_string().into()); return; }
         };
         let current = settings_pref.lock().unwrap().clone();
+        install_tr!(dialog);
         dialog.set_theme(current.theme.clone().into());
+        dialog.set_language(current.language.clone().into());
         dialog.set_confirm_remove(current.confirm_remove);
         dialog.set_start_minimized(current.start_minimized);
         dialog.set_monitor_clipboard(current.monitor_clipboard);
@@ -4286,6 +5130,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(m) = weak_main.upgrade() {
                 m.invoke_apply_theme(theme);
+            }
+        });
+
+        let weak_dialog_lang = dialog.as_weak();
+        let weak_main_lang = weak_main_pref.clone();
+        dialog.on_select_language(move |lang| {
+            if let Some(d) = weak_dialog_lang.upgrade() {
+                d.set_language(lang.clone());
+            }
+            i18n::set_language(lang.as_str());
+            if let Some(d) = weak_dialog_lang.upgrade() {
+                d.global::<Tr>().set_lang(i18n::current_language().into());
+            }
+            if let Some(m) = weak_main_lang.upgrade() {
+                m.global::<Tr>().set_lang(i18n::current_language().into());
+            }
+        });
+        let weak_main_cols = weak_main_pref.clone();
+        dialog.on_open_columns(move || {
+            if let Some(m) = weak_main_cols.upgrade() {
+                m.invoke_open_columns();
             }
         });
 
@@ -4324,6 +5189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(d) = weak_dialog_save.upgrade() else { return; };
             let mut new_settings = settings_save.lock().unwrap().clone();
             new_settings.theme = d.get_theme().to_string();
+            new_settings.language = d.get_language().to_string();
             new_settings.confirm_remove = d.get_confirm_remove();
             new_settings.start_minimized = d.get_start_minimized();
             new_settings.monitor_clipboard = d.get_monitor_clipboard();
@@ -4469,4 +5335,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     ui.run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod table_perf_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::time::Instant;
+
+    fn summaries(count: usize, done_every: usize) -> Vec<xdm_ipc::TaskSummary> {
+        (1..=count)
+            .map(|i| {
+                let status = if i % done_every == 0 { "downloading" } else { "queued" };
+                serde_json::from_value(serde_json::json!({
+                    "id": i,
+                    "url": format!("http://example.invalid/dir/file{:05}.bin", (i * 7919) % count),
+                    "output": format!("/tmp/xdm/file{:05}.bin", (i * 7919) % count),
+                    "status": status,
+                    "priority": 1,
+                    "error": null,
+                    "downloaded": if status == "downloading" { Some(i as u64 * 10) } else { None },
+                    "total": 1_000_000u64,
+                    "category": "Other",
+                    "queue_id": 1,
+                    "bytes_per_second": 1234,
+                    "eta_seconds": 77,
+                    "created_at": "2026-01-01 00:00:00",
+                    "updated_at": "2026-01-02 00:00:00",
+                }))
+                .expect("task summary fixture")
+            })
+            .collect()
+    }
+
+    /// Full refresh pipeline minus IPC and rendering: sort, filter, row build, model diff.
+    #[test]
+    fn refresh_pipeline_handles_5000_tasks() {
+        let queue_map: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
+        let selected = HashSet::new();
+        let filter = RowFilter { queue_id: 0, category: "All", query: "" };
+        let model = VecModel::<TaskRow>::default();
+        let mut ids = Vec::new();
+
+        let run = |label: &str, mut tasks: Vec<xdm_ipc::TaskSummary>, column: &str, ids: &mut Vec<i64>| {
+            let start = Instant::now();
+            task_table::sort_tasks(&mut tasks, column, true, &queue_map);
+            let sorted = start.elapsed();
+            let rows = build_rows(tasks, &queue_map, &selected, &filter, ids);
+            let built = start.elapsed();
+            apply_rows(&model, rows);
+            let total = start.elapsed();
+            eprintln!(
+                "[perf] {label}: rows={} sort={sorted:?} sort+build={built:?} total={total:?}",
+                model.row_count()
+            );
+            total
+        };
+
+        let first = run("first fill, sort=filename", summaries(5000, 50), "filename", &mut ids);
+        assert_eq!(model.row_count(), 5000);
+        assert_eq!(ids.len(), 5000);
+        let name = |model: &VecModel<TaskRow>, i: usize| model.row_data(i).unwrap().filename.to_string();
+        assert!(name(&model, 0) <= name(&model, 1) && name(&model, 4998) <= name(&model, 4999));
+
+        let steady = run("steady refresh (nothing changed)", summaries(5000, 50), "filename", &mut ids);
+        let churn = run("refresh with 10% rows changed", summaries(5000, 10), "filename", &mut ids);
+        let by_size = run("resort by size", summaries(5000, 10), "size", &mut ids);
+        let by_status = run("resort by status", summaries(5000, 10), "status", &mut ids);
+        assert_eq!(model.row_count(), 5000);
+        for (label, took) in [("first", first), ("steady", steady), ("churn", churn), ("size", by_size), ("status", by_status)] {
+            // Generous bound that also holds for unoptimised debug test builds.
+            assert!(took.as_millis() < 2000, "{label} refresh took {took:?}");
+        }
+    }
+
+    #[test]
+    fn reapplying_rows_updates_in_place_and_shrinks() {
+        let queue_map: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
+        let filter = RowFilter { queue_id: 0, category: "All", query: "" };
+        let model = VecModel::<TaskRow>::default();
+        let mut ids = Vec::new();
+        apply_rows(&model, build_rows(summaries(200, 50), &queue_map, &HashSet::new(), &filter, &mut ids));
+        assert_eq!(model.row_count(), 200);
+        let changed = build_rows(summaries(150, 10), &queue_map, &HashSet::new(), &filter, &mut ids);
+        let expected = changed.clone();
+        apply_rows(&model, changed);
+        assert_eq!(model.row_count(), 150);
+        for (i, row) in expected.iter().enumerate() {
+            assert_eq!(model.row_data(i).as_ref(), Some(row));
+        }
+        assert_eq!(ids.len(), 150);
+    }
+
+    #[test]
+    fn filters_by_query_and_queue() {
+        let queue_map: HashMap<i64, String> = HashMap::from([(1, "Main".to_string())]);
+        let mut ids = Vec::new();
+        let filter = RowFilter { queue_id: 0, category: "All", query: "file00007" };
+        let rows = build_rows(summaries(100, 50), &queue_map, &HashSet::new(), &filter, &mut ids);
+        assert_eq!(rows.len(), ids.len());
+        assert!(rows.iter().all(|r| r.filename.contains("file00007")));
+        let other_queue = RowFilter { queue_id: 9, category: "All", query: "" };
+        assert!(build_rows(summaries(10, 5), &queue_map, &HashSet::new(), &other_queue, &mut ids).is_empty());
+    }
 }

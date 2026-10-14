@@ -1,0 +1,139 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: XDM 0.1\n"
+"Language: ur\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Add media…"
+msgstr "میڈیا شامل کریں…"
+
+msgid "Add URL"
+msgstr "یو آر ایل شامل کریں"
+
+msgid "All queues"
+msgstr "تمام قطاریں"
+
+msgid "Batch…"
+msgstr "بیچ…"
+
+msgid "Cancel"
+msgstr "منسوخ"
+
+msgid "Categories…"
+msgstr "زمرے…"
+
+msgid "Category"
+msgstr "زمرہ"
+
+msgid "Clear"
+msgstr "صاف کریں"
+
+msgid "Close"
+msgstr "بند کریں"
+
+msgid "Columns…"
+msgstr "کالم…"
+
+msgid "Connection…"
+msgstr "کنکشن…"
+
+msgid "Delete"
+msgstr "حذف کریں"
+
+msgid "Description"
+msgstr "تفصیل"
+
+msgid "Details"
+msgstr "تفصیلات"
+
+msgid "Downloads"
+msgstr "ڈاؤن لوڈز"
+
+msgid "File name"
+msgstr "فائل کا نام"
+
+msgid "Find"
+msgstr "تلاش"
+
+msgid "Grabber…"
+msgstr "گریبر…"
+
+msgid "Hide controls"
+msgstr "کنٹرولز چھپائیں"
+
+msgid "Import / Export…"
+msgstr "درآمد / برآمد…"
+
+msgid "Last try date"
+msgstr "آخری کوشش"
+
+msgid "More controls"
+msgstr "مزید کنٹرولز"
+
+msgid "Move / Rename"
+msgstr "منتقل / نام بدلیں"
+
+msgid "Move / Rename…"
+msgstr "منتقل / نام بدلیں…"
+
+msgid "Open"
+msgstr "کھولیں"
+
+msgid "Open folder"
+msgstr "فولڈر کھولیں"
+
+msgid "Pause"
+msgstr "روکیں"
+
+msgid "Preferences…"
+msgstr "ترجیحات…"
+
+msgid "Properties"
+msgstr "خصوصیات"
+
+msgid "Queue"
+msgstr "قطار"
+
+msgid "Queues…"
+msgstr "قطاریں…"
+
+msgid "Redownload…"
+msgstr "دوبارہ ڈاؤن لوڈ…"
+
+msgid "Refresh"
+msgstr "تازہ کریں"
+
+msgid "Remove from list…"
+msgstr "فہرست سے ہٹائیں…"
+
+msgid "Resume"
+msgstr "جاری رکھیں"
+
+msgid "Save"
+msgstr "محفوظ کریں"
+
+msgid "Size"
+msgstr "سائز"
+
+msgid "Start all"
+msgstr "سب شروع کریں"
+
+msgid "Status"
+msgstr "حالت"
+
+msgid "Stop all"
+msgstr "سب روکیں"
+
+msgid "Stop and save"
+msgstr "روکیں اور محفوظ کریں"
+
+msgid "Time left"
+msgstr "باقی وقت"
+
+msgid "Transfer rate"
+msgstr "رفتار"
+
+msgid "XDM"
+msgstr "ایکس ڈی ایم"

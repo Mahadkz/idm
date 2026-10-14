@@ -187,7 +187,31 @@ pub(crate) fn due_queues(inner: &mut Inner) -> Result<Vec<i64>> {
     Ok(due)
 }
 
+/// Time until the earliest automatic check; `None` when no sync queue has an
+/// interval. Queues with a check in flight are re-evaluated when it ends.
+pub(crate) fn next_due(inner: &Inner) -> Result<Option<Duration>> {
+    let now = inner.clock.now();
+    let rows = inner
+        .db
+        .prepare("SELECT id,sync_interval,sync_last FROM queues WHERE sync=1 AND sync_interval IS NOT NULL")?
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(id, _, _)| !inner.sync_running.contains(id))
+        .map(|(_, interval, last)| Duration::from_secs((last + interval - now).max(0) as u64))
+        .min())
+}
+
 impl Service {
+    pub(crate) fn notify_sync(&self) {
+        let (flag, condvar) = &*self.sync_wake;
+        if let Ok(mut pending) = flag.lock() {
+            *pending = true;
+            condvar.notify_one();
+        }
+    }
+
     pub(crate) fn queue_set_sync(&self, queue_id: i64, interval: Option<u64>) -> Result<Reply> {
         if interval.is_some_and(|seconds| !(1..=366 * 86400).contains(&seconds)) {
             return Ok(Reply::error("sync interval must be between 1 second and 366 days"));
@@ -207,6 +231,7 @@ impl Service {
             "UPDATE queues SET sync_interval=?1,sync_last=?2 WHERE id=?3",
             params![interval.map(|v| v as i64), inner.clock.now(), queue_id],
         )?;
+        self.notify_sync();
         crate::queues::queue_reply(&inner, queue_id)
     }
 
@@ -227,11 +252,12 @@ impl Service {
         let now = inner.clock.now();
         inner.db.execute("UPDATE queues SET sync_last=?1 WHERE id=?2", params![now, queue_id])?;
         inner.pending_syncs.push(queue_id);
+        self.notify_sync();
         crate::queues::queue_reply(&inner, queue_id)
     }
 
     /// Starts every due or requested check on its own thread.
-    pub(crate) fn sync_pump(self: &Arc<Self>) -> Result<()> {
+    pub(crate) fn sync_pump(self: &Arc<Self>) -> Result<Option<Duration>> {
         let jobs = {
             let mut inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
             let due = due_queues(&mut inner)?;
@@ -242,6 +268,10 @@ impl Service {
             }
             jobs
         };
+        let next = {
+            let inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
+            next_due(&inner)?
+        };
         for id in jobs {
             let service = self.clone();
             std::thread::spawn(move || {
@@ -251,9 +281,10 @@ impl Service {
                 if let Ok(mut inner) = service.inner.lock() {
                     inner.sync_running.remove(&id);
                 }
+                service.notify_sync();
             });
         }
-        Ok(())
+        Ok(next)
     }
 
     /// Checks every completed member of one synchronization queue.
@@ -401,6 +432,29 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pump_reports_none_without_sync_queues_and_remaining_time_otherwise() {
+        let (service, _clock, _counting) = crate::test_helpers::service(1_000);
+        let remaining = |service: &Arc<Service>| {
+            next_due(&service.inner.lock().unwrap()).unwrap()
+        };
+        assert_eq!(remaining(&service), None);
+        service.queue_create("plain".into(), 2, false).unwrap();
+        assert_eq!(remaining(&service), None);
+        let reply = service.queue_create("sync".into(), 2, true).unwrap();
+        let id = reply.queue_id.unwrap();
+        assert_eq!(remaining(&service), None, "no interval yet");
+        assert!(service.queue_set_sync(id, Some(600)).unwrap().ok);
+        assert_eq!(remaining(&service), Some(Duration::from_secs(600)));
+        service.inner.lock().unwrap().db.execute("UPDATE queues SET sync_last=sync_last-250 WHERE id=?1", [id]).unwrap();
+        assert_eq!(remaining(&service), Some(Duration::from_secs(350)));
+        service.inner.lock().unwrap().db.execute("UPDATE queues SET sync_last=sync_last-1000 WHERE id=?1", [id]).unwrap();
+        assert_eq!(remaining(&service), Some(Duration::ZERO));
+        service.inner.lock().unwrap().sync_running.insert(id);
+        assert_eq!(remaining(&service), None, "in-flight check re-notifies when done");
+        assert!(service.queue_set_sync(id, None).unwrap().ok);
+    }
 
     fn v(etag: Option<&str>, lm: Option<&str>, len: Option<u64>) -> Validators {
         Validators { etag: etag.map(Into::into), last_modified: lm.map(Into::into), length: len }

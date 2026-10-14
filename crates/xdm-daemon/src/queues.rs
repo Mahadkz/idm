@@ -334,6 +334,7 @@ impl Service {
             "INSERT INTO queues(name,running,max_concurrent,sync) VALUES (?1,0,?2,?3)",
             params![name, limit as i64, sync],
         )?;
+        self.notify_sync();
         queue_reply(&inner, inner.db.last_insert_rowid())
     }
 
@@ -430,6 +431,7 @@ impl Service {
             return Ok(Reply::error("queue not found"));
         }
         inner.pending.remove(&queue_id);
+        self.notify_sync();
         inner.db.execute(
             "UPDATE tasks SET history_queue_id=NULL WHERE history_queue_id=?1",
             [queue_id],

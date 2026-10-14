@@ -306,6 +306,8 @@ pub(crate) struct Service {
     /// be spawned from any `&self` command handler.
     pub(crate) inner: Arc<Mutex<Inner>>,
     pub(crate) wake: Arc<Condvar>,
+    /// Wakes the synchronization scheduler when intervals or queues change.
+    pub(crate) sync_wake: Arc<(Mutex<bool>, Condvar)>,
 }
 
 #[derive(Debug)]
@@ -908,6 +910,7 @@ impl Service {
                 sync_running: HashSet::new(),
             })),
             wake: Arc::new(Condvar::new()),
+            sync_wake: Arc::new((Mutex::new(true), Condvar::new())),
         }))
     }
 
@@ -2058,10 +2061,25 @@ fn main() -> Result<()> {
     let syncer = service.clone();
     thread::spawn(move || {
         loop {
-            if let Err(error) = syncer.sync_pump() {
+            let next = syncer.sync_pump().unwrap_or_else(|error| {
                 eprintln!("sync scheduler error: {error}");
-            }
-            thread::sleep(Duration::from_millis(250));
+                Some(Duration::from_secs(5))
+            });
+            // Sleep until the next due check, or indefinitely with none; any
+            // sync change notifies and takes effect at once.
+            let (flag, condvar) = &*syncer.sync_wake;
+            let Ok(guard) = flag.lock() else { return };
+            let mut guard = match next {
+                Some(limit) => match condvar.wait_timeout_while(guard, limit, |pending| !*pending) {
+                    Ok((guard, _)) => guard,
+                    Err(_) => return,
+                },
+                None => match condvar.wait_while(guard, |pending| !*pending) {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                },
+            };
+            *guard = false;
         }
     });
     eprintln!("xdm-daemon listening locally");

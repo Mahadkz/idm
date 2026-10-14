@@ -509,7 +509,10 @@
       "current_behavior": "Partial: only Main + named ordinary queues; no fixed Synchronization queue or mode. [Daemon IPC fixture](../tests/integration/daemon_ipc.py) verifies queue creation, durable acceptance, and ordering/concurrency.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/daemon_ipc.py"
+        "tests/integration/daemon_ipc.py",
+        "tests/integration/sync_queues.py",
+        "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-ipc/src/lib.rs"
       ]
     },
     {
@@ -600,7 +603,12 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Missing: no conditional refresh/replacement or recurring validator watch.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/sync_queues.py",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "Q11",
@@ -1664,7 +1672,12 @@
       "current_behavior": "queue.files: partial; grabber.schedule: pending",
       "status": "partial",
       "test_refs": [
-        "tests/integration/contracts_behavior.py"
+        "tests/integration/contracts_behavior.py",
+        "tests/integration/sync_queues.py",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-daemon/src/queues.rs",
+        "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-ipc/src/lib.rs"
       ]
     },
     {

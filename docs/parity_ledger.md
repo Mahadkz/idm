@@ -61,7 +61,7 @@
 | N46 | Aggregate/per-host bandwidth limits | missing | Missing: no aggregate/per-host bucket. | — |
 | N47 | Usage quota and automatic resumption | missing | Missing: live counters exist but no durable quota ledger/window scheduler. | — |
 | N48 | Resource efficiency contract | partial | Partial: bounded 64 KiB buffers, task-limit bounded threads; per-MiB sync checkp… | — |
-| Q01 | Queue types and default queues | partial | Partial: only Main + named ordinary queues; no fixed Synchronization queue or mo… | tests/integration/daemon_ipc.py |
+| Q01 | Queue types and default queues | partial | Partial: only Main + named ordinary queues; no fixed Synchronization queue or mo… | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
 | Q02 | Named queues and membership | partial | Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max3… | tests/integration/named_queues.py |
 | Q03 | Independent start/stop and global controls | partial | Partial: `queue start-one ID` sets a per-queue independent-start flag so the que… | tests/integration/scheduler.py, tests/integration/queue_policies.py |
 | Q04 | Per-queue simultaneous files | implemented | Implemented bounded per-queue1–16 plus global1–16; Main initial queue limit16/gl… | tests/integration/named_queues.py |
@@ -70,7 +70,7 @@
 | Q07 | Queue retry count and rotation | partial | Partial: per-queue `queue retry ID COUNT | tests/integration/queue_policies.py |
 | Q08 | One-time start/stop | partial | Partial: global one-shot as before, plus per-queue one-time schedule (`queue sch… | tests/integration/scheduler.py, tests/integration/queue_policies.py |
 | Q09 | Daily/weekday recurrence | partial | Partial: per-queue daily schedule (`queue schedule ID daily HH:MM HH:MM | tests/integration/queue_policies.py |
-| Q10 | Synchronization repeat/check changed objects | missing | Missing: no conditional refresh/replacement or recurring validator watch. | — |
+| Q10 | Synchronization repeat/check changed objects | missing | Missing: no conditional refresh/replacement or recurring validator watch. | tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
 | Q11 | Start queue on application startup | different | Different: running flags restored; crashed active tasks requeued and eligible ta… | — |
 | Q12 | Missed runs and daemon availability | partial | Partial: per-queue missed-run policy is implemented (catch up once if the window… | — |
 | Q13 | Sleep wake timers | missing | Missing: no wake registration or capability warning. | — |
@@ -178,7 +178,7 @@
 | server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | task.properties: partial; task.add: partial | tests/integration/contracts_behavior.py |
 | single-use-request | A second request may return HTML instead of the file; origin… | partial | browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial | tests/integration/contracts_behavior.py |
 | stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | media.overlay: pending; task.progress: partial | tests/integration/contracts_behavior.py |
-| synchronization | Synchronization and grabber updates revisit sources, update … | partial | queue.files: partial; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| synchronization | Synchronization and grabber updates revisit sources, update … | partial | queue.files: partial; grabber.schedule: pending | tests/integration/contracts_behavior.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/queues.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
 | temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | settings.paths: partial; task.resume: partial | tests/integration/contracts_behavior.py |
 | tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | settings.connections: partial | tests/integration/contracts_behavior.py |
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | task.progress: partial; task.completion: pending | tests/integration/contracts_behavior.py |
@@ -202,7 +202,6 @@
 | N46 | Aggregate/per-host bandwidth limits | missing | idm_core_queue_contracts.md |
 | N47 | Usage quota and automatic resumption | missing | idm_core_queue_contracts.md |
 | N48 | Resource efficiency contract | partial | idm_core_queue_contracts.md |
-| Q10 | Synchronization repeat/check changed objects | missing | idm_core_queue_contracts.md |
 | Q12 | Missed runs and daemon availability | partial | idm_core_queue_contracts.md |
 | Q13 | Sleep wake timers | missing | idm_core_queue_contracts.md |
 | Q16 | Disconnect modem/VPN and app exit | partial | idm_core_queue_contracts.md |
@@ -210,7 +209,7 @@
 | Q19 | Schedule/order/settings durability | partial | idm_core_queue_contracts.md |
 | Q20 | Pause/resume/redownload state semantics | partial | idm_core_queue_contracts.md |
 
-**Count: 19**
+**Count: 18**
 
 ### Partial contracts WITH tests (next priority)
 
@@ -241,7 +240,7 @@
 | N39 | Disk-full and access-denied assembly | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N45 | Per-file limiter and remembered exceptions | partial | tests/integration/task_rate.py | idm_core_queue_contracts.md |
-| Q01 | Queue types and default queues | partial | tests/integration/daemon_ipc.py | idm_core_queue_contracts.md |
+| Q01 | Queue types and default queues | partial | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | Q02 | Named queues and membership | partial | tests/integration/named_queues.py | idm_core_queue_contracts.md |
 | Q03 | Independent start/stop and global controls | partial | tests/integration/scheduler.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | Q05 | Manual queue order and priority | partial | tests/integration/queue_policies.py | idm_core_queue_contracts.md |
@@ -286,7 +285,7 @@
 | server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | single-use-request | A second request may return HTML instead of the file; origin… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
-| synchronization | Synchronization and grabber updates revisit sources, update … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| synchronization | Synchronization and grabber updates revisit sources, update … | partial | tests/integration/contracts_behavior.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/queues.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_behavior_review.md |
 | temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |

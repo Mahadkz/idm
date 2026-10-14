@@ -29,6 +29,7 @@ impl Service {
         directory: String,
         entries: Vec<ImportEntry>,
         enqueue: bool,
+        allow_duplicate: bool,
     ) -> Result<Reply> {
         if request_id.is_empty()
             || request_id.len() > 64
@@ -85,11 +86,15 @@ impl Service {
         }
         // Entries whose URL already belongs to a task (or repeats an earlier
         // entry) are skipped and reported instead of failing the import.
-        let (kept, skipped) = crate::split_duplicates(
-            &inner.db,
-            &entries.iter().map(|entry| entry.url.as_str()).collect::<Vec<_>>(),
-            None,
-        )?;
+        let (kept, skipped) = if allow_duplicate {
+            ((0..entries.len()).collect(), Vec::new())
+        } else {
+            crate::split_duplicates(
+                &inner.db,
+                &entries.iter().map(|entry| entry.url.as_str()).collect::<Vec<_>>(),
+                None,
+            )?
+        };
         let original_indexes = kept.clone();
         let entries = kept.iter().map(|&index| entries[index].clone()).collect::<Vec<_>>();
         let outputs = entries

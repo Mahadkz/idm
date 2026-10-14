@@ -101,6 +101,15 @@ pub enum Command {
         entries: Vec<ImportEntry>,
         enqueue: bool,
     },
+    /// Like `ImportList`, with an explicit duplicate-URL override.
+    ImportListEx {
+        request_id: String,
+        directory: String,
+        entries: Vec<ImportEntry>,
+        enqueue: bool,
+        #[serde(default)]
+        allow_duplicate: bool,
+    },
     ExportList,
     GetTask {
         task_id: i64,

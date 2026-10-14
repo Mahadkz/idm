@@ -57,14 +57,14 @@ def main():
             assert [entry["filename"] for entry in preview["entries"]] == ["a.bin", "a (2).bin", "b.bin"]
             daemon = start()
             cli("queue", "stop")
-            imported = json.loads(cli("import", urls, base / "paused"))
+            imported = json.loads(cli("import", urls, base / "paused", "--allow-duplicates"))
             assert len(imported["task_ids"]) == 3 and all(row["status"] == "paused" for row in rows())
             before = len(rows())
-            cli("import", urls, base / "paused", success=False)
+            cli("import", urls, base / "paused", "--allow-duplicates", success=False)
             assert len(rows()) == before
             blocked = base / "blocked"
             blocked.mkdir(); (blocked / "a (2).bin").write_text("keep this file")
-            cli("import", urls, blocked, success=False)
+            cli("import", urls, blocked, "--allow-duplicates", success=False)
             assert len(rows()) == before and not (blocked / "a.bin").exists()
             bad = base / "unsafe.json"
             bad_data = json.loads(json.dumps(preview))
@@ -91,7 +91,7 @@ def main():
             plain = base / "exported.txt"
             cli("export", plain, "urls")
             assert len(plain.read_text().splitlines()) == 4 and "password" not in plain.read_text()
-            started = json.loads(cli("import", archive, base / "running", "--start"))
+            started = json.loads(cli("import", archive, base / "running", "--start", "--allow-duplicates"))
             assert len(started["task_ids"]) == 4
             cli("queue", "start")
             deadline = time.monotonic() + 20
@@ -104,15 +104,15 @@ def main():
             for task_id in started["task_ids"]:
                 assert hashlib.sha256(Path(tasks[task_id]["output"]).read_bytes()).hexdigest() == EXPECTED
             cli("queue", "stop")
-            batch = {"request_id": "stable-batch", "directory": str(base / "stable"), "entries": preview["entries"], "enqueue": False}
-            first = rpc("import_list", **batch)
-            assert first["ok"] and rpc("import_list", **batch)["task_ids"] == first["task_ids"]
-            assert not rpc("import_list", **{**batch, "enqueue": True})["ok"]
+            batch = {"request_id": "stable-batch", "directory": str(base / "stable"), "entries": preview["entries"], "enqueue": False, "allow_duplicate": True}
+            first = rpc("import_list_ex", **batch)
+            assert first["ok"] and rpc("import_list_ex", **batch)["task_ids"] == first["task_ids"]
+            assert not rpc("import_list_ex", **{**batch, "enqueue": True})["ok"]
             daemon.terminate(); daemon.wait(timeout=5)
             daemon = start()
-            assert rpc("import_list", **batch)["task_ids"] == first["task_ids"]
+            assert rpc("import_list_ex", **batch)["task_ids"] == first["task_ids"]
             cli("remove", first["task_ids"][0])
-            assert not rpc("import_list", **batch)["ok"]
+            assert not rpc("import_list_ex", **batch)["ok"]
             media = rpc("submit_media", request_id="media-list-fixture", url=f"http://127.0.0.1:{port}/master.m3u8",
                         output=str(base / "media-source.mp4"), video=2, audio=3, priority=1)
             assert media["ok"]
@@ -120,7 +120,7 @@ def main():
             cli("export", media_archive, "json")
             media_entry = next(entry for entry in json.loads(media_archive.read_text())["entries"] if entry["kind"] == "media")
             assert media_entry["video"] == 2 and media_entry["audio"] == 3 and media_entry["connections"] == 1
-            restored = json.loads(cli("import", media_archive, base / "media-restored"))
+            restored = json.loads(cli("import", media_archive, base / "media-restored", "--allow-duplicates"))
             media_rows = [row for row in rows() if row["id"] in restored["task_ids"] and row["kind"] == "media"]
             assert len(media_rows) == 1 and media_rows[0]["media_video"] == 2 and media_rows[0]["media_audio"] == 3
             print("preview/dedup, atomic conflicts, paused/start import, private-header omission, JSON round trip, hashes and persisted receipts passed")

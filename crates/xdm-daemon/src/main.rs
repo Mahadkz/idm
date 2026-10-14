@@ -955,7 +955,14 @@ impl Service {
                 directory,
                 entries,
                 enqueue,
-            } => self.import_list(request_id, directory, entries, enqueue),
+            } => self.import_list(request_id, directory, entries, enqueue, false),
+            Command::ImportListEx {
+                request_id,
+                directory,
+                entries,
+                enqueue,
+                allow_duplicate,
+            } => self.import_list(request_id, directory, entries, enqueue, allow_duplicate),
             Command::ExportList => self.export_list(),
             Command::Submit {
                 request_id,

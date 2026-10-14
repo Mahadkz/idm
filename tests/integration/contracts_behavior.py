@@ -879,7 +879,7 @@ def test_temporary_storage_cleanup():
                 orphan = work / "ghost.bin.part"
                 meta = work / "ghost.bin.part.meta"
                 orphan.write_bytes(b"x" * 4096)
-                meta.write_bytes(b"{}")
+                meta.write_text('{"version":1,"url":"http://x/g","segments":[]}')
                 old = time.time() - 90 * 86400
                 os.utime(orphan, (old, old))
                 os.utime(meta, (old, old))

@@ -60,6 +60,9 @@ pub(crate) struct Inner {
     pub(crate) queue_start_at: Option<i64>,
     pub(crate) queue_stop_at: Option<i64>,
     pub(crate) queue_interrupted: HashSet<i64>,
+    /// Completed tasks whose file is being moved; removal, restart,
+    /// redownload and further moves are refused meanwhile.
+    pub(crate) moving: HashSet<i64>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) adapter: Arc<dyn CompletionAdapter>,
     /// Destructive actions counting down, keyed by queue.
@@ -662,6 +665,9 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if inner.moving.contains(&task_id) {
+            return Ok(Reply::error("task file is being moved"));
+        }
         if request_was_removed(&inner.db, &request_id)? {
             return Ok(Reply::error(
                 "this submission was removed; use a new request ID",
@@ -921,6 +927,7 @@ impl Service {
                 queue_start_at,
                 queue_stop_at,
                 queue_interrupted: HashSet::new(),
+                moving: HashSet::new(),
                 clock,
                 adapter,
                 pending: HashMap::new(),
@@ -1317,9 +1324,10 @@ impl Service {
             } => self.list_page(offset, limit, sort, filter),
             Command::TaskMoveFile { task_id, new_path } => self.move_task_file(task_id, new_path),
             Command::PartialScan { directory } => Ok(match self.scan_partials(&directory)? {
-                Ok(found) => {
+                Ok((found, truncated)) => {
                     let mut reply = Reply::list(Vec::new());
                     reply.partials = found;
+                    reply.truncated = truncated;
                     reply.daemon_version = Some(env!("CARGO_PKG_VERSION").to_owned());
                     reply
                 }
@@ -1532,6 +1540,9 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if inner.moving.contains(&task_id) {
+            return Ok(Reply::error("task file is being moved"));
+        }
         if inner.active.contains_key(&task_id) {
             return Ok(Reply::error(
                 "pause the task and wait for it to stop before restarting it",
@@ -2717,6 +2728,22 @@ mod tests {
         assert!(!daemon_stopped(&stop, &requested), "engine abort is not a pause");
         requested.store(true, Ordering::Relaxed);
         assert!(daemon_stopped(&stop, &requested));
+    }
+
+    #[test]
+    fn moving_task_refuses_remove_restart_redownload_and_move() {
+        let (service, _, _) = service(1000);
+        let id = submit(&service, "moving");
+        service.inner.lock().unwrap().moving.insert(id);
+        assert!(!service.command(Command::Remove { task_id: id }).unwrap().ok);
+        assert!(!service.command(Command::TaskRestart { task_id: id }).unwrap().ok);
+        assert!(!service.command(Command::TaskMoveFile { task_id: id, new_path: "/tmp/x-moving.bin".into() }).unwrap().ok);
+        let reply = service
+            .command(Command::Redownload { task_id: id, request_id: "rd".into(), output: "/nonexistent-xdm-test/rd.bin".into() })
+            .unwrap();
+        assert!(!reply.ok && reply.error.unwrap().contains("moved"));
+        service.inner.lock().unwrap().moving.clear();
+        assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
     }
 
     #[test]

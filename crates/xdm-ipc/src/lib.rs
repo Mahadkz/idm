@@ -834,6 +834,9 @@ pub struct Reply {
     /// Unowned `.part`/`.part.meta` pairs from `PartialScan`.
     #[serde(default)]
     pub partials: Vec<PartialEntry>,
+    /// `PartialScan` stopped at its entry cap.
+    #[serde(default)]
+    pub truncated: bool,
     /// Daemon package version; set by `ListPage` and `PartialScan` replies.
     #[serde(default)]
     pub daemon_version: Option<String>,
@@ -886,6 +889,7 @@ impl Reply {
             skipped_duplicates: Vec::new(),
             total: 0,
             partials: Vec::new(),
+            truncated: false,
             daemon_version: None,
         }
     }
@@ -916,6 +920,7 @@ impl Reply {
             skipped_duplicates: Vec::new(),
             total: 0,
             partials: Vec::new(),
+            truncated: false,
             daemon_version: None,
         }
     }
@@ -955,6 +960,7 @@ impl Reply {
             skipped_duplicates: Vec::new(),
             total: 0,
             partials: Vec::new(),
+            truncated: false,
             daemon_version: None,
         }
     }

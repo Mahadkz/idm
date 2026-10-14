@@ -487,6 +487,7 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
 /// Native messaging manifests this host can detect for the current user.
 fn manifest_report() -> Value {
     const NAME: &str = "org.xdm.browser";
+    #[cfg(unix)]
     let exe = std::env::current_exe().ok();
     let mut found = Vec::new();
     #[cfg(unix)]

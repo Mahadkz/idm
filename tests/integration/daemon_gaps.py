@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import contracts_behavior as cb  # noqa: E402
 
 MIB = cb.MIB
+CHECKPOINT = '{"version":1,"url":"http://x/g","effective_url":"http://x/g","context_sha256":"","length":10,"segments":[]}'
 
 
 def rpc(state, kind, **payload):
@@ -115,8 +116,36 @@ def test_move(root):
                     assert daemon.cli("move-file", tid, target)["ok"]
                     assert target.read_bytes() == data and not (dest / "moved.bin").exists()
                     assert not list(shm.glob(f"xdm-move-{os.getpid()}*.tmp"))
+                    assert daemon.cli("move-file", tid, dest / "moved.bin")["ok"]
                 finally:
                     target.unlink(missing_ok=True)
+            # reserved device names and unnormalized paths
+            daemon.cli("move-file", tid, work / "NUL.bin", success=False)
+            daemon.cli("move-file", tid, work / "com1", success=False)
+            daemon.cli("move-file", tid, f"{work}/sub/../x.bin", success=False)
+            daemon.cli("move-file", tid, f"{dest}/./nested//dots.bin", success=False)
+            assert (dest / "moved.bin").exists()
+            daemon.cli("move-file", tid, f"{work}/./sub//dots.bin")
+            assert daemon.info(tid)["output"] == str(work / "sub" / "dots.bin")
+            daemon.cli("move-file", tid, dest / "moved.bin")
+            # a symlink is never followed as the source
+            secret = root / "secret.txt"
+            secret.write_text("secret")
+            (dest / "moved.bin").unlink()
+            os.symlink(secret, dest / "moved.bin")
+            daemon.cli("move-file", tid, work / "stolen.bin", success=False)
+            assert secret.read_text() == "secret" and not (work / "stolen.bin").exists()
+            (dest / "moved.bin").unlink()
+            (dest / "moved.bin").write_bytes(data)
+            # failed source removal rolls back the new copy
+            if os.geteuid() != 0:
+                os.chmod(dest, 0o555)
+                try:
+                    daemon.cli("move-file", tid, work / "rolled.bin", success=False)
+                finally:
+                    os.chmod(dest, 0o755)
+                assert not (work / "rolled.bin").exists() and (dest / "moved.bin").exists()
+                assert daemon.info(tid)["output"] == str(dest / "moved.bin")
             # running tasks refused
             run = daemon.cli("submit", server.url("/big.bin"), str(work / "big.bin"))["task_id"]
             daemon.cli("rate", run, 64)
@@ -150,16 +179,21 @@ def test_partials(root):
             daemon.wait_status(tid, ("paused",), seconds=8)
             # owned partial is not listed
             (work / "ghost.bin.part").write_bytes(b"x" * 100)
-            (work / "ghost.bin.part.meta").write_bytes(b"{}")
-            (work / "half.bin.part").write_bytes(b"y" * 7)
+            (work / "ghost.bin.part.meta").write_text(CHECKPOINT)
+            # a browser's lone .part and a part with a non-XDM meta are not XDM's
+            (work / "foo.zip.part").write_bytes(b"firefox")
+            (work / "other.bin.part").write_bytes(b"z")
+            (work / "other.bin.part.meta").write_text('{"hello": 1}')
             outside = root / "outside.txt"
             outside.write_text("precious")
             os.symlink(outside, work / "link.bin.part")
             scan = daemon.cli("partials", work)
             found = {Path(e["output"]).name: e for e in scan["partials"]}
-            assert set(found) == {"ghost.bin", "half.bin"}, found
-            assert found["ghost.bin"]["part_size"] == 100 and found["ghost.bin"]["meta_size"] == 2
-            assert found["half.bin"]["meta"] is None
+            assert set(found) == {"ghost.bin"}, found
+            assert found["ghost.bin"]["part_size"] == 100 and found["ghost.bin"]["meta_size"] == len(CHECKPOINT)
+            for foreign in ("foo.zip.part", "other.bin.part", "other.bin.part.meta"):
+                daemon.cli("partials-delete", work, work / foreign, success=False)
+                assert (work / foreign).exists()
             # delete only scanned paths
             daemon.cli("partials-delete", work, work / "big.bin.part", success=False)
             daemon.cli("partials-delete", work, outside, success=False)
@@ -167,12 +201,18 @@ def test_partials(root):
             assert (work / "big.bin.part").exists() and outside.exists()
             daemon.cli("partials-delete", work, found["ghost.bin"]["part"], found["ghost.bin"]["meta"])
             assert not (work / "ghost.bin.part").exists() and not (work / "ghost.bin.part.meta").exists()
-            assert (work / "half.bin.part").exists()
             # remove keeps parts by default, deletes own parts on request
             daemon.cli("remove", tid, "--delete-partial")
             leftovers = sorted(p.name for p in work.iterdir())
-            assert leftovers == ["half.bin.part", "link.bin.part"], leftovers
+            assert leftovers == ["foo.zip.part", "link.bin.part", "other.bin.part", "other.bin.part.meta"], leftovers
             assert outside.read_text() == "precious"
+            # the scan is capped so a reply cannot exceed the frame limit
+            big = root / "many"
+            big.mkdir()
+            for n in range(10001):
+                (big / f"f{n}.bin.part.meta").write_text(CHECKPOINT)
+            capped = daemon.cli("partials", big)
+            assert len(capped["partials"]) == 10000 and capped["truncated"] is True
             print("partials: scan, symlink skip, scan-gated delete, remove --delete-partial passed")
         finally:
             daemon.terminate()

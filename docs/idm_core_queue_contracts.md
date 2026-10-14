@@ -15,14 +15,14 @@ Exact source locations:
 
 ## Immediate implementation limits
 
-The current core is a **parallel HTTP engine with request adoption and dynamic splitting**, with resumable segmented transfers, durable ordinary queues and one-shot global scheduling. It is not full engine/scheduler parity. In particular:
+The current core is a **parallel HTTP/FTP engine with request adoption, dynamic splitting and stall recovery**, a durable daemon with named, synchronization and scheduled queues, bandwidth governance, and completion actions behind opt-in countdowns. It is not full engine/scheduler parity, and nothing below has run on native Windows. Remaining limits (2026-10-15):
 
-- One-connection range transfers are resumable and segment counts may change across resumes (2026-10-13). Non-range servers still restart from byte zero.
-- HEAD is no longer sent; the first range GET is adopted as transfer data. One-shot links succeed when the server accepts one request; browser POST replay is available in the engine/CLI but not yet through daemon or browser submissions.
-- Malformed probe fallback differs from malformed active-range handling: an active worker fails and preserves partial state; it does not reproduce the observed original safe full-GET restart automatically.
-- Per-file token buckets are implemented. A default per-file preference is not an aggregate global cap; host caps, aggregate caps and usage quotas remain absent.
-- Named queue enable is subordinate to a global running flag. Queue order is priority then task ID, completed tasks retain their queue ID, and there are no synchronization queues or queue-level retry rotation.
-- FTP, recurring/per-queue schedules, wake registration, completion programs and OS power actions remain absent. Existing original evidence does not resolve all their branch policies.
+- Non-range servers still restart from byte zero; a range server that turns unreliable mid-transfer stops with `restart_required` rather than isolating suspect bytes.
+- Browser POST replay works for capturable form bodies only; raw bodies stay with the browser.
+- Bandwidth: global/per-host caps share equally without priority weighting; per-host caps key on the submitted host; the quota is a fixed (not rolling) window of payload bytes.
+- Synchronization queues check plain HTTP(S) GET members only and record no validator baseline at completion.
+- Completion actions cover notify, sleep, hibernate, shutdown, restart, exit and program; there is no modem/VPN disconnect, wake-timer registration or force-close setting.
+- FTP is passive-mode only with one serialized control session; there is no FTP proxy support.
 
 ## HTTP, authentication, redirects and representation
 

@@ -56,10 +56,10 @@
 | N41 | File timestamps | missing | Missing: no preserve-server-date option or timestamp write. | — |
 | N42 | Finalize, rename and output conflicts | partial | Partial (2026-10-13): publication uses a hard link plus removal of `.part` (chec… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N43 | Orphan partial cleanup | missing | Missing: stopped-task remove retains files by design; no orphan inventory/cleanu… | — |
-| N44 | Default/per-server connection caps | partial | Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget… | — |
+| N44 | Default/per-server connection caps | partial | Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget… | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
 | N45 | Per-file limiter and remembered exceptions | partial | Partial: shared token bucket across a task workers, persisted task cap, adjustab… | tests/integration/task_rate.py |
-| N46 | Aggregate/per-host bandwidth limits | missing | Missing: no aggregate/per-host bucket. | — |
-| N47 | Usage quota and automatic resumption | missing | Missing: live counters exist but no durable quota ledger/window scheduler. | — |
+| N46 | Aggregate/per-host bandwidth limits | missing | Missing: no aggregate/per-host bucket. | tests/integration/bandwidth.py |
+| N47 | Usage quota and automatic resumption | missing | Missing: live counters exist but no durable quota ledger/window scheduler. | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
 | N48 | Resource efficiency contract | partial | Partial: bounded 64 KiB buffers, task-limit bounded threads; per-MiB sync checkp… | — |
 | Q01 | Queue types and default queues | partial | Partial: only Main + named ordinary queues; no fixed Synchronization queue or mo… | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
 | Q02 | Named queues and membership | partial | Partial: create/rename/empty-remove/atomic stopped-task assign; Main fixed, max3… | tests/integration/named_queues.py |
@@ -198,9 +198,6 @@
 | N38 | Separate temporary and final directories | missing | idm_core_queue_contracts.md |
 | N41 | File timestamps | missing | idm_core_queue_contracts.md |
 | N43 | Orphan partial cleanup | missing | idm_core_queue_contracts.md |
-| N44 | Default/per-server connection caps | partial | idm_core_queue_contracts.md |
-| N46 | Aggregate/per-host bandwidth limits | missing | idm_core_queue_contracts.md |
-| N47 | Usage quota and automatic resumption | missing | idm_core_queue_contracts.md |
 | N48 | Resource efficiency contract | partial | idm_core_queue_contracts.md |
 | Q12 | Missed runs and daemon availability | partial | idm_core_queue_contracts.md |
 | Q13 | Sleep wake timers | missing | idm_core_queue_contracts.md |
@@ -209,7 +206,7 @@
 | Q19 | Schedule/order/settings durability | partial | idm_core_queue_contracts.md |
 | Q20 | Pause/resume/redownload state semantics | partial | idm_core_queue_contracts.md |
 
-**Count: 18**
+**Count: 15**
 
 ### Partial contracts WITH tests (next priority)
 
@@ -239,6 +236,7 @@
 | N37 | Crash recovery and stale running states | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N39 | Disk-full and access-denied assembly | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
+| N44 | Default/per-server connection caps | partial | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs | idm_core_queue_contracts.md |
 | N45 | Per-file limiter and remembered exceptions | partial | tests/integration/task_rate.py | idm_core_queue_contracts.md |
 | Q01 | Queue types and default queues | partial | tests/integration/daemon_ipc.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | Q02 | Named queues and membership | partial | tests/integration/named_queues.py | idm_core_queue_contracts.md |
@@ -291,4 +289,4 @@
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 
-**Count: 75**
+**Count: 76**

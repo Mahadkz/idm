@@ -466,7 +466,11 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Partial: per-task1–16 only; daemon job cap1–16. No shared host connection budget, wildcard overrides or connection profile setting.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/bandwidth.py",
+        "crates/xdm-http/src/governor.rs",
+        "crates/xdm-daemon/src/bandwidth.rs"
+      ]
     },
     {
       "id": "N45",
@@ -484,7 +488,9 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Missing: no aggregate/per-host bucket.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/bandwidth.py"
+      ]
     },
     {
       "id": "N47",
@@ -492,7 +498,11 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Missing: live counters exist but no durable quota ledger/window scheduler.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/bandwidth.py",
+        "crates/xdm-http/src/governor.rs",
+        "crates/xdm-daemon/src/bandwidth.rs"
+      ]
     },
     {
       "id": "N48",

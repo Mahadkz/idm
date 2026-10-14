@@ -11,6 +11,7 @@ xdm-media = { path = "../xdm-media" }
 xdm-categories = { path = "../xdm-categories" }
 xdm-ftp = { path = "../xdm-ftp" }
 xdm-grabber = { path = "../xdm-grabber" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
 url = "2"
 percent-encoding = "2"
 interprocess = "2.4"

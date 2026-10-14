@@ -1,6 +1,7 @@
 mod categories;
 mod credentials;
 mod grabber;
+mod sync;
 mod logins;
 mod media;
 mod os_actions;
@@ -71,6 +72,10 @@ pub(crate) struct Inner {
     pub(crate) grabs: HashMap<String, GrabHandle>,
     /// Crawls waiting for the worker loop, which owns the service handle.
     pub(crate) pending_grabs: Vec<GrabJob>,
+    /// Synchronization checks requested but not yet started (Q10).
+    pub(crate) pending_syncs: Vec<i64>,
+    /// Queues whose synchronization check is in flight.
+    pub(crate) sync_running: HashSet<i64>,
 }
 
 const PROXY_SCHEMES: [&str; 5] = ["http://", "https://", "socks4://", "socks5://", "socks5h://"];
@@ -468,6 +473,46 @@ fn duplicate_task(db: &Connection, url: &str) -> Result<Option<i64>> {
     Ok(None)
 }
 
+/// Splits a batch of URLs into the indexes to keep and the duplicates to skip.
+/// A URL is a duplicate of an existing task or of an earlier batch entry.
+fn split_duplicates(
+    db: &Connection,
+    urls: &[&str],
+    exclude_task: Option<i64>,
+) -> Result<(Vec<usize>, Vec<xdm_ipc::SkippedDuplicate>)> {
+    let mut known: HashMap<String, (Option<i64>, Option<usize>)> = HashMap::new();
+    let mut statement = db.prepare("SELECT id,url FROM tasks ORDER BY id DESC LIMIT 10000")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        if Some(id) == exclude_task {
+            continue;
+        }
+        if let Some(normalized) = normalize_url(&row.get::<_, String>(1)?) {
+            known.insert(normalized, (Some(id), None));
+        }
+    }
+    let mut kept = Vec::new();
+    let mut skipped = Vec::new();
+    for (index, url) in urls.iter().enumerate() {
+        let normalized = normalize_url(url);
+        match normalized.as_ref().and_then(|key| known.get(key)) {
+            Some(&(duplicate_of, duplicate_of_index)) => skipped.push(xdm_ipc::SkippedDuplicate {
+                index,
+                url: (*url).to_string(),
+                duplicate_of,
+                duplicate_of_index,
+            }),
+            None => {
+                if let Some(key) = normalized {
+                    known.insert(key, (None, Some(index)));
+                }
+                kept.push(index);
+            }
+        }
+    }
+    Ok((kept, skipped))
+}
 
 impl Service {
     fn submit_task(
@@ -573,6 +618,116 @@ impl Service {
         }
     }
 
+    fn redownload(
+        &self,
+        task_id: i64,
+        request_id: String,
+        output: String,
+        allow_duplicate: bool,
+    ) -> Result<Reply> {
+
+        if request_id.is_empty()
+            || request_id.len() > 128
+            || !std::path::Path::new(&output).is_absolute()
+            || std::path::Path::new(&output)
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Ok(Reply::error(
+                "redownload requires a request ID and an absolute destination path",
+            ));
+        }
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if request_was_removed(&inner.db, &request_id)? {
+            return Ok(Reply::error(
+                "this submission was removed; use a new request ID",
+            ));
+        }
+        let existing = inner
+            .db
+            .query_row(
+                "SELECT id,output,redownload_source FROM tasks WHERE request_id=?1",
+                [&request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((id, old_output, source)) = existing {
+            return Ok(if old_output == output && source == Some(task_id) {
+                Reply::accepted(id)
+            } else {
+                Reply::error("request ID already belongs to a different task")
+            });
+        }
+        if inner.active.contains_key(&task_id) {
+            return Ok(Reply::error("pause the task before redownloading it"));
+        }
+        let Some((kind, mode_json)) = inner
+            .db
+            .query_row(
+                "SELECT kind,media_mode_json FROM tasks WHERE id=?1",
+                [task_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(Reply::error("task not found"));
+        };
+        if kind == "media"
+            && !serde_json::from_str::<MediaMode>(mode_json.as_deref().unwrap_or(""))
+                .ok()
+                .or_else(|| {
+                    // Legacy media rows keep the original .mp4 rule.
+                    Some(MediaMode::Video { video: 0, audio: None, subtitles: Vec::new() })
+                })
+                .is_none_or(|mode| {
+                    std::path::Path::new(&output)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| mode.valid(ext))
+                })
+        {
+            return Ok(Reply::error(
+                "media redownload destination must fit the task's media mode",
+            ));
+        }
+        if !allow_duplicate {
+            let url: String = inner.db.query_row("SELECT url FROM tasks WHERE id=?1", [task_id], |row| row.get(0))?;
+            let (_, skipped) = split_duplicates(&inner.db, &[url.as_str()], Some(task_id))?;
+            if let Some(found) = skipped.first() {
+                let mut reply = Reply::error(
+                    "another task already downloads this URL; pass allow_duplicate to download again",
+                );
+                reply.duplicate_of = found.duplicate_of;
+                return Ok(reply);
+            }
+        }
+        if !destination_free(std::path::Path::new(&output)) {
+            return Ok(Reply::error(
+                "choose a fresh destination without a file or checkpoint",
+            ));
+        }
+        let id = next_task_id(&inner.db)?;
+        let inserted = inner.db.execute(
+            "INSERT OR IGNORE INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,media_video,media_audio,media_mode_json,category,rate_limit,redownload_source,queue_id,method,body) SELECT ?1,?2,url,?3,headers_json,priority,connections,'queued',kind,media_video,media_audio,media_mode_json,category,rate_limit,id,CASE WHEN queue_id=0 THEN COALESCE(history_queue_id,1) ELSE queue_id END,method,body FROM tasks WHERE id=?4",
+            params![id,request_id,output,task_id],
+        )?;
+        if inserted == 0 {
+            return Ok(Reply::error("destination is already assigned to a task"));
+        }
+        drop(inner);
+        self.wake.notify_one();
+        Ok(Reply::accepted(id))
+    }
+
     fn open(paths: &Paths) -> Result<Arc<Self>> {
         Self::open_db(
             &paths.database,
@@ -631,6 +786,9 @@ impl Service {
             ("restart_reason", "TEXT"),
             ("name_from_server", "INTEGER NOT NULL DEFAULT 0"),
             ("ignore_modified", "INTEGER NOT NULL DEFAULT 0"),
+            ("sync_etag", "TEXT"),
+            ("sync_lastmod", "TEXT"),
+            ("sync_len", "INTEGER"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {name} {definition}"))?;
@@ -639,13 +797,22 @@ impl Service {
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS removed_tasks (task_id INTEGER PRIMARY KEY, request_id TEXT NOT NULL UNIQUE);
-             CREATE TABLE IF NOT EXISTS imports (request_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, task_ids_json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS imports (request_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, task_ids_json TEXT NOT NULL, skipped_json TEXT NOT NULL DEFAULT '[]');
              CREATE TABLE IF NOT EXISTS grab_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, project_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY COLLATE NOCASE, rule_json TEXT NOT NULL);",
         )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS queues (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, running INTEGER NOT NULL, max_concurrent INTEGER NOT NULL);
             INSERT OR IGNORE INTO queues(id,name,running,max_concurrent) VALUES (1,'Main',1,16);
             CREATE INDEX IF NOT EXISTS tasks_by_queue ON tasks(queue_id,status,priority DESC,id ASC);")?;
+        let has_skipped = db
+            .prepare("PRAGMA table_info(imports)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "skipped_json");
+        if !has_skipped {
+            db.execute_batch("ALTER TABLE imports ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '[]'")?;
+        }
         let queue_columns = db
             .prepare("PRAGMA table_info(queues)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -665,6 +832,9 @@ impl Service {
             ("run_exec", "INTEGER NOT NULL DEFAULT 0"),
             ("completion_confirmed", "INTEGER NOT NULL DEFAULT 0"),
             ("completion_countdown", "INTEGER NOT NULL DEFAULT 60"),
+            ("sync", "INTEGER NOT NULL DEFAULT 0"),
+            ("sync_interval", "INTEGER"),
+            ("sync_last", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !queue_columns.iter().any(|column| column == name) {
                 db.execute_batch(&format!("ALTER TABLE queues ADD COLUMN {name} {definition}"))?;
@@ -677,7 +847,7 @@ impl Service {
              CREATE TRIGGER IF NOT EXISTS tasks_position AFTER INSERT ON tasks WHEN NEW.position=0 BEGIN UPDATE tasks SET position=NEW.id WHERE id=NEW.id; END;
              CREATE INDEX IF NOT EXISTS tasks_by_queue_order ON tasks(queue_id,status,priority DESC,position ASC,id ASC);
              UPDATE tasks SET position=id WHERE position=0;
-             UPDATE tasks SET history_queue_id=queue_id,queue_id=0 WHERE status='complete' AND queue_id<>0;",
+             UPDATE tasks SET history_queue_id=queue_id,queue_id=0 WHERE status='complete' AND queue_id<>0 AND NOT COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0);",
         )?;
         // A countdown belongs to the daemon instance that armed it: after a
         // restart its destructive action is suppressed rather than executed.
@@ -734,6 +904,8 @@ impl Service {
                 credentials,
                 grabs: HashMap::new(),
                 pending_grabs: Vec::new(),
+                pending_syncs: Vec::new(),
+                sync_running: HashSet::new(),
             })),
             wake: Arc::new(Condvar::new()),
         }))
@@ -763,7 +935,12 @@ impl Service {
 
     fn command_inner(&self, command: Command) -> Result<Reply> {
         match command {
-            Command::QueueCreate { name, limit } => self.queue_create(name, limit),
+            Command::QueueCreate { name, limit } => self.queue_create(name, limit, false),
+            Command::QueueCreateSync { name, limit } => self.queue_create(name, limit, true),
+            Command::QueueSetSync { queue_id, interval_seconds } => {
+                self.queue_set_sync(queue_id, interval_seconds)
+            }
+            Command::QueueCheck { queue_id } => self.queue_check(queue_id),
             Command::QueueSetRunning { queue_id, running } => {
                 self.queue_set_running(queue_id, running)
             }
@@ -1113,97 +1290,13 @@ impl Service {
                 task_id,
                 request_id,
                 output,
-            } => {
-                if request_id.is_empty()
-                    || request_id.len() > 128
-                    || !std::path::Path::new(&output).is_absolute()
-                    || std::path::Path::new(&output)
-                        .components()
-                        .any(|part| matches!(part, std::path::Component::ParentDir))
-                {
-                    return Ok(Reply::error(
-                        "redownload requires a request ID and an absolute destination path",
-                    ));
-                }
-                let inner = self
-                    .inner
-                    .lock()
-                    .map_err(|_| io::Error::other("task lock poisoned"))?;
-                if request_was_removed(&inner.db, &request_id)? {
-                    return Ok(Reply::error(
-                        "this submission was removed; use a new request ID",
-                    ));
-                }
-                let existing = inner
-                    .db
-                    .query_row(
-                        "SELECT id,output,redownload_source FROM tasks WHERE request_id=?1",
-                        [&request_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, Option<i64>>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()?;
-                if let Some((id, old_output, source)) = existing {
-                    return Ok(if old_output == output && source == Some(task_id) {
-                        Reply::accepted(id)
-                    } else {
-                        Reply::error("request ID already belongs to a different task")
-                    });
-                }
-                if inner.active.contains_key(&task_id) {
-                    return Ok(Reply::error("pause the task before redownloading it"));
-                }
-                let Some((kind, mode_json)) = inner
-                    .db
-                    .query_row(
-                        "SELECT kind,media_mode_json FROM tasks WHERE id=?1",
-                        [task_id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
-                    .optional()?
-                else {
-                    return Ok(Reply::error("task not found"));
-                };
-                if kind == "media"
-                    && !serde_json::from_str::<MediaMode>(mode_json.as_deref().unwrap_or(""))
-                        .ok()
-                        .or_else(|| {
-                            // Legacy media rows keep the original .mp4 rule.
-                            Some(MediaMode::Video { video: 0, audio: None, subtitles: Vec::new() })
-                        })
-                        .is_none_or(|mode| {
-                            std::path::Path::new(&output)
-                                .extension()
-                                .and_then(|ext| ext.to_str())
-                                .is_some_and(|ext| mode.valid(ext))
-                        })
-                {
-                    return Ok(Reply::error(
-                        "media redownload destination must fit the task's media mode",
-                    ));
-                }
-                if !destination_free(std::path::Path::new(&output)) {
-                    return Ok(Reply::error(
-                        "choose a fresh destination without a file or checkpoint",
-                    ));
-                }
-                let id = next_task_id(&inner.db)?;
-                let inserted = inner.db.execute(
-                    "INSERT OR IGNORE INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,media_video,media_audio,media_mode_json,category,rate_limit,redownload_source,queue_id,method,body) SELECT ?1,?2,url,?3,headers_json,priority,connections,'queued',kind,media_video,media_audio,media_mode_json,category,rate_limit,id,CASE WHEN queue_id=0 THEN COALESCE(history_queue_id,1) ELSE queue_id END,method,body FROM tasks WHERE id=?4",
-                    params![id,request_id,output,task_id],
-                )?;
-                if inserted == 0 {
-                    return Ok(Reply::error("destination is already assigned to a task"));
-                }
-                drop(inner);
-                self.wake.notify_one();
-                Ok(Reply::accepted(id))
-            }
+            } => self.redownload(task_id, request_id, output, false),
+            Command::RedownloadEx {
+                task_id,
+                request_id,
+                output,
+                allow_duplicate,
+            } => self.redownload(task_id, request_id, output, allow_duplicate),
             Command::List => {
                 let inner = self
                     .inner
@@ -1858,7 +1951,7 @@ impl Inner {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if status == "complete" {
-            self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+            self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=CASE WHEN COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0) THEN queue_id ELSE 0 END,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
             return Ok(());
         }
         if status == "auth_required" {
@@ -1955,6 +2048,15 @@ fn main() -> Result<()> {
     let service = Service::open(&paths)?;
     let worker = service.clone();
     thread::spawn(move || worker.run());
+    let syncer = service.clone();
+    thread::spawn(move || {
+        loop {
+            if let Err(error) = syncer.sync_pump() {
+                eprintln!("sync scheduler error: {error}");
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    });
     eprintln!("xdm-daemon listening locally");
     for connection in listener.incoming() {
         match connection {

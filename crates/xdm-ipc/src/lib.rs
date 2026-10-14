@@ -316,6 +316,31 @@ pub enum Command {
     },
     /// Reads the global HTTP stall timeout in seconds.
     GetStallTimeout,
+    /// Global aggregate cap over all HTTP tasks in KiB/s; `None` is unlimited.
+    SetGlobalLimit {
+        kib: Option<u64>,
+    },
+    /// Per-host cap in KiB/s for hosts matching `pattern` (`example.com`,
+    /// `*.example.com`, `*`). `Some(0)` is an explicit "unlimited" that overrides
+    /// wildcard rules; `None` removes the rule.
+    SetHostLimit {
+        pattern: String,
+        kib: Option<u64>,
+    },
+    /// Simultaneous connection budget per matching host across all tasks;
+    /// `None` removes the rule (the default budget is 16).
+    SetHostConnections {
+        pattern: String,
+        count: Option<u64>,
+    },
+    /// Usage quota: at most `mib` MiB per window of `window_seconds`; `mib` 0
+    /// turns it off.
+    SetQuota {
+        mib: u64,
+        window_seconds: u64,
+    },
+    /// Current limits, connection leases and quota usage.
+    BandwidthStatus,
     /// Deletes only the `restart_required` task's own `.part`/`.part.meta`
     /// and requeues it from byte zero.
     TaskRestart {
@@ -738,9 +763,31 @@ pub struct Reply {
     /// Task that already owns a rejected duplicate submission's URL.
     #[serde(default)]
     pub duplicate_of: Option<i64>,
+    /// Limits and quota usage; set by the bandwidth commands.
+    #[serde(default)]
+    pub bandwidth: Option<BandwidthReport>,
     /// Entries of an import skipped as duplicates (not an error).
     #[serde(default)]
     pub skipped_duplicates: Vec<SkippedDuplicate>,
+}
+
+/// Snapshot of the daemon's bandwidth governor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BandwidthReport {
+    pub global_kib: Option<u64>,
+    /// (pattern, KiB/s); 0 means explicitly unlimited.
+    pub host_limits: Vec<(String, u64)>,
+    pub host_connections: Vec<(String, u64)>,
+    pub default_host_connections: u64,
+    /// (host, leases currently held).
+    pub connections_in_use: Vec<(String, u64)>,
+    pub quota_mib: u64,
+    pub quota_window_seconds: u64,
+    pub quota_used_bytes: u64,
+    pub quota_window_start: Option<i64>,
+    pub quota_resets_at: Option<i64>,
+    pub quota_exceeded: bool,
+    pub active_http_tasks: u64,
 }
 
 impl Reply {
@@ -767,6 +814,7 @@ impl Reply {
             stall_timeout_seconds: None,
             logins: Vec::new(),
             duplicate_of: None,
+            bandwidth: None,
             skipped_duplicates: Vec::new(),
         }
     }
@@ -793,6 +841,7 @@ impl Reply {
             stall_timeout_seconds: None,
             logins: Vec::new(),
             duplicate_of: None,
+            bandwidth: None,
             skipped_duplicates: Vec::new(),
         }
     }
@@ -828,6 +877,7 @@ impl Reply {
             stall_timeout_seconds: None,
             logins: Vec::new(),
             duplicate_of: None,
+            bandwidth: None,
             skipped_duplicates: Vec::new(),
         }
     }

@@ -931,6 +931,39 @@ fn daemon_command(args: Vec<String>) {
                 },
             }
         }
+        Some("limit-global") if args.len() == 2 => Command::SetGlobalLimit {
+            kib: parse_kib(&args[1]),
+        },
+        Some("limit-host") if args.len() == 3 => Command::SetHostLimit {
+            pattern: args[1].clone(),
+            kib: match args[2].as_str() {
+                "remove" => None,
+                "unlimited" => Some(0),
+                value => Some(parse_kib(value).unwrap_or_else(|| usage())),
+            },
+        },
+        Some("host-connections") if args.len() == 3 => Command::SetHostConnections {
+            pattern: args[1].clone(),
+            count: if args[2] == "remove" {
+                None
+            } else {
+                Some(args[2].parse().unwrap_or_else(|_| usage()))
+            },
+        },
+        Some("quota") if args.len() == 2 && args[1] == "off" => Command::SetQuota {
+            mib: 0,
+            window_seconds: 0,
+        },
+        Some("quota") if args.len() == 3 => Command::SetQuota {
+            mib: args[1].parse().unwrap_or_else(|_| usage()),
+            window_seconds: args[2]
+                .parse::<f64>()
+                .ok()
+                .filter(|hours| hours.is_finite() && *hours > 0.0)
+                .map(|hours| (hours * 3600.0).round().max(1.0) as u64)
+                .unwrap_or_else(|| usage()),
+        },
+        Some("bandwidth") if args.len() == 1 => Command::BandwidthStatus,
         Some("stall-timeout") if args.len() == 2 && args[1] == "get" => Command::GetStallTimeout,
         Some("stall-timeout") if args.len() == 2 => Command::SetStallTimeout {
             seconds: args[1]
@@ -978,6 +1011,19 @@ fn read_secret(path: &str) -> String {
         })
     };
     text.trim_end_matches(['\n', '\r']).to_owned()
+}
+
+/// KiB/s argument; `unlimited` is `None`.
+fn parse_kib(text: &str) -> Option<u64> {
+    if text == "unlimited" {
+        return None;
+    }
+    Some(
+        text.parse::<u64>()
+            .ok()
+            .filter(|kib| *kib > 0)
+            .unwrap_or_else(|| usage()),
+    )
 }
 
 /// Comma-separated CLI list; "-" means empty.
@@ -1038,7 +1084,7 @@ fn send_daemon(command: Command) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
+        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...
        xdm-cli daemon grab PROJECT.json ABSOLUTE_DIRECTORY [--start] [--queue ID]
        xdm-cli daemon grab-status REQUEST_ID|grab-save NAME PROJECT.json|grab-projects|grab-remove NAME
        xdm-cli daemon category list|save NAME EXT,EXT|- ABSOLUTE_DIRECTORY [*.site,...]|remove NAME

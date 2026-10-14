@@ -1,3 +1,4 @@
+mod bandwidth;
 mod categories;
 mod credentials;
 mod grabber;
@@ -66,6 +67,9 @@ pub(crate) struct Inner {
     pub(crate) proxy: String,
     /// Global N31 stall timeout in seconds applied to every HTTP task.
     pub(crate) stall_timeout: u64,
+    /// Process-wide rate caps, host connection budgets and the usage counter.
+    pub(crate) governor: Arc<xdm_http::Governor>,
+    pub(crate) quota: bandwidth::Quota,
     /// Saved site logins for HTTP authentication (N10).
     pub(crate) credentials: credentials::Store,
     /// Live crawls keyed by their site-grab request ID.
@@ -889,6 +893,8 @@ impl Service {
             "UPDATE tasks SET status='queued', error=NULL WHERE status IN ('running','pausing')",
             [],
         )?;
+        let governor = xdm_http::Governor::new();
+        let quota = bandwidth::load(&db, &governor);
         Ok(Arc::new(Self {
             inner: Arc::new(Mutex::new(Inner {
                 db,
@@ -903,6 +909,8 @@ impl Service {
                 pending: HashMap::new(),
                 proxy: serde_json::to_string(&proxy).unwrap_or_default(),
                 stall_timeout,
+                governor,
+                quota,
                 credentials,
                 grabs: HashMap::new(),
                 pending_grabs: Vec::new(),
@@ -920,7 +928,8 @@ impl Service {
                 .inner
                 .lock()
                 .map_err(|_| io::Error::other("task lock poisoned"))?;
-            queue_tick(&mut inner)
+            queue_tick(&mut inner)?;
+            bandwidth::quota_tick(&mut inner)
         };
         tick(self)?;
         let mut reply = self.command_inner(command)?;
@@ -938,6 +947,11 @@ impl Service {
 
     fn command_inner(&self, command: Command) -> Result<Reply> {
         match command {
+            command @ (Command::SetGlobalLimit { .. }
+            | Command::SetHostLimit { .. }
+            | Command::SetHostConnections { .. }
+            | Command::SetQuota { .. }
+            | Command::BandwidthStatus) => self.bandwidth_command(command),
             Command::QueueCreate { name, limit } => self.queue_create(name, limit, false),
             Command::QueueCreateSync { name, limit } => self.queue_create(name, limit, true),
             Command::QueueSetSync { queue_id, interval_seconds } => {
@@ -1330,7 +1344,7 @@ impl Service {
                     active.stop.store(true, Ordering::Relaxed);
                     active.stop_requested.store(true, Ordering::Relaxed);
                 }
-                let updated = inner.db.execute("UPDATE tasks SET status=CASE WHEN status='running' THEN 'pausing' ELSE 'paused' END, updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('queued','running')", [task_id])?;
+                let updated = inner.db.execute("UPDATE tasks SET status=CASE WHEN status='running' THEN 'pausing' ELSE 'paused' END, updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('queued','running','quota_wait')", [task_id])?;
                 if updated == 0 {
                     Ok(Reply::error("task is not active or queued"))
                 } else {
@@ -1362,7 +1376,7 @@ impl Service {
                     .lock()
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
                 let updated = inner.db.execute(
-                    "UPDATE tasks SET priority=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND status IN ('queued','paused','failed')",
+                    "UPDATE tasks SET priority=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND status IN ('queued','paused','failed','quota_wait')",
                     params![priority, task_id],
                 )?;
                 drop(inner);
@@ -1389,7 +1403,7 @@ impl Service {
                     .lock()
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
                 let updated = inner.db.execute(
-                    "UPDATE tasks SET rate_limit=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND kind='http' AND status IN ('queued','running','paused','failed')",
+                    "UPDATE tasks SET rate_limit=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND kind='http' AND status IN ('queued','running','paused','failed','quota_wait')",
                     params![bytes_per_second.map(|rate| rate as i64), task_id],
                 )?;
                 if updated == 0 {
@@ -1546,6 +1560,7 @@ impl Service {
             .map_err(|_| io::Error::other("task lock poisoned"))?;
         loop {
             queue_tick(&mut inner)?;
+            bandwidth::quota_tick(&mut inner)?;
             let now = unix_now();
             if inner.queue_stop_at.is_some_and(|at| now >= at) {
                 set_setting(&inner.db, "queue_running", "0")?;
@@ -1614,10 +1629,15 @@ impl Service {
                     ignore_modified,
                 )) = selected
                 {
+                    if kind == "http" && inner.governor.exceeded() {
+                        inner.db.execute("UPDATE tasks SET status='quota_wait',updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+                        continue;
+                    }
                     let (control, ftp) = if kind == "http" {
                         let control = Arc::new(TransferControl::new(
                             rate_limit.map(|rate| rate as u64),
                         )?);
+                        control.attach(inner.governor.clone(), &url);
                         (Some(control), None)
                     } else if kind == "ftp" {
                         let ftp = Arc::new(FtpLive::default());
@@ -1713,15 +1733,18 @@ impl Service {
                 [],
                 |row| row.get(0),
             )?;
+            let quota_due = bandwidth::quota_due(&inner);
             let next_deadline =
-                [inner.queue_start_at, inner.queue_stop_at, retry_due, completion_due]
+                [inner.queue_start_at, inner.queue_stop_at, retry_due, completion_due, quota_due]
                     .into_iter()
                     .flatten()
                     .min();
+            // While a quota is counting, tick each second so the ledger persists.
+            let ticking = quota_due.is_some() && !inner.active.is_empty();
             let wait = next_deadline
                 .map(|at| Duration::from_secs((at - now).max(1) as u64))
                 .unwrap_or(Duration::from_secs(30))
-                .min(Duration::from_secs(if scheduled { 1 } else { 30 }));
+                .min(Duration::from_secs(if scheduled || ticking { 1 } else { 30 }));
             inner = self
                 .wake
                 .wait_timeout(inner, wait)
@@ -1928,6 +1951,9 @@ fn worker_outcome(
     match result {
         Ok(()) => ("complete", None, None, None),
         Err(_) if stopped && interrupted => ("queued", None, None, None),
+        Err(e) if !stopped && e.to_string().contains(xdm_http::QUOTA_REACHED) => {
+            ("quota_wait", None, None, None)
+        }
         Err(e) if stopped => ("paused", Some(e.to_string()), None, None),
         Err(e) => {
             if let Some(reason) = restart_reason(e.as_ref()) {
@@ -2223,6 +2249,74 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn quota_window_pauses_then_resumes_on_the_injected_clock() {
+        let (service, clock, _) = service(1000);
+        let id = submit(&service, "quota0");
+        let status = |service: &Service, id: i64| -> String {
+            service.inner.lock().unwrap().db
+                .query_row("SELECT status FROM tasks WHERE id=?1", [id], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(!service.command(Command::SetQuota { mib: 5, window_seconds: 0 }).unwrap().ok);
+        let reply = service.command(Command::SetQuota { mib: 1, window_seconds: 3600 }).unwrap();
+        assert_eq!(reply.bandwidth.unwrap().quota_mib, 1);
+        // Usage over the limit opens the window and flags it.
+        {
+            let inner = service.inner.lock().unwrap();
+            inner.governor.set_used(2 * 1024 * 1024);
+            inner.db.execute("UPDATE tasks SET status='quota_wait' WHERE id=?1", [id]).unwrap();
+        }
+        let report = service.command(Command::BandwidthStatus).unwrap().bandwidth.unwrap();
+        assert!(report.quota_exceeded);
+        assert_eq!(report.quota_resets_at, Some(1000 + 3600));
+        clock.set(1000 + 3599);
+        service.command(Command::BandwidthStatus).unwrap();
+        assert_eq!(status(&service, id), "quota_wait");
+        clock.set(1000 + 3600);
+        let report = service.command(Command::BandwidthStatus).unwrap().bandwidth.unwrap();
+        assert!(!report.quota_exceeded && report.quota_used_bytes == 0);
+        assert_eq!(status(&service, id), "queued");
+        // Turning the quota off also wakes waiting tasks.
+        {
+            let inner = service.inner.lock().unwrap();
+            inner.governor.set_used(2 * 1024 * 1024);
+            inner.db.execute("UPDATE tasks SET status='quota_wait' WHERE id=?1", [id]).unwrap();
+        }
+        service.command(Command::SetQuota { mib: 0, window_seconds: 0 }).unwrap();
+        assert_eq!(status(&service, id), "queued");
+        let error: Result<()> = Err(xdm_http::QUOTA_REACHED.into());
+        assert_eq!(worker_outcome(&error, false, false).0, "quota_wait");
+        assert_eq!(worker_outcome(&error, true, false).0, "paused");
+    }
+
+    #[test]
+    fn bandwidth_commands_validate_and_persist_rules() {
+        let (service, _, _) = service(1000);
+        let bw = |command| service.command(command).unwrap();
+        assert!(!bw(Command::SetGlobalLimit { kib: Some(0) }).ok);
+        assert!(!bw(Command::SetHostLimit { pattern: "a b".into(), kib: Some(1) }).ok);
+        assert!(!bw(Command::SetHostConnections { pattern: "*".into(), count: Some(0) }).ok);
+        bw(Command::SetGlobalLimit { kib: Some(512) });
+        bw(Command::SetHostLimit { pattern: "*.Example.com".into(), kib: Some(64) });
+        bw(Command::SetHostConnections { pattern: "*".into(), count: Some(4) });
+        let report = bw(Command::BandwidthStatus).bandwidth.unwrap();
+        assert_eq!(report.global_kib, Some(512));
+        assert_eq!(report.host_limits, vec![("*.example.com".to_string(), 64)]);
+        assert_eq!(report.host_connections, vec![("*".to_string(), 4)]);
+        // The persisted settings restore into a fresh governor.
+        let inner = service.inner.lock().unwrap();
+        let governor = xdm_http::Governor::new();
+        bandwidth::load(&inner.db, &governor);
+        assert_eq!(governor.global_kib(), Some(512));
+        assert_eq!(governor.snapshot().host_budgets, vec![("*".to_string(), 4)]);
+        drop(inner);
+        bw(Command::SetHostLimit { pattern: "*.example.com".into(), kib: None });
+        bw(Command::SetGlobalLimit { kib: None });
+        let report = bw(Command::BandwidthStatus).bandwidth.unwrap();
+        assert!(report.global_kib.is_none() && report.host_limits.is_empty());
     }
 
     #[test]

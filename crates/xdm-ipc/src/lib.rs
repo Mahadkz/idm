@@ -14,6 +14,9 @@ fn default_submit_method() -> String {
 }
 
 pub const MAX_FRAME: usize = 1024 * 1024;
+/// Replies may be larger than requests (a 2000-row `ListPage`); requests stay
+/// bounded by `MAX_FRAME`.
+pub const MAX_REPLY_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -346,6 +349,37 @@ pub enum Command {
     TaskRestart {
         task_id: i64,
     },
+    /// Paged task list: `limit` 1..=2000, stable order, `Reply::total`.
+    /// `sort` is one of id, url, output, status, category, priority,
+    /// position, created, updated, optionally prefixed with `-` for
+    /// descending (default `-id`, the order of `List`).
+    ListPage {
+        offset: u64,
+        limit: u64,
+        #[serde(default)]
+        sort: Option<String>,
+        #[serde(default)]
+        filter: Option<TaskFilter>,
+    },
+    /// Moves a completed task's file; never overwrites.
+    TaskMoveFile {
+        task_id: i64,
+        new_path: String,
+    },
+    /// `Remove` that may also delete the task's own `.part`/`.part.meta`.
+    TaskRemoveEx {
+        task_id: i64,
+        delete_partial: bool,
+    },
+    /// Lists unowned `.part`/`.part.meta` files directly in `directory`.
+    PartialScan {
+        directory: String,
+    },
+    /// Deletes only paths that a fresh scan of `directory` lists.
+    PartialDelete {
+        directory: String,
+        paths: Vec<String>,
+    },
 }
 
 /// Mirrors `xdm_media::AudioFormat` with the identical serde shape so IPC stays
@@ -560,6 +594,31 @@ pub struct GrabReport {
     pub skipped_duplicates: Vec<SkippedDuplicate>,
 }
 
+/// Filter for `ListPage`; every set field must match.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskFilter {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub queue_id: Option<i64>,
+    /// Case-insensitive substring of the URL or output path.
+    #[serde(default)]
+    pub search: Option<String>,
+}
+
+/// A `.part`/`.part.meta` pair (either half may be absent) owned by no task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialEntry {
+    /// The output path the partial belongs to (without `.part`).
+    pub output: String,
+    pub part: Option<String>,
+    pub part_size: u64,
+    pub meta: Option<String>,
+    pub meta_size: u64,
+}
+
 /// A persisted grabber project returned by `GrabProjects`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrabProjectRecord {
@@ -769,6 +828,18 @@ pub struct Reply {
     /// Entries of an import skipped as duplicates (not an error).
     #[serde(default)]
     pub skipped_duplicates: Vec<SkippedDuplicate>,
+    /// Rows matching a `ListPage` filter before paging.
+    #[serde(default)]
+    pub total: u64,
+    /// Unowned `.part`/`.part.meta` pairs from `PartialScan`.
+    #[serde(default)]
+    pub partials: Vec<PartialEntry>,
+    /// `PartialScan` stopped at its entry cap.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Daemon package version; set by `ListPage` and `PartialScan` replies.
+    #[serde(default)]
+    pub daemon_version: Option<String>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -816,6 +887,10 @@ impl Reply {
             duplicate_of: None,
             bandwidth: None,
             skipped_duplicates: Vec::new(),
+            total: 0,
+            partials: Vec::new(),
+            truncated: false,
+            daemon_version: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -843,6 +918,10 @@ impl Reply {
             duplicate_of: None,
             bandwidth: None,
             skipped_duplicates: Vec::new(),
+            total: 0,
+            partials: Vec::new(),
+            truncated: false,
+            daemon_version: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -879,6 +958,10 @@ impl Reply {
             duplicate_of: None,
             bandwidth: None,
             skipped_duplicates: Vec::new(),
+            total: 0,
+            partials: Vec::new(),
+            truncated: false,
+            daemon_version: None,
         }
     }
 }
@@ -1018,13 +1101,21 @@ impl Paths {
                 command,
             },
         )?;
-        read_frame(&mut stream)
+        read_frame_max(&mut stream, MAX_REPLY_FRAME)
     }
 }
 
 pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, value: &T) -> io::Result<()> {
+    write_frame_max(writer, value, MAX_FRAME)
+}
+
+pub fn write_frame_max<W: Write, T: Serialize>(
+    writer: &mut W,
+    value: &T,
+    max: usize,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
-    if bytes.len() > MAX_FRAME {
+    if bytes.len() > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "frame too large",
@@ -1036,10 +1127,14 @@ pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, value: &T) -> io::Res
 }
 
 pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<T> {
+    read_frame_max(reader, MAX_FRAME)
+}
+
+pub fn read_frame_max<R: Read, T: DeserializeOwned>(reader: &mut R, max: usize) -> io::Result<T> {
     let mut prefix = [0u8; 4];
     reader.read_exact(&mut prefix)?;
     let length = u32::from_le_bytes(prefix) as usize;
-    if length == 0 || length > MAX_FRAME {
+    if length == 0 || length > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid frame size",

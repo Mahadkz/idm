@@ -10,6 +10,7 @@ mod queues;
 mod schedule;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+mod task_files;
 mod transfer_lists;
 
 use categories::*;
@@ -31,7 +32,7 @@ use url::Url;
 use xdm_http::{Options, Progress, Proxy, ResumePolicy, ResponseMetadata, TransferControl, download_ex};
 use schedule::{Clock, SystemClock};
 use xdm_ipc::{
-    Command, MediaMode, Paths, Reply, Request, TaskSummary, read_frame, write_frame,
+    Command, MediaMode, Paths, Reply, Request, TaskSummary, read_frame,
 };
 #[cfg(test)]
 use xdm_ipc::MediaAudioFormat;
@@ -59,6 +60,9 @@ pub(crate) struct Inner {
     pub(crate) queue_start_at: Option<i64>,
     pub(crate) queue_stop_at: Option<i64>,
     pub(crate) queue_interrupted: HashSet<i64>,
+    /// Completed tasks whose file is being moved; removal, restart,
+    /// redownload and further moves are refused meanwhile.
+    pub(crate) moving: HashSet<i64>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) adapter: Arc<dyn CompletionAdapter>,
     /// Destructive actions counting down, keyed by queue.
@@ -372,9 +376,23 @@ pub(crate) fn set_setting(db: &Connection, key: &str, value: &str) -> rusqlite::
 }
 
 fn task_summaries(inner: &Inner, task_id: Option<i64>) -> Result<Vec<TaskSummary>> {
-    let mut stmt = inner.db.prepare("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason FROM tasks WHERE id BETWEEN COALESCE(?1,1) AND COALESCE(?1,9223372036854775807) ORDER BY id DESC LIMIT 1000")?;
+    query_summaries(
+        inner,
+        "WHERE id BETWEEN COALESCE(?1,1) AND COALESCE(?1,9223372036854775807) ORDER BY id DESC LIMIT 1000",
+        rusqlite::params_from_iter([task_id]),
+    )
+}
+
+/// Task rows for a `WHERE ... ORDER BY ... LIMIT` tail; shared by `List`,
+/// `GetTask` and `ListPage`.
+pub(crate) fn query_summaries<P: rusqlite::Params>(
+    inner: &Inner,
+    tail: &str,
+    params: P,
+) -> Result<Vec<TaskSummary>> {
+    let mut stmt = inner.db.prepare(&format!("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason FROM tasks {tail}"))?;
     let tasks = stmt
-        .query_map([task_id], |row| {
+        .query_map(params, |row| {
             let output: String = row.get(2)?;
             let status: String = row.get(3)?;
             let id: i64 = row.get(0)?;
@@ -647,6 +665,9 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if inner.moving.contains(&task_id) {
+            return Ok(Reply::error("task file is being moved"));
+        }
         if request_was_removed(&inner.db, &request_id)? {
             return Ok(Reply::error(
                 "this submission was removed; use a new request ID",
@@ -809,7 +830,9 @@ impl Service {
         )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS queues (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, running INTEGER NOT NULL, max_concurrent INTEGER NOT NULL);
             INSERT OR IGNORE INTO queues(id,name,running,max_concurrent) VALUES (1,'Main',1,16);
-            CREATE INDEX IF NOT EXISTS tasks_by_queue ON tasks(queue_id,status,priority DESC,id ASC);")?;
+            CREATE INDEX IF NOT EXISTS tasks_by_queue ON tasks(queue_id,status,priority DESC,id ASC);
+            CREATE INDEX IF NOT EXISTS tasks_by_status_id ON tasks(status,id);
+            CREATE INDEX IF NOT EXISTS tasks_by_category ON tasks(category,id);")?;
         let has_skipped = db
             .prepare("PRAGMA table_info(imports)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -904,6 +927,7 @@ impl Service {
                 queue_start_at,
                 queue_stop_at,
                 queue_interrupted: HashSet::new(),
+                moving: HashSet::new(),
                 clock,
                 adapter,
                 pending: HashMap::new(),
@@ -1287,29 +1311,29 @@ impl Service {
                     Ok(Reply::list(tasks))
                 }
             }
-            Command::Remove { task_id } => {
-                let mut inner = self
-                    .inner
-                    .lock()
-                    .map_err(|_| io::Error::other("task lock poisoned"))?;
-                if inner.active.contains_key(&task_id) {
-                    return Ok(Reply::error(
-                        "pause the task and wait for it to stop before removing it",
-                    ));
+            Command::Remove { task_id } => self.remove_task(task_id, false),
+            Command::TaskRemoveEx {
+                task_id,
+                delete_partial,
+            } => self.remove_task(task_id, delete_partial),
+            Command::ListPage {
+                offset,
+                limit,
+                sort,
+                filter,
+            } => self.list_page(offset, limit, sort, filter),
+            Command::TaskMoveFile { task_id, new_path } => self.move_task_file(task_id, new_path),
+            Command::PartialScan { directory } => Ok(match self.scan_partials(&directory)? {
+                Ok((found, truncated)) => {
+                    let mut reply = Reply::list(Vec::new());
+                    reply.partials = found;
+                    reply.truncated = truncated;
+                    reply.daemon_version = Some(env!("CARGO_PKG_VERSION").to_owned());
+                    reply
                 }
-                let transaction = inner.db.transaction()?;
-                let removed = transaction.execute(
-                    "INSERT INTO removed_tasks(task_id,request_id) SELECT id,request_id FROM tasks WHERE id=?1",
-                    [task_id],
-                )?;
-                if removed == 0 {
-                    return Ok(Reply::error("task not found"));
-                }
-                transaction.execute("DELETE FROM tasks WHERE id=?1", [task_id])?;
-                transaction.commit()?;
-                inner.queue_interrupted.remove(&task_id);
-                Ok(Reply::accepted(task_id))
-            }
+                Err(message) => Reply::error(message),
+            }),
+            Command::PartialDelete { directory, paths } => self.delete_partials(&directory, paths),
             Command::Redownload {
                 task_id,
                 request_id,
@@ -1516,6 +1540,9 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if inner.moving.contains(&task_id) {
+            return Ok(Reply::error("task file is being moved"));
+        }
         if inner.active.contains_key(&task_id) {
             return Ok(Reply::error(
                 "pause the task and wait for it to stop before restarting it",
@@ -2050,7 +2077,7 @@ fn handle(
             .command(request.command)
             .unwrap_or_else(|e| Reply::error(e.to_string()))
     };
-    write_frame(&mut stream, &reply)?;
+    xdm_ipc::write_frame_max(&mut stream, &reply, xdm_ipc::MAX_REPLY_FRAME)?;
     // This connection thread owns the shared service handle, so site grabs
     // queued by the command are spawned here.
     for job in {
@@ -2701,6 +2728,22 @@ mod tests {
         assert!(!daemon_stopped(&stop, &requested), "engine abort is not a pause");
         requested.store(true, Ordering::Relaxed);
         assert!(daemon_stopped(&stop, &requested));
+    }
+
+    #[test]
+    fn moving_task_refuses_remove_restart_redownload_and_move() {
+        let (service, _, _) = service(1000);
+        let id = submit(&service, "moving");
+        service.inner.lock().unwrap().moving.insert(id);
+        assert!(!service.command(Command::Remove { task_id: id }).unwrap().ok);
+        assert!(!service.command(Command::TaskRestart { task_id: id }).unwrap().ok);
+        assert!(!service.command(Command::TaskMoveFile { task_id: id, new_path: "/tmp/x-moving.bin".into() }).unwrap().ok);
+        let reply = service
+            .command(Command::Redownload { task_id: id, request_id: "rd".into(), output: "/nonexistent-xdm-test/rd.bin".into() })
+            .unwrap();
+        assert!(!reply.ok && reply.error.unwrap().contains("moved"));
+        service.inner.lock().unwrap().moving.clear();
+        assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
     }
 
     #[test]

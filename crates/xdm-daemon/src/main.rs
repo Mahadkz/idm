@@ -130,7 +130,8 @@ fn restart_reason(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Op
 pub(crate) fn owned_partial_paths(output: &Path, temp: Option<&str>) -> Vec<PathBuf> {
     let mut paths = http_part_paths(output).to_vec();
     if let Some(temp) = temp.filter(|temp| !temp.is_empty()) {
-        let (part, meta) = xdm_http::partial_paths(output, Some(Path::new(temp)));
+        let temp = std::fs::canonicalize(temp).unwrap_or_else(|_| PathBuf::from(temp));
+        let (part, meta) = xdm_http::partial_paths(output, Some(&temp));
         paths.extend([part, meta]);
     }
     paths
@@ -164,7 +165,7 @@ fn choose_server_destination(
 ) -> Result<PathBuf> {
     let output = Path::new(provisional);
     let provisional_name = output.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let Some(name) = xdm_http::reconcile_server_name(metadata, provisional_name)? else {
+    let Some(name) = xdm_http::reconcile_server_name(metadata, provisional_name) else {
         return Ok(output.to_path_buf());
     };
     let directory = output.parent().unwrap_or(Path::new("/")).to_path_buf();
@@ -172,12 +173,21 @@ fn choose_server_destination(
         .inner
         .lock()
         .map_err(|_| io::Error::other("task lock poisoned"))?;
+    let temp: Option<String> = inner
+        .db
+        .query_row("SELECT temp_dir FROM tasks WHERE id=?1", [id], |row| row.get(0))
+        .optional()?
+        .flatten();
     let mut suffix = 1u32;
     let mut chosen = name.clone();
     loop {
         let candidate = directory.join(&chosen);
         let output_text = candidate.to_string_lossy();
+        // Someone else's partial files (another task, a browser) also occupy a name.
         let taken = std::fs::symlink_metadata(&candidate).is_ok()
+            || owned_partial_paths(&candidate, temp.as_deref())
+                .iter()
+                .any(|path| std::fs::symlink_metadata(path).is_ok())
             || inner
                 .db
                 .query_row(
@@ -1187,6 +1197,14 @@ impl Service {
                         return Ok(Reply::error(format!("{path} is not a directory")));
                     }
                 }
+                // Stored canonical so ownership checks and scans compare equal paths.
+                let path = match path {
+                    Some(path) => match std::fs::canonicalize(&path) {
+                        Ok(canonical) => Some(canonical.to_string_lossy().into_owned()),
+                        Err(error) => return Ok(Reply::error(format!("cannot use {path}: {error}"))),
+                    },
+                    None => None,
+                };
                 let mut inner = self
                     .inner
                     .lock()

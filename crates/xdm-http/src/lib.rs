@@ -650,6 +650,32 @@ const DYNAMIC_EXTENSIONS: &[&str] = &[
     "cfm", "html", "htm", "shtml", "axd", "ashx",
 ];
 
+/// True when the first bytes of a body open like a web page.
+fn looks_like_html(head: &[u8]) -> bool {
+    let text: Vec<u8> = head
+        .iter()
+        .copied()
+        .skip_while(|b| b.is_ascii_whitespace() || *b == 0xEF || *b == 0xBB || *b == 0xBF)
+        .take(15)
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    text.starts_with(b"<!doctype html") || text.starts_with(b"<html") || text.starts_with(b"<head") || text.starts_with(b"<body")
+}
+
+/// A text/html answer for a request whose name targets a binary file is suspect; the
+/// body is sniffed before any byte is kept.
+fn html_guard(content_type: Option<&str>, effective_url: &str, output: &Path) -> bool {
+    if content_type.map(media_type).as_deref() != Some("text/html") {
+        return false;
+    }
+    let binary = |name: &str| {
+        name.rfind('.')
+            .is_some_and(|at| is_binary_extension(&name[at + 1..].to_ascii_lowercase()))
+    };
+    url_filename(effective_url).is_some_and(|n| binary(&n))
+        || output.file_name().is_some_and(|n| binary(&n.to_string_lossy()))
+}
+
 fn is_binary_extension(ext: &str) -> bool {
     MIME_EXTENSIONS
         .iter()
@@ -660,44 +686,30 @@ fn media_type(content_type: &str) -> String {
     content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
 }
 
-/// N14 plus MIME reconciliation: the final name of a server-named task. `Ok(None)` keeps
-/// the provisional name. A web page answering for a file whose name targets a binary
-/// extension fails; a Content-Type that maps to another extension than a dynamic-page
-/// or missing one fixes the name (`a.php` + application/zip becomes `a.zip`).
-pub fn reconcile_server_name(
-    metadata: &ResponseMetadata,
-    provisional: &str,
-) -> std::result::Result<Option<String>, String> {
+/// N14 plus MIME reconciliation: the final name of a server-named task. `None` keeps the
+/// provisional name. Only a missing or dynamic-page extension (`.php`, `.asp`, ...) is
+/// fixed from Content-Type (`a.php` + application/zip becomes `a.zip`); a real extension
+/// is never rewritten.
+pub fn reconcile_server_name(metadata: &ResponseMetadata, provisional: &str) -> Option<String> {
     let name = server_filename(metadata, provisional).unwrap_or_else(|| provisional.to_owned());
-    let extension = |name: &str| {
-        name.rfind('.')
-            .filter(|at| *at > 0 && *at + 1 < name.len())
-            .map(|at| name[at + 1..].to_ascii_lowercase())
-    };
-    let current = extension(&name);
+    let extension = name
+        .rfind('.')
+        .filter(|at| *at > 0 && *at + 1 < name.len())
+        .map(|at| name[at + 1..].to_ascii_lowercase());
     let mime = metadata.content_type.as_deref().map(media_type).unwrap_or_default();
     let mut result = name.clone();
-    if matches!(mime.as_str(), "text/html" | "application/xhtml+xml") {
-        if current.as_deref().is_some_and(is_binary_extension) {
-            return Err(HTML_INSTEAD_OF_FILE.to_owned());
-        }
-    } else if let Some((_, wanted, accepted)) =
-        MIME_EXTENSIONS.iter().find(|(known, _, _)| *known == mime)
-    {
-        let stem_len = name.rfind('.').filter(|at| *at > 0).unwrap_or(name.len());
-        match current.as_deref() {
-            Some(ext) if ext == *wanted || accepted.contains(&ext) => {}
+    if let Some((_, wanted, _)) = MIME_EXTENSIONS.iter().find(|(known, _, _)| *known == mime) {
+        match extension.as_deref() {
             None => result = format!("{name}.{wanted}"),
-            Some(ext) if DYNAMIC_EXTENSIONS.contains(&ext) || is_binary_extension(ext) => {
-                result = format!("{}.{wanted}", &name[..stem_len]);
+            Some(ext) if DYNAMIC_EXTENSIONS.contains(&ext) => {
+                let stem = name.rfind('.').unwrap_or(name.len());
+                result = format!("{}.{wanted}", &name[..stem]);
             }
             Some(_) => {}
         }
     }
-    let Some(result) = sanitize_filename(&result) else {
-        return Ok(None);
-    };
-    Ok((result != provisional).then_some(result))
+    let result = sanitize_filename(&result)?;
+    (result != provisional).then_some(result)
 }
 
 /// Parses the first challenge of a WWW-Authenticate or Proxy-Authenticate
@@ -801,8 +813,20 @@ fn identity_encoded(response: &Response) -> bool {
 
 /// Partial-file name inside a separate temporary directory: a digest of the final path
 /// keeps equal names of different folders apart (N38).
+/// Canonical form of a destination for hashing: lexically clean (no `.`, doubled or
+/// trailing separators) with the parent resolved when it exists.
+fn normalized_output(output: &Path) -> PathBuf {
+    let clean: PathBuf = output.components().collect();
+    match (clean.parent(), clean.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or(clean),
+        _ => clean,
+    }
+}
+
 fn temp_base(output: &Path, temp: &Path) -> PathBuf {
-    let digest = format!("{:x}", Sha256::digest(output.to_string_lossy().as_bytes()));
+    let digest = format!("{:x}", Sha256::digest(normalized_output(output).to_string_lossy().as_bytes()));
     let name: String = output
         .file_name()
         .map(|n| n.to_string_lossy().chars().take(100).collect())
@@ -897,13 +921,24 @@ fn preallocate(file: &File, length: u64) -> std::io::Result<()> {
 }
 
 /// Preflight of the final volume when partials live elsewhere (N38): the completed
-/// file must fit where it will be published, not only where it is assembled.
-fn ensure_final_space(output: &Path, length: u64) -> Result<()> {
+/// file must fit where it will be published, not only where it is assembled. Skipped
+/// when both directories share a device, where the partial's own preallocation already
+/// accounts for the space.
+fn ensure_final_space(output: &Path, temp: &Path, length: u64) -> Result<()> {
+    let dir = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     #[cfg(unix)]
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (fs::metadata(dir), fs::metadata(temp)) {
+            if a.dev() == b.dev() {
+                return Ok(());
+            }
+        }
         if let Ok(path) = CString::new(dir.as_os_str().as_bytes()) {
             // SAFETY: statvfs only writes into the zeroed struct we own.
             let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -915,7 +950,34 @@ fn ensure_final_space(output: &Path, length: u64) -> Result<()> {
             }
         }
     }
-    let _ = (output, length);
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let volume = |path: &Path| fs::canonicalize(path).ok().and_then(|p| p.components().next().map(|c| c.as_os_str().to_owned()));
+        if volume(dir) == volume(temp) {
+            return Ok(());
+        }
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut available = 0u64;
+        // SAFETY: `wide` is NUL-terminated and the out pointer is a valid u64; the other
+        // two optional outputs are null.
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut available,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 && length > available {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "not enough space on the destination volume",
+            )
+            .into());
+        }
+    }
+    let _ = (dir, temp, length);
     Ok(())
 }
 
@@ -1190,43 +1252,122 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
     })
 }
 
-/// Installs the completed file without replacing anything created at the destination meanwhile.
-fn publish(part: &Path, output: &Path) -> Result<()> {
-    match fs::hard_link(part, output) {
-        Ok(()) => Ok(fs::remove_file(part)?),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(err(format!(
-            "{} appeared during the download; the completed data was kept at {}",
-            output.display(),
-            part.display()
-        ))),
-        // Filesystems without hard links (or another volume) fall back to a checked rename,
-        // then to copy + fsync + no-clobber publish.
-        Err(_) if fs::symlink_metadata(output).is_err() => match fs::rename(part, output) {
-            Ok(()) => Ok(()),
-            Err(_) => copy_publish(part, output),
-        },
-        Err(_) => Err(err(format!(
-            "{} appeared during the download; the completed data was kept at {}",
-            output.display(),
-            part.display()
-        ))),
+/// Renames without ever replacing an existing destination. Linux uses
+/// `renameat2(RENAME_NOREPLACE)`; other systems refuse rather than risk replacing a file
+/// that appeared after the last check.
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let (from, to) = (
+            CString::new(from.as_os_str().as_bytes())?,
+            CString::new(to.as_os_str().as_bytes())?,
+        );
+        // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                1u32, // RENAME_NOREPLACE
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no-replace rename is unavailable on this system",
+        ))
     }
 }
 
-/// Cross-volume publish (N38): the data is copied beside the destination and synced,
-/// installed without replacing anything, and only then is the partial removed. Any
-/// failure leaves the partial intact and the destination untouched.
+fn appeared(output: &Path, part: &Path) -> Box<dyn Error + Send + Sync> {
+    err(format!(
+        "{} appeared during the download; the completed data was kept at {}",
+        output.display(),
+        part.display()
+    ))
+}
+
+/// Flushes the directory entry of a freshly installed file (Unix).
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Removal of the source after a successful install is housekeeping, never a failure.
+fn discard(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("warning: could not remove {}: {error}", path.display());
+        }
+    }
+}
+
+/// Installs the completed file without replacing anything created at the destination meanwhile.
+fn publish(part: &Path, output: &Path) -> Result<()> {
+    match fs::hard_link(part, output) {
+        Ok(()) => {
+            discard(part);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(appeared(output, part)),
+        // Filesystems without hard links (or another volume): a no-replace rename, then
+        // copy + fsync + no-clobber publish.
+        Err(_) => match rename_noreplace(part, output) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(appeared(output, part)),
+            Err(_) => copy_publish(part, output),
+        },
+    }
+}
+
+/// Cross-volume publish (N38): the data is copied beside the destination under a unique
+/// staging name and synced, installed without replacing anything, the directory is
+/// synced, and only then is the partial removed. Any failure leaves the partial intact,
+/// the destination untouched and removes only the staging file this call created.
 fn copy_publish(part: &Path, output: &Path) -> Result<()> {
-    let staging = PathBuf::from(format!("{}.xdm-copy", output.display()));
-    let _ = fs::remove_file(&staging);
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let staging = PathBuf::from(format!(
+        "{}.xdm-copy-{}-{nanos}-{}",
+        output.display(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     let copied = (|| -> std::io::Result<()> {
         let mut source = File::open(part)?;
+        let modified = source.metadata()?.modified().ok();
         let mut target = OpenOptions::new().write(true).create_new(true).open(&staging)?;
         std::io::copy(&mut source, &mut target)?;
+        if let Some(modified) = modified {
+            let _ = target.set_modified(modified);
+        }
         target.sync_all()
     })();
     if let Err(error) = copied {
-        let _ = fs::remove_file(&staging);
+        // Only a staging file this call created exists; create_new failing means it is not ours.
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(&staging);
+        }
         return Err(err(format!(
             "copying the finished download to {} failed ({error}); the data was kept at {}",
             output.display(),
@@ -1234,25 +1375,19 @@ fn copy_publish(part: &Path, output: &Path) -> Result<()> {
         )));
     }
     let installed = match fs::hard_link(&staging, output) {
-        Ok(()) => {
-            let _ = fs::remove_file(&staging);
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(()),
-        Err(_) if fs::symlink_metadata(output).is_err() => {
-            fs::rename(&staging, output).map_err(|_| ())
-        }
-        Err(_) => Err(()),
+        Err(_) => rename_noreplace(&staging, output).map_err(|_| ()),
     };
     if installed.is_err() {
         let _ = fs::remove_file(&staging);
-        return Err(err(format!(
-            "{} appeared during the download; the completed data was kept at {}",
-            output.display(),
-            part.display()
-        )));
+        return Err(appeared(output, part));
     }
-    Ok(fs::remove_file(part)?)
+    // After a rename the staging name is already gone; after a link it is removed here.
+    let _ = fs::remove_file(&staging);
+    sync_parent(output);
+    discard(part);
+    Ok(())
 }
 
 /// Parses an HTTP-date (IMF-fixdate, RFC 850 or asctime) into a system time.
@@ -1283,7 +1418,7 @@ pub fn parse_http_date(value: &str) -> Option<std::time::SystemTime> {
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
     );
-    if parts.next().is_some() || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 || y < 1970 {
+    if parts.next().is_some() || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 || !(1970..=9999).contains(&y) {
         return None;
     }
     let m = mon as i64 + 1;
@@ -1300,13 +1435,17 @@ pub fn parse_http_date(value: &str) -> Option<std::time::SystemTime> {
         .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
 }
 
-/// Sets the modification time of the published file from the server's Last-Modified
-/// value. An absent, unparsable or future-impossible date leaves the file unchanged.
-fn apply_server_time(path: &Path, last_modified: Option<&str>) {
-    let Some(time) = last_modified.and_then(parse_http_date) else {
-        return;
-    };
-    if let Ok(file) = OpenOptions::new().write(true).open(path) {
+/// The modification time to stamp on a finished file, from a valid Last-Modified value.
+fn server_time(
+    enabled: bool,
+    last_modified: Option<&str>,
+) -> Option<std::time::SystemTime> {
+    enabled.then(|| last_modified.and_then(parse_http_date)).flatten()
+}
+
+/// Stamps the still-open file; hard links, renames and copies carry the time along.
+fn stamp(file: &File, time: Option<std::time::SystemTime>) {
+    if let Some(time) = time {
         let _ = file.set_modified(time);
     }
 }
@@ -1749,8 +1888,11 @@ fn stream_body(
     length: Option<u64>,
     options: &Options,
     control: &TransferControl,
+    guard_html: bool,
+    modified: Option<std::time::SystemTime>,
 ) -> Result<bool> {
     control.initialize(0, length);
+    let mut sniffed = !guard_html;
     let mut output = std::io::BufWriter::with_capacity(WRITE_BUFFER, File::create(part)?);
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
@@ -1771,6 +1913,12 @@ fn stream_body(
             Ok(n) => n,
             Err(_) => return Ok(false),
         };
+        if !sniffed {
+            sniffed = true;
+            if looks_like_html(&buffer[..n]) {
+                return Err(err(HTML_INSTEAD_OF_FILE));
+            }
+        }
         control.wait(n, &options.stop)?;
         output.write_all(&buffer[..n])?;
         control.record(n);
@@ -1783,6 +1931,7 @@ fn stream_body(
         control.size_unverified.store(true, Ordering::Relaxed);
     }
     output.flush()?;
+    stamp(output.get_ref(), modified);
     output.get_ref().sync_all()?;
     Ok(true)
 }
@@ -1820,12 +1969,10 @@ fn single_stream(
         if !identity_encoded(&response) {
             return Err(err("encoded response cannot be safely assembled"));
         }
-        if stream_body(&mut response, part, probe.length, options, control)? {
-            publish(part, &options.output)?;
-            if options.set_file_time {
-                apply_server_time(&options.output, probe.last_modified.as_deref());
-            }
-            return Ok(());
+        let guard = html_guard(probe.content_type.as_deref(), &probe.effective_url, &options.output);
+        let modified = server_time(options.set_file_time, probe.last_modified.as_deref());
+        if stream_body(&mut response, part, probe.length, options, control, guard, modified)? {
+            return publish(part, &options.output);
         }
         if failures == RETRIES {
             return Err(err("download ended before declared length"));
@@ -1950,11 +2097,26 @@ fn run_transfer(
             // Move any checkpoint files so resume state follows the final name.
             let (from_part, from_meta) = partial_paths(&provisional, temp.as_deref());
             let (to_part, to_meta) = partial_paths(&chosen, temp.as_deref());
+            // Never move our partial onto someone else's file (another task or a browser).
+            for target in [&to_part, &to_meta] {
+                if fs::symlink_metadata(target).is_ok() {
+                    return Err(err(format!(
+                        "{} already exists; refusing to overwrite it with this task's partial data",
+                        target.display()
+                    )));
+                }
+            }
+            let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
             for (from, to) in [(from_meta, to_meta), (from_part, to_part)] {
                 match fs::rename(&from, &to) {
-                    Ok(()) => {}
+                    Ok(()) => moved.push((from, to)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        for (from, to) in moved.into_iter().rev() {
+                            let _ = fs::rename(to, from);
+                        }
+                        return Err(e.into());
+                    }
                 }
             }
             options.output = chosen;
@@ -2016,7 +2178,7 @@ fn run_transfer(
         }
     };
     if temp.is_some() {
-        ensure_final_space(&options.output, length)?;
+        ensure_final_space(&options.output, temp.as_deref().unwrap_or(Path::new("")), length)?;
     }
     control.initialize(
         state.segments.iter().map(|s| s.cursor - s.start).sum(),
@@ -2084,16 +2246,17 @@ fn run_transfer(
             None => err("download incomplete after workers ended"),
         });
     }
+    stamp(
+        &shared.file,
+        server_time(
+            options.set_file_time,
+            probe.last_modified.as_deref().or(state.last_modified.as_deref()),
+        ),
+    );
     shared.file.sync_all()?;
     drop(shared.file);
     publish(&part, &options.output)?;
-    fs::remove_file(&meta)?;
-    if options.set_file_time {
-        apply_server_time(
-            &options.output,
-            probe.last_modified.as_deref().or(state.last_modified.as_deref()),
-        );
-    }
+    discard(&meta);
     Ok(())
 }
 
@@ -2160,6 +2323,11 @@ mod tests {
         assert!(with("POST", Some(&vec![0; MAX_BODY + 1])).is_err());
     }
 
+    fn mtime_secs(path: &Path) -> u64 {
+        fs::metadata(path).unwrap().modified().unwrap()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
     fn workspace(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("xdm-unit-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -2192,13 +2360,49 @@ mod tests {
         let dir = workspace("servertime");
         let file = dir.join("f.bin");
         fs::write(&file, b"x").unwrap();
-        apply_server_time(&file, Some("garbage"));
-        apply_server_time(&file, None);
-        let kept = fs::metadata(&file).unwrap().modified().unwrap();
-        assert!(kept.elapsed().unwrap() < Duration::from_secs(600));
-        apply_server_time(&file, Some("Sun, 06 Nov 1994 08:49:37 GMT"));
-        let set = fs::metadata(&file).unwrap().modified().unwrap();
-        assert_eq!(set.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), 784111777);
+        let handle = OpenOptions::new().write(true).open(&file).unwrap();
+        for bad in [Some("garbage"), None, Some("Sun, 06 Nov 99999 08:49:37 GMT"), Some("Sun, 06 Nov 12345678901234567890 08:49:37 GMT")] {
+            stamp(&handle, server_time(true, bad));
+        }
+        stamp(&handle, server_time(false, Some("Sun, 06 Nov 1994 08:49:37 GMT")));
+        assert!(fs::metadata(&file).unwrap().modified().unwrap().elapsed().unwrap() < Duration::from_secs(600));
+        stamp(&handle, server_time(true, Some("Sun, 06 Nov 1994 08:49:37 GMT")));
+        assert_eq!(mtime_secs(&file), 784111777);
+        // The time survives a publish by link.
+        let out = dir.join("g.bin");
+        publish(&file, &out).unwrap();
+        assert_eq!(mtime_secs(&out), 784111777);
+    }
+
+    #[test]
+    fn publish_fallbacks_never_replace_and_removal_failures_are_not_errors() {
+        let dir = workspace("noreplace");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        fs::write(&a, b"1").unwrap();
+        fs::write(&b, b"2").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let error = rename_noreplace(&a, &b).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(fs::read(&b).unwrap(), b"2");
+            fs::remove_file(&b).unwrap();
+            rename_noreplace(&a, &b).unwrap();
+            assert_eq!(fs::read(&b).unwrap(), b"1");
+        }
+        // A part that is already gone does not fail a publish that installed the file.
+        discard(&dir.join("missing"));
+    }
+
+    #[test]
+    fn html_sniffing_and_guard() {
+        assert!(looks_like_html(b"  \n<!DOCTYPE html><html>"));
+        assert!(looks_like_html(b"<html><body>"));
+        assert!(!looks_like_html(b"PK\x03\x04"));
+        let out = Path::new("/d/x.dat");
+        assert!(html_guard(Some("text/html; charset=utf-8"), "http://h/a.zip", out));
+        assert!(html_guard(Some("text/html"), "http://h/get.php", Path::new("/d/a.iso")));
+        assert!(!html_guard(Some("text/html"), "http://h/page.php", out));
+        assert!(!html_guard(Some("application/zip"), "http://h/a.zip", out));
     }
 
     #[test]
@@ -2223,28 +2427,30 @@ mod tests {
         copy_publish(&part, &out).unwrap();
         assert_eq!(fs::read(&out).unwrap(), b"data");
         assert!(!part.exists());
-        assert!(!dir.join("a.xdm-copy").exists());
+        // A foreign file named like the old fixed staging name is never touched.
+        fs::write(dir.join("a.xdm-copy"), b"foreign").unwrap();
         fs::write(&part, b"new").unwrap();
         assert!(copy_publish(&part, &out).is_err());
         assert_eq!(fs::read(&out).unwrap(), b"data");
         assert_eq!(fs::read(&part).unwrap(), b"new");
-        assert!(!dir.join("a.xdm-copy").exists());
+        assert_eq!(fs::read(dir.join("a.xdm-copy")).unwrap(), b"foreign");
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(leftovers.len(), 3, "{leftovers:?}");
     }
 
     #[test]
     fn mime_extension_reconciliation() {
         let name = |url: &str, ct: Option<&str>| reconcile_server_name(&meta(url, ct), "prov.bin");
-        assert_eq!(name("http://h/get.php", Some("application/zip")), Ok(Some("get.zip".into())));
-        assert_eq!(name("http://h/dl", Some("application/pdf; charset=binary")), Ok(Some("dl.pdf".into())));
-        assert_eq!(name("http://h/a.zip", Some("application/zip")), Ok(Some("a.zip".into())));
-        assert_eq!(name("http://h/a.jpeg", Some("image/jpeg")), Ok(Some("a.jpeg".into())));
-        assert_eq!(name("http://h/a.pdf", Some("application/zip")), Ok(Some("a.zip".into())));
-        assert_eq!(name("http://h/a.dat", Some("application/zip")), Ok(Some("a.dat".into())));
-        assert_eq!(name("http://h/a.txt", Some("text/plain")), Ok(Some("a.txt".into())));
-        assert_eq!(name("http://h/a.php", Some("text/html")), Ok(Some("a.php".into())));
-        assert_eq!(name("http://h/a.zip", Some("text/html; charset=utf-8")), Err(HTML_INSTEAD_OF_FILE.into()));
-        assert_eq!(name("http://h/a.iso", Some("text/html")), Err(HTML_INSTEAD_OF_FILE.into()));
-        assert_eq!(name("http://h/a.zip", None), Ok(Some("a.zip".into())));
+        assert_eq!(name("http://h/get.php", Some("application/zip")), Some("get.zip".into()));
+        assert_eq!(name("http://h/dl", Some("application/pdf; charset=binary")), Some("dl.pdf".into()));
+        assert_eq!(name("http://h/a.zip", Some("application/zip")), Some("a.zip".into()));
+        // A real extension is never rewritten.
+        assert_eq!(name("http://h/a.pdf", Some("application/zip")), Some("a.pdf".into()));
+        assert_eq!(name("http://h/archive.tar.gz", Some("application/x-tar")), Some("archive.tar.gz".into()));
+        assert_eq!(name("http://h/clip.mp4", Some("audio/mpeg")), Some("clip.mp4".into()));
+        assert_eq!(name("http://h/a.dat", Some("application/zip")), Some("a.dat".into()));
+        assert_eq!(name("http://h/a.php", Some("text/html")), Some("a.php".into()));
+        assert_eq!(name("http://h/a.zip", None), Some("a.zip".into()));
     }
 
     #[test]
@@ -2859,6 +3065,64 @@ mod net_tests {
                 .all(|(offset, byte)| *byte == (offset % 256) as u8),
             "downloaded bytes do not match the served pattern"
         );
+    }
+
+    #[test]
+    fn html_page_for_a_binary_name_fails_but_labelled_binaries_download() {
+        use std::io::{BufRead, BufReader};
+        let serve = |body: &'static [u8]| {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    let mut stream = stream;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            });
+            port
+        };
+        let dir = workspace("htmlguard");
+        let page = serve(b"<!doctype html><html>Not found</html>");
+        let error = download(options(format!("http://127.0.0.1:{page}/a.zip"), &dir.join("a.zip"), 1)).unwrap_err();
+        assert!(error.to_string().contains(HTML_INSTEAD_OF_FILE), "{error}");
+        assert!(!dir.join("a.zip").exists());
+        let real = serve(b"PK\x03\x04 real zip bytes");
+        download(options(format!("http://127.0.0.1:{real}/b.zip"), &dir.join("b.zip"), 1)).unwrap();
+        assert_eq!(fs::read(dir.join("b.zip")).unwrap()[..2], *b"PK");
+        // A page for a non-binary name is accepted.
+        let ok = serve(b"<html>fine</html>");
+        download(options(format!("http://127.0.0.1:{ok}/c.php"), &dir.join("c.php"), 1)).unwrap();
+    }
+
+    #[test]
+    fn server_name_never_overwrites_existing_partials() {
+        let dir = workspace("renameguard");
+        let server = spawn_server(Faults::new(64 * 1024));
+        let provisional = dir.join("prov.bin");
+        fs::write(dir.join("chosen.bin.part"), b"someone else").unwrap();
+        let mut decide = |_: ResponseMetadata| -> Result<PathBuf> { Ok(dir.join("chosen.bin")) };
+        let error = download_ex(
+            options(server.url(), &provisional, 1),
+            Arc::new(TransferControl::new(None).unwrap()),
+            DEFAULT_STALL_TIMEOUT,
+            ResumePolicy::default(),
+            Some(&mut decide),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("refusing to overwrite"), "{error}");
+        assert_eq!(fs::read(dir.join("chosen.bin.part")).unwrap(), b"someone else");
     }
 
     fn mtime_secs(path: &Path) -> u64 {

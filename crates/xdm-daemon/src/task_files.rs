@@ -428,8 +428,7 @@ impl Service {
         let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         let mut owned = HashSet::new();
         for (output, temp) in rows.flatten() {
-            let (part, meta) = xdm_http::partial_paths(Path::new(&output), Some(Path::new(&temp)));
-            owned.extend([part, meta]);
+            owned.extend(crate::owned_partial_paths(Path::new(&output), Some(&temp)));
         }
         Ok((owned, inner.temp_dir.clone().map(PathBuf::from)))
     }
@@ -515,6 +514,7 @@ impl Service {
                 owned.insert(directory.join(name));
             }
         }
+        let (temp_owned, _) = self.temp_partial_state()?;
         let mut found = Vec::new();
         let mut truncated = false;
         for entry in std::fs::read_dir(&directory)?.flatten() {
@@ -529,7 +529,10 @@ impl Service {
                 continue;
             };
             let output = directory.join(&base);
-            if owned.contains(&output) {
+            if owned.contains(&output)
+                || temp_owned.contains(&meta_file)
+                || temp_owned.contains(&directory.join(format!("{base}.part")))
+            {
                 continue;
             }
             let Some(meta_size) = regular_size(&meta_file) else {
@@ -596,8 +599,7 @@ impl Service {
             let rows = statement
                 .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
             for (output, temp) in rows.flatten() {
-                let (part, meta) = xdm_http::partial_paths(Path::new(&output), Some(Path::new(&temp)));
-                temp_owned.extend([part, meta]);
+                temp_owned.extend(crate::owned_partial_paths(Path::new(&output), Some(&temp)));
             }
         }
         let mut deleted = 0;

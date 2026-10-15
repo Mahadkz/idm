@@ -27,6 +27,7 @@ FILES = {
     "/getfile.php": (100 << 10, "application/zip", None, 0.0, True),
     "/noext": (50 << 10, "application/pdf", None, 0.0, True),
     "/page.zip": (2 << 10, "text/html; charset=utf-8", None, 0.0, True),
+    "/mislabeled.zip": (2 << 10, "text/html", None, 0.0, True),
     "/note.txt": (3 << 10, "text/plain", None, 0.0, True),
     "/s-small.bin": (100 << 10, None, None, 0.0, True),
     "/s-big.bin": (900 << 10, None, None, 0.0, True),
@@ -47,6 +48,10 @@ def data(start, end):
     return b"".join(out)
 
 
+BODIES = {"/page.zip": b"<!DOCTYPE html><html><body>Not found</body></html>",
+          "/mislabeled.zip": b"PK\x03\x04" + b"z" * 100}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -60,6 +65,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             return self.end_headers()
         size, ctype, modified, delay, with_length = FILES[path]
+        if path in BODIES:
+            body = BODIES[path]
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         start, end, status = 0, size - 1, 200
         value = self.headers.get("Range")
         if value and with_length:
@@ -229,6 +241,25 @@ def main():
             assert deleted["ok"] and deleted["total"] == 2, deleted
             assert sorted(p.name for p in temp_same.iterdir()) == ["foreign.part", "notes.part.meta"]
 
+            # A symlinked temp dir is stored canonical; live partials stay owned in every scan.
+            link = base / "scratch-link"
+            os.symlink(temp_same, link)
+            stored = rpc("set_temp_dir", {"path": str(link)})
+            assert stored["ok"] and stored["temp_dir"] == str(temp_same.resolve()), stored
+            lk = submit("tmp-link", "slow.bin", dest / "link.bin")
+            wait_for(lk, lambda x: x["status"] == "running" and (x["downloaded"] or 0) > 0)
+            cli("pause", lk)
+            assert done(lk)["status"] == "paused"
+            for directory in (dest, temp_same, link):
+                found = rpc("partial_scan", {"directory": str(directory)})["partials"]
+                assert found == [], (directory, found)
+            denied = rpc("partial_delete", {"directory": str(temp_same), "paths": [
+                str(p) for p in temp_same.iterdir() if p.name.endswith(".part") and p.name != "foreign.part"]})
+            assert not denied["ok"] or denied["total"] == 0, denied
+            assert any(p.name.endswith(".part.meta") and p.name != "notes.part.meta" for p in temp_same.iterdir())
+            assert rpc("task_remove_ex", {"task_id": lk, "delete_partial": True})["ok"]
+            assert sorted(p.name for p in temp_same.iterdir()) == ["foreign.part", "notes.part.meta"]
+
             # Cross-volume: temp on /dev/shm (a different device), destination on disk.
             assert os.stat(shm).st_dev != os.stat(base).st_dev
             assert rpc("set_temp_dir", {"path": shm})["ok"]
@@ -265,6 +296,16 @@ def main():
             assert outcome["retry_count"] == 0
             for n, task in ids.items():
                 assert done(task)["status"] == "complete", (n, row(task))
+            # A binary labelled text/html still downloads when the body is not a page.
+            mis = submit("nm-mis", "mislabeled.zip", names / "mis-placeholder.dat", name_from_server=True)
+            assert done(mis)["status"] == "complete"
+            assert (names / "mislabeled.zip").read_bytes()[:2] == b"PK"
+            # A foreign partial occupying the chosen name makes the daemon pick a numbered one.
+            (names / "s-a.bin.part").write_bytes(b"firefox")
+            tk = submit("nm-taken", "s-a.bin", names / "tk-placeholder.dat", name_from_server=True)
+            assert done(tk)["status"] == "complete", row(tk)
+            assert (names / "s-a.bin.part").read_bytes() == b"firefox"
+            assert (names / "s-a (2).bin").exists(), sorted(p.name for p in names.iterdir())
             listing = sorted(p.name for p in names.iterdir())
             assert "getfile.zip" in listing and "noext.pdf" in listing and "note.txt" in listing, listing
             assert not any(p.endswith(".php") for p in listing), listing
@@ -300,7 +341,7 @@ def main():
             cli("pause", slow)
             # Last try: never-started tasks sort before tasks that ran.
             cli("queue", "stop")
-            never = rpc("submit_ex", {"request_id": "lt-never", "url": url("s-a.bin"), "output": str(sizes / "never.bin"),
+            never = rpc("submit_ex", {"request_id": "lt-never", "url": url("s-a.bin"), "output": str(sizes / "never.bin"), "allow_duplicate": True,
                                       "priority": 1, "connections": 4})["task_id"]
             assert row(never)["status"] == "queued"
             tries = page("+last_try")

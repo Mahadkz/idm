@@ -469,9 +469,10 @@ def test_server_name_reconciliation():
             self.send_header("Content-Type", kind)
             if disposition:
                 self.send_header("Content-Disposition", disposition.encode("latin-1", "replace").decode("latin-1"))
-            self.send_header("Content-Length", "64")
+            body = b"<!doctype html><html>Not found</html>" if path == "/page.zip" else b"x" * 64
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"x" * 64)
+            self.wfile.write(body)
 
     holder = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     holder.daemon_threads = True

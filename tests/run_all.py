@@ -99,6 +99,9 @@ def main():
 
     env = os.environ.copy()
     env["PATH"] = extended_path()
+    if not (ROOT / "target/debug/examples").is_dir() and shutil.which("cargo"):
+        # media_audio/media_live use xdm-media example binaries.
+        subprocess.run(["cargo", "build", "-p", "xdm-media", "--examples"], cwd=ROOT, check=False)
     results = []
     for path in suites:
         selected = (not args.only or path.name in args.only or path.stem in args.only)

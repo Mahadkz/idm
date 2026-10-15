@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 20
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
       - name: Integration suites (strict, every prerequisite installed)
         run: python3 tests/run_all.py --strict --skip chromium_real

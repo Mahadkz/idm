@@ -417,6 +417,7 @@
       "test_refs": [
         "tests/integration/engine_gaps.py",
         "crates/xdm-http/src/lib.rs",
+        "crates/xdm-ftp/src/lib.rs",
         "crates/xdm-daemon/src/main.rs",
         "crates/xdm-ipc/src/lib.rs"
       ]
@@ -1045,7 +1046,7 @@
       "id": "B32",
       "title": "B `Db/Zb` + C mouse26: selected text can create desktop selection panel; count/t",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script `selectionHandler` reports selected text, its bounding rect and a link count that now includes links inside the selection. The consumer is a context-menu flow: \"Download selected links\" (selection) and \"Download all links\" (page) collect links from the selection frame or every frame, dedupe them, apply the stored `linkFilter` (extension list, hide HTML, hide images) and send them as one `batch.submit` native message `{version:1, requestId:batchId, type:\"batch.submit\", payload:{batchId, count, items:[download.submit payloads with requestId \"<batchId>-<index>\">]}}`. If the host replies with an error (the current native host does not implement `batch.submit` yet) the same items are sent one by one as `download.submit`. There is no on-page selection panel, and the reported rect is frame-local with no DPI scaling or frame-ancestry translation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Partial: Content script `selectionHandler` reports selected text, its bounding rect and a link count that now includes links inside the selection. The consumer is a context-menu flow: \"Download selected links\" (selection) and \"Download all links\" (page) collect links from the selection frame or every frame, dedupe them, apply the stored `linkFilter` (extension list, hide HTML, hide images) and send them as one `batch.submit` native message `{version:1, requestId:batchId, type:\"batch.submit\", payload:{batchId, count, items:[download.submit payloads with requestId \"<batchId>-<index>\">]}}`. If the host replies with an error (only a host reporting \"unsupported message type\" triggers this; validation errors are surfaced, never retried per link) the same items are sent one by one as `download.submit`. There is no on-page selection panel, and the reported rect is frame-local with no DPI scaling or frame-ancestry translation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"

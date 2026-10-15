@@ -50,7 +50,7 @@
 | N35 | Pause/resume with one connection | implemented | Implemented (2026-10-13): connections=1 uses a single range worker with a `.part… | tests/integration/http_engine.py |
 | N36 | Non-range pause/restart | partial | Partial: Single-stream non-range pause retains .part without metadata; next atte… | tests/integration/http_engine.py, tests/integration/restart_required.py |
 | N37 | Crash recovery and stale running states | partial | Partial: daemon maps running/pausing→queued at open; segmented checkpoint valida… | tests/integration/contracts_core.py |
-| N38 | Separate temporary and final directories | partial | Partial: HTTP tasks keep `.part` and `.part.meta` in an optional absolute temp d… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N38 | Separate temporary and final directories | partial | Partial: HTTP tasks keep `.part` and `.part.meta` in an optional absolute temp d… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-ftp/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N39 | Disk-full and access-denied assembly | partial | Partial (2026-10-13): disk-space preflight via `fstatvfs` and rollback of failed… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N40 | Large files and filesystem limits | implemented | Implemented (2026-10-13): u64 offsets/lengths and set_len; >4 GiB crossing verif… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N41 | File timestamps | partial | Partial: HTTP completed files take their modification time from a valid `Last-Mo… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
@@ -232,7 +232,7 @@
 | N34 | Checkpoint schema and write ordering | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N36 | Non-range pause/restart | partial | tests/integration/http_engine.py, tests/integration/restart_required.py | idm_core_queue_contracts.md |
 | N37 | Crash recovery and stale running states | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
-| N38 | Separate temporary and final directories | partial | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
+| N38 | Separate temporary and final directories | partial | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-ftp/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | N39 | Disk-full and access-denied assembly | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N41 | File timestamps | partial | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |

@@ -114,9 +114,13 @@ def main():
             assert not submit_post("bad-method", "bad-method.bin", method="bad method")["ok"]
             assert not (base / "get-body.bin").exists() and not (base / "bad-method.bin").exists()
 
-            # Redownload replays the same method and body; exports omit bodies.
-            cloned = rpc("redownload", task_id=post_id, request_id="post-clone",
-                         output=str(base / "post-copy.bin"))["task_id"]
+            # Redownload replays the same method and body; exports omit bodies. The earlier
+            # GET task owns the same URL, so the duplicate policy needs an explicit opt-in.
+            refused = rpc("redownload", task_id=post_id, request_id="post-clone",
+                          output=str(base / "post-copy.bin"))
+            assert not refused["ok"] and refused.get("duplicate_of"), refused
+            cloned = rpc("redownload_ex", task_id=post_id, request_id="post-clone",
+                         output=str(base / "post-copy.bin"), allow_duplicate=True)["task_id"]
             cli("queue", "start")
             until(cloned, lambda row: row["status"] == "complete")
             assert hashlib.sha256((base / "post-copy.bin").read_bytes()).hexdigest() == EXPECTED

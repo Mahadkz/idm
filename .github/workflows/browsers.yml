@@ -25,6 +25,9 @@ jobs:
           echo "$out"
           echo "XDM_CHROME_FOR_TESTING=${out#* }" >> "$GITHUB_ENV"
       - name: Real Chrome handoff
+        env:
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces, which the Chrome sandbox needs.
+          XDM_CHROME_NO_SANDBOX: "1"
         run: xvfb-run -a python3 tests/run_all.py --strict --only chromium_real
   firefox:
     runs-on: ubuntu-latest

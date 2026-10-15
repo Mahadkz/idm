@@ -373,6 +373,8 @@ mod tests {
 
     #[test]
     fn rules_validate_bounds() {
+        // A rooted path without a drive letter is not absolute on Windows.
+        let abs = if cfg!(windows) { "C:\\abs\\ok" } else { "/abs/ok" };
         let mut rule = CategoryRule {
             name: " Ok ".into(),
             extensions: Vec::new(),
@@ -385,16 +387,16 @@ mod tests {
         assert!(valid_rule(&rule).is_ok());
         rule.destination = "relative".into();
         assert!(valid_rule(&rule).is_err());
-        rule.destination = "/abs/../evil".into();
+        rule.destination = format!("{abs}/../evil");
         assert!(valid_rule(&rule).is_err());
-        rule.destination = "/abs/ok".into();
+        rule.destination = abs.into();
         rule.sites = vec!["*.a.test".into(), " ".into()];
         assert!(valid_rule(&rule).is_err());
         rule.sites = vec!["*.a.test".into()];
         assert!(valid_rule(&rule).is_ok());
         assert_eq!(
             serde_json::to_value(&rule).unwrap(),
-            serde_json::json!({"name": "Docs", "extensions": ["pdf"], "destination": "/abs/ok", "sites": ["*.a.test"]})
+            serde_json::json!({"name": "Docs", "extensions": ["pdf"], "destination": abs, "sites": ["*.a.test"]})
         );
     }
 

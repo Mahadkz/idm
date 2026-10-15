@@ -42,6 +42,11 @@ pub struct Options {
     pub bytes_per_second: Option<u64>,
     pub proxy: Proxy,
     pub stop: Arc<AtomicBool>,
+    /// Absolute directory that holds `.part`/`.part.meta` instead of the destination's
+    /// directory (N38). The completed file is published at `output` afterwards.
+    pub temp_dir: Option<PathBuf>,
+    /// Sets the completed file's modification time from Last-Modified (N41).
+    pub set_file_time: bool,
 }
 
 /// Connection route used by every request of a transfer.
@@ -77,6 +82,8 @@ impl Default for Options {
             bytes_per_second: None,
             proxy: Proxy::System,
             stop: Arc::new(AtomicBool::new(false)),
+            temp_dir: None,
+            set_file_time: false,
         }
     }
 }
@@ -97,6 +104,8 @@ pub struct ResponseMetadata {
     pub effective_url: String,
     pub content_disposition: Option<String>,
     pub content_length: Option<u64>,
+    /// Content-Type of the serving response (server-name reconciliation).
+    pub content_type: Option<String>,
 }
 
 /// Shared controls and live counters for a single HTTP transfer.
@@ -109,6 +118,7 @@ pub struct TransferControl {
     total: AtomicU64,
     total_known: AtomicBool,
     sample: Mutex<Sample>,
+    size_unverified: AtomicBool,
 }
 
 /// Shared limits a daemon attaches to a transfer.
@@ -154,7 +164,14 @@ impl TransferControl {
                 bytes: 0,
                 speed: 0,
             }),
+            size_unverified: AtomicBool::new(false),
         })
+    }
+
+    /// True when the last transfer declared no Content-Length and ended at EOF, so
+    /// its completeness could not be verified.
+    pub fn size_unverified(&self) -> bool {
+        self.size_unverified.load(Ordering::Relaxed)
     }
 
     pub fn set_rate(&self, rate: Option<u64>) -> Result<()> {
@@ -166,6 +183,7 @@ impl TransferControl {
     }
 
     fn initialize(&self, done: u64, total: Option<u64>) {
+        self.size_unverified.store(false, Ordering::Relaxed);
         self.downloaded.store(done, Ordering::Relaxed);
         self.total.store(total.unwrap_or(0), Ordering::Relaxed);
         self.total_known.store(total.is_some(), Ordering::Relaxed);
@@ -274,7 +292,12 @@ struct Checkpoint {
 
 /// Read the latest durable byte count without opening a network connection.
 pub fn checkpoint_progress(output: &Path) -> Option<(u64, u64)> {
-    let path = meta_path(output);
+    checkpoint_progress_in(output, None)
+}
+
+/// Like `checkpoint_progress` for a task whose partials live in `temp`.
+pub fn checkpoint_progress_in(output: &Path, temp: Option<&Path>) -> Option<(u64, u64)> {
+    let path = meta_path(output, temp);
     let file = File::open(path).ok()?;
     let state: Checkpoint = serde_json::from_reader(file).ok()?;
     let done = state.segments.iter().try_fold(0u64, |sum, segment| {
@@ -298,6 +321,7 @@ struct Probe {
     last_modified: Option<String>,
     /// Content-Disposition of the serving response (N14 naming).
     disposition: Option<String>,
+    content_type: Option<String>,
     /// First response, kept so its body is adopted instead of requesting the resource again.
     response: Option<Response>,
     /// Byte offset at which the adopted body begins.
@@ -311,6 +335,7 @@ impl Probe {
             effective_url: self.effective_url.clone(),
             content_disposition: self.disposition.clone(),
             content_length: self.length,
+            content_type: self.content_type.clone(),
         }
     }
 }
@@ -591,6 +616,90 @@ pub fn server_filename(metadata: &ResponseMetadata, provisional: &str) -> Option
         .filter(|chosen| *chosen != provisional)
 }
 
+/// Message of a task whose server answered with a web page for a binary file.
+pub const HTML_INSTEAD_OF_FILE: &str = "server returned an HTML page instead of a file";
+
+/// Content-Type media type to its canonical extension, and the other extensions that
+/// already satisfy it.
+const MIME_EXTENSIONS: &[(&str, &str, &[&str])] = &[
+    ("application/zip", "zip", &[]),
+    ("application/x-zip-compressed", "zip", &[]),
+    ("application/pdf", "pdf", &[]),
+    ("video/mp4", "mp4", &["m4v"]),
+    ("video/x-matroska", "mkv", &["webm"]),
+    ("audio/mpeg", "mp3", &[]),
+    ("audio/mp4", "m4a", &[]),
+    ("audio/x-m4a", "m4a", &[]),
+    ("image/png", "png", &[]),
+    ("image/jpeg", "jpg", &["jpeg", "jpe"]),
+    ("application/vnd.microsoft.portable-executable", "exe", &[]),
+    ("application/x-msdownload", "exe", &[]),
+    ("application/x-msi", "msi", &[]),
+    ("application/x-iso9660-image", "iso", &[]),
+    ("application/x-7z-compressed", "7z", &[]),
+    ("application/vnd.rar", "rar", &[]),
+    ("application/x-rar-compressed", "rar", &[]),
+    ("application/gzip", "gz", &["tgz"]),
+    ("application/x-gzip", "gz", &["tgz"]),
+    ("application/x-tar", "tar", &[]),
+];
+
+/// Extensions of server-side pages that never name the real payload type.
+const DYNAMIC_EXTENSIONS: &[&str] = &[
+    "php", "php3", "php4", "php5", "asp", "aspx", "jsp", "jspx", "cgi", "pl", "do", "action",
+    "cfm", "html", "htm", "shtml", "axd", "ashx",
+];
+
+fn is_binary_extension(ext: &str) -> bool {
+    MIME_EXTENSIONS
+        .iter()
+        .any(|(_, canonical, others)| *canonical == ext || others.contains(&ext))
+}
+
+fn media_type(content_type: &str) -> String {
+    content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+}
+
+/// N14 plus MIME reconciliation: the final name of a server-named task. `Ok(None)` keeps
+/// the provisional name. A web page answering for a file whose name targets a binary
+/// extension fails; a Content-Type that maps to another extension than a dynamic-page
+/// or missing one fixes the name (`a.php` + application/zip becomes `a.zip`).
+pub fn reconcile_server_name(
+    metadata: &ResponseMetadata,
+    provisional: &str,
+) -> std::result::Result<Option<String>, String> {
+    let name = server_filename(metadata, provisional).unwrap_or_else(|| provisional.to_owned());
+    let extension = |name: &str| {
+        name.rfind('.')
+            .filter(|at| *at > 0 && *at + 1 < name.len())
+            .map(|at| name[at + 1..].to_ascii_lowercase())
+    };
+    let current = extension(&name);
+    let mime = metadata.content_type.as_deref().map(media_type).unwrap_or_default();
+    let mut result = name.clone();
+    if matches!(mime.as_str(), "text/html" | "application/xhtml+xml") {
+        if current.as_deref().is_some_and(is_binary_extension) {
+            return Err(HTML_INSTEAD_OF_FILE.to_owned());
+        }
+    } else if let Some((_, wanted, accepted)) =
+        MIME_EXTENSIONS.iter().find(|(known, _, _)| *known == mime)
+    {
+        let stem_len = name.rfind('.').filter(|at| *at > 0).unwrap_or(name.len());
+        match current.as_deref() {
+            Some(ext) if ext == *wanted || accepted.contains(&ext) => {}
+            None => result = format!("{name}.{wanted}"),
+            Some(ext) if DYNAMIC_EXTENSIONS.contains(&ext) || is_binary_extension(ext) => {
+                result = format!("{}.{wanted}", &name[..stem_len]);
+            }
+            Some(_) => {}
+        }
+    }
+    let Some(result) = sanitize_filename(&result) else {
+        return Ok(None);
+    };
+    Ok((result != provisional).then_some(result))
+}
+
 /// Parses the first challenge of a WWW-Authenticate or Proxy-Authenticate
 /// header: `Basic realm="xdm-test"`, `Bearer`, or a comma list of schemes.
 fn parse_challenge(header: &str) -> Option<(String, Option<String>)> {
@@ -690,12 +799,30 @@ fn identity_encoded(response: &Response) -> bool {
     header(response, CONTENT_ENCODING).is_none_or(|value| value.eq_ignore_ascii_case("identity"))
 }
 
-fn part_path(output: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.part", output.display()))
+/// Partial-file name inside a separate temporary directory: a digest of the final path
+/// keeps equal names of different folders apart (N38).
+fn temp_base(output: &Path, temp: &Path) -> PathBuf {
+    let digest = format!("{:x}", Sha256::digest(output.to_string_lossy().as_bytes()));
+    let name: String = output
+        .file_name()
+        .map(|n| n.to_string_lossy().chars().take(100).collect())
+        .unwrap_or_default();
+    temp.join(format!("{}-{name}", &digest[..16]))
 }
 
-fn meta_path(output: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.part.meta", output.display()))
+/// The `.part` and `.part.meta` paths of `output`, beside it or inside `temp`.
+pub fn partial_paths(output: &Path, temp: Option<&Path>) -> (PathBuf, PathBuf) {
+    (part_path(output, temp), meta_path(output, temp))
+}
+
+fn part_path(output: &Path, temp: Option<&Path>) -> PathBuf {
+    let base = temp.map_or_else(|| output.to_path_buf(), |dir| temp_base(output, dir));
+    PathBuf::from(format!("{}.part", base.display()))
+}
+
+fn meta_path(output: &Path, temp: Option<&Path>) -> PathBuf {
+    let base = temp.map_or_else(|| output.to_path_buf(), |dir| temp_base(output, dir));
+    PathBuf::from(format!("{}.part.meta", base.display()))
 }
 
 fn store_checkpoint(file: &File, path: &Path, state: &Checkpoint) -> Result<()> {
@@ -767,6 +894,29 @@ fn preallocate(file: &File, length: u64) -> std::io::Result<()> {
         }
     }
     file.set_len(length)
+}
+
+/// Preflight of the final volume when partials live elsewhere (N38): the completed
+/// file must fit where it will be published, not only where it is assembled.
+fn ensure_final_space(output: &Path, length: u64) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        if let Ok(path) = CString::new(dir.as_os_str().as_bytes()) {
+            // SAFETY: statvfs only writes into the zeroed struct we own.
+            let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+            if unsafe { libc::statvfs(path.as_ptr(), &mut stats) } == 0 {
+                let available = (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64);
+                if length > available {
+                    return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
+                }
+            }
+        }
+    }
+    let _ = (output, length);
+    Ok(())
 }
 
 /// Rewrites storage failures into actionable messages; other errors pass through.
@@ -986,6 +1136,7 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
     let response = retry_send(client, request, Some(format!("bytes={offset}-")), stop)?;
     let status = response.status();
     let disposition = header(&response, CONTENT_DISPOSITION);
+    let content_type = header(&response, reqwest::header::CONTENT_TYPE);
     if status == StatusCode::PARTIAL_CONTENT && identity_encoded(&response) {
         let declared = header(&response, CONTENT_LENGTH).map(|v| v.parse::<u64>().ok());
         if let Some((start, end, length)) = header(&response, CONTENT_RANGE)
@@ -1003,6 +1154,7 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
                     etag: header(&response, ETAG),
                     last_modified: header(&response, LAST_MODIFIED),
                     disposition,
+                    content_type,
                     response: Some(response),
                     offset,
                 });
@@ -1032,6 +1184,7 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
         etag: header(&response, ETAG),
         last_modified: header(&response, LAST_MODIFIED),
         disposition,
+        content_type,
         response: Some(response),
         offset: 0,
     })
@@ -1046,13 +1199,115 @@ fn publish(part: &Path, output: &Path) -> Result<()> {
             output.display(),
             part.display()
         ))),
-        // Filesystems without hard links fall back to a checked rename.
-        Err(_) if fs::symlink_metadata(output).is_err() => Ok(fs::rename(part, output)?),
+        // Filesystems without hard links (or another volume) fall back to a checked rename,
+        // then to copy + fsync + no-clobber publish.
+        Err(_) if fs::symlink_metadata(output).is_err() => match fs::rename(part, output) {
+            Ok(()) => Ok(()),
+            Err(_) => copy_publish(part, output),
+        },
         Err(_) => Err(err(format!(
             "{} appeared during the download; the completed data was kept at {}",
             output.display(),
             part.display()
         ))),
+    }
+}
+
+/// Cross-volume publish (N38): the data is copied beside the destination and synced,
+/// installed without replacing anything, and only then is the partial removed. Any
+/// failure leaves the partial intact and the destination untouched.
+fn copy_publish(part: &Path, output: &Path) -> Result<()> {
+    let staging = PathBuf::from(format!("{}.xdm-copy", output.display()));
+    let _ = fs::remove_file(&staging);
+    let copied = (|| -> std::io::Result<()> {
+        let mut source = File::open(part)?;
+        let mut target = OpenOptions::new().write(true).create_new(true).open(&staging)?;
+        std::io::copy(&mut source, &mut target)?;
+        target.sync_all()
+    })();
+    if let Err(error) = copied {
+        let _ = fs::remove_file(&staging);
+        return Err(err(format!(
+            "copying the finished download to {} failed ({error}); the data was kept at {}",
+            output.display(),
+            part.display()
+        )));
+    }
+    let installed = match fs::hard_link(&staging, output) {
+        Ok(()) => {
+            let _ = fs::remove_file(&staging);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(()),
+        Err(_) if fs::symlink_metadata(output).is_err() => {
+            fs::rename(&staging, output).map_err(|_| ())
+        }
+        Err(_) => Err(()),
+    };
+    if installed.is_err() {
+        let _ = fs::remove_file(&staging);
+        return Err(err(format!(
+            "{} appeared during the download; the completed data was kept at {}",
+            output.display(),
+            part.display()
+        )));
+    }
+    Ok(fs::remove_file(part)?)
+}
+
+/// Parses an HTTP-date (IMF-fixdate, RFC 850 or asctime) into a system time.
+pub fn parse_http_date(value: &str) -> Option<std::time::SystemTime> {
+    const MONTHS: [&str; 12] =
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let text = value.trim();
+    let tokens: Vec<&str> = text
+        .split(|c: char| c == ' ' || c == ',' || c == '-')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let month = |t: &str| MONTHS.iter().position(|m| t.len() >= 3 && t[..3].eq_ignore_ascii_case(m));
+    let (day, mon, year, clock) = match tokens.as_slice() {
+        // Sun, 06 Nov 1994 08:49:37 GMT  |  Sunday, 06-Nov-94 08:49:37 GMT
+        [_, d, m, y, t, tz] if tz.eq_ignore_ascii_case("GMT") => (*d, month(m)?, *y, *t),
+        // Sun Nov  6 08:49:37 1994
+        [_, m, d, t, y] => (*d, month(m)?, *y, *t),
+        _ => return None,
+    };
+    let day: i64 = day.parse().ok()?;
+    let mut y: i64 = year.parse().ok()?;
+    if year.len() == 2 {
+        y += if y < 70 { 2000 } else { 1900 };
+    }
+    let mut parts = clock.split(':');
+    let (h, mi, sec): (i64, i64, i64) = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    if parts.next().is_some() || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 || y < 1970 {
+        return None;
+    }
+    let m = mon as i64 + 1;
+    // Days from civil (Howard Hinnant).
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = yy / 400;
+    let yoe = yy - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let seconds = days * 86400 + h * 3600 + mi * 60 + sec;
+    u64::try_from(seconds)
+        .ok()
+        .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
+}
+
+/// Sets the modification time of the published file from the server's Last-Modified
+/// value. An absent, unparsable or future-impossible date leaves the file unchanged.
+fn apply_server_time(path: &Path, last_modified: Option<&str>) {
+    let Some(time) = last_modified.and_then(parse_http_date) else {
+        return;
+    };
+    if let Ok(file) = OpenOptions::new().write(true).open(path) {
+        let _ = file.set_modified(time);
     }
 }
 
@@ -1524,6 +1779,9 @@ fn stream_body(
     if length.is_some_and(|length| length != total) {
         return Ok(false);
     }
+    if length.is_none() {
+        control.size_unverified.store(true, Ordering::Relaxed);
+    }
     output.flush()?;
     output.get_ref().sync_all()?;
     Ok(true)
@@ -1563,7 +1821,11 @@ fn single_stream(
             return Err(err("encoded response cannot be safely assembled"));
         }
         if stream_body(&mut response, part, probe.length, options, control)? {
-            return publish(part, &options.output);
+            publish(part, &options.output)?;
+            if options.set_file_time {
+                apply_server_time(&options.output, probe.last_modified.as_deref());
+            }
+            return Ok(());
         }
         if failures == RETRIES {
             return Err(err("download ended before declared length"));
@@ -1633,8 +1895,15 @@ fn run_transfer(
             fs::create_dir_all(parent)?;
         }
     }
-    let part = part_path(&options.output);
-    let meta = meta_path(&options.output);
+    let temp = options.temp_dir.clone();
+    if let Some(dir) = &temp {
+        if !dir.is_absolute() {
+            return Err(err("the temporary directory must be an absolute path"));
+        }
+        fs::create_dir_all(dir)?;
+    }
+    let part = part_path(&options.output, temp.as_deref());
+    let meta = meta_path(&options.output, temp.as_deref());
     if options.restart {
         let _ = fs::remove_file(&part);
         let _ = fs::remove_file(&meta);
@@ -1679,9 +1948,9 @@ fn run_transfer(
                 ));
             }
             // Move any checkpoint files so resume state follows the final name.
-            for suffix in [".part.meta", ".part"] {
-                let from = PathBuf::from(format!("{}{suffix}", provisional.display()));
-                let to = PathBuf::from(format!("{}{suffix}", chosen.display()));
+            let (from_part, from_meta) = partial_paths(&provisional, temp.as_deref());
+            let (to_part, to_meta) = partial_paths(&chosen, temp.as_deref());
+            for (from, to) in [(from_meta, to_meta), (from_part, to_part)] {
                 match fs::rename(&from, &to) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1691,8 +1960,8 @@ fn run_transfer(
             options.output = chosen;
         }
     }
-    let part = part_path(&options.output);
-    let meta = meta_path(&options.output);
+    let part = part_path(&options.output, temp.as_deref());
+    let meta = meta_path(&options.output, temp.as_deref());
     if !probe.ranges || probe.length.unwrap_or(0) == 0 {
         if saved.is_some() {
             return Err(err(
@@ -1746,6 +2015,9 @@ fn run_transfer(
             segments: split_segments(length, options.connections),
         }
     };
+    if temp.is_some() {
+        ensure_final_space(&options.output, length)?;
+    }
     control.initialize(
         state.segments.iter().map(|s| s.cursor - s.start).sum(),
         Some(length),
@@ -1816,6 +2088,12 @@ fn run_transfer(
     drop(shared.file);
     publish(&part, &options.output)?;
     fs::remove_file(&meta)?;
+    if options.set_file_time {
+        apply_server_time(
+            &options.output,
+            probe.last_modified.as_deref().or(state.last_modified.as_deref()),
+        );
+    }
     Ok(())
 }
 
@@ -1880,6 +2158,93 @@ mod tests {
         assert!(with("HEAD", None).is_err());
         assert!(with("bad method", None).is_err());
         assert!(with("POST", Some(&vec![0; MAX_BODY + 1])).is_err());
+    }
+
+    fn workspace(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xdm-unit-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn meta(url: &str, content_type: Option<&str>) -> ResponseMetadata {
+        ResponseMetadata {
+            effective_url: url.into(),
+            content_disposition: None,
+            content_length: None,
+            content_type: content_type.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn http_dates_parse_and_garbage_is_rejected() {
+        let epoch = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(epoch(parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap()), 784111777);
+        assert_eq!(epoch(parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT").unwrap()), 784111777);
+        assert_eq!(epoch(parse_http_date("Sun Nov  6 08:49:37 1994").unwrap()), 784111777);
+        for bad in ["", "yesterday", "Sun, 32 Nov 1994 08:49:37 GMT", "Sun, 06 Foo 1994 08:49:37 GMT", "Sun, 06 Nov 1994 25:00:00 GMT"] {
+            assert!(parse_http_date(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn server_time_changes_only_for_valid_dates() {
+        let dir = workspace("servertime");
+        let file = dir.join("f.bin");
+        fs::write(&file, b"x").unwrap();
+        apply_server_time(&file, Some("garbage"));
+        apply_server_time(&file, None);
+        let kept = fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(kept.elapsed().unwrap() < Duration::from_secs(600));
+        apply_server_time(&file, Some("Sun, 06 Nov 1994 08:49:37 GMT"));
+        let set = fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(set.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), 784111777);
+    }
+
+    #[test]
+    fn temp_partials_are_distinct_per_destination() {
+        let temp = Path::new("/tmp/xdm-temp");
+        let a = partial_paths(Path::new("/a/f.bin"), Some(temp));
+        let b = partial_paths(Path::new("/b/f.bin"), Some(temp));
+        assert_ne!(a.0, b.0);
+        assert!(a.0.starts_with(temp) && a.1.starts_with(temp));
+        assert!(a.0.to_string_lossy().ends_with("-f.bin.part"));
+        assert_eq!(
+            partial_paths(Path::new("/a/f.bin"), None).1,
+            Path::new("/a/f.bin.part.meta")
+        );
+    }
+
+    #[test]
+    fn copy_publish_installs_without_clobbering_and_keeps_part_on_conflict() {
+        let dir = workspace("copypublish");
+        let (part, out) = (dir.join("a.part"), dir.join("a"));
+        fs::write(&part, b"data").unwrap();
+        copy_publish(&part, &out).unwrap();
+        assert_eq!(fs::read(&out).unwrap(), b"data");
+        assert!(!part.exists());
+        assert!(!dir.join("a.xdm-copy").exists());
+        fs::write(&part, b"new").unwrap();
+        assert!(copy_publish(&part, &out).is_err());
+        assert_eq!(fs::read(&out).unwrap(), b"data");
+        assert_eq!(fs::read(&part).unwrap(), b"new");
+        assert!(!dir.join("a.xdm-copy").exists());
+    }
+
+    #[test]
+    fn mime_extension_reconciliation() {
+        let name = |url: &str, ct: Option<&str>| reconcile_server_name(&meta(url, ct), "prov.bin");
+        assert_eq!(name("http://h/get.php", Some("application/zip")), Ok(Some("get.zip".into())));
+        assert_eq!(name("http://h/dl", Some("application/pdf; charset=binary")), Ok(Some("dl.pdf".into())));
+        assert_eq!(name("http://h/a.zip", Some("application/zip")), Ok(Some("a.zip".into())));
+        assert_eq!(name("http://h/a.jpeg", Some("image/jpeg")), Ok(Some("a.jpeg".into())));
+        assert_eq!(name("http://h/a.pdf", Some("application/zip")), Ok(Some("a.zip".into())));
+        assert_eq!(name("http://h/a.dat", Some("application/zip")), Ok(Some("a.dat".into())));
+        assert_eq!(name("http://h/a.txt", Some("text/plain")), Ok(Some("a.txt".into())));
+        assert_eq!(name("http://h/a.php", Some("text/html")), Ok(Some("a.php".into())));
+        assert_eq!(name("http://h/a.zip", Some("text/html; charset=utf-8")), Err(HTML_INSTEAD_OF_FILE.into()));
+        assert_eq!(name("http://h/a.iso", Some("text/html")), Err(HTML_INSTEAD_OF_FILE.into()));
+        assert_eq!(name("http://h/a.zip", None), Ok(Some("a.zip".into())));
     }
 
     #[test]
@@ -1992,6 +2357,7 @@ mod tests {
             etag: etag.map(str::to_owned),
             last_modified: modified.map(str::to_owned),
             disposition: None,
+            content_type: None,
             response: None,
             offset: 0,
         };
@@ -2049,6 +2415,7 @@ mod tests {
             effective_url: url.into(),
             content_disposition: disposition.map(str::to_owned),
             content_length: Some(8),
+            content_type: None,
         };
         assert_eq!(
             server_filename(&meta(Some(r#"attachment; filename="C:\\evil\\report.pdf""#), "http://h/x"),
@@ -2414,7 +2781,7 @@ mod net_tests {
         }
         let status = if ranged { "206 Partial Content" } else { "200 OK" };
         let mut head = format!(
-            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"net-tests\"\r\nConnection: close\r\n",
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"net-tests\"\r\nLast-Modified: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\n",
             end - start + 1
         );
         if ranged {
@@ -2492,6 +2859,77 @@ mod net_tests {
                 .all(|(offset, byte)| *byte == (offset % 256) as u8),
             "downloaded bytes do not match the served pattern"
         );
+    }
+
+    fn mtime_secs(path: &Path) -> u64 {
+        fs::metadata(path).unwrap().modified().unwrap()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    #[test]
+    fn segmented_download_uses_temp_dir_and_sets_server_time() {
+        let dir = workspace("tempdir");
+        let temp = dir.join("scratch");
+        let dest = dir.join("final");
+        let len = 300 * 1024;
+        let server = spawn_server(Faults::new(len));
+        let mut opts = options(server.url(), &dest.join("f.bin"), 4);
+        opts.temp_dir = Some(temp.clone());
+        opts.set_file_time = true;
+        download(opts).unwrap();
+        assert_pattern(&dest.join("f.bin"), len);
+        assert_eq!(mtime_secs(&dest.join("f.bin")), 784111777);
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 1, "no partials beside the destination");
+        assert_eq!(fs::read_dir(&temp).unwrap().count(), 0, "temp partials are gone after publish");
+    }
+
+    #[test]
+    fn single_stream_download_keeps_time_unchanged_when_disabled() {
+        let dir = workspace("notime");
+        let mut faults = Faults::new(64 * 1024);
+        faults.ignore_ranges = true;
+        let server = spawn_server(faults);
+        let mut opts = options(server.url(), &dir.join("f.bin"), 2);
+        opts.temp_dir = Some(dir.join("t"));
+        download(opts).unwrap();
+        assert!(mtime_secs(&dir.join("f.bin")) > 1_600_000_000);
+    }
+
+    #[test]
+    fn unknown_length_eof_is_flagged_unverified() {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let mut stream = stream;
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello world");
+            }
+        });
+        let dir = workspace("unknown");
+        let control = Arc::new(TransferControl::new(None).unwrap());
+        let opts = options(format!("http://127.0.0.1:{port}/x"), &dir.join("x.bin"), 1);
+        download_with_control(opts, control.clone()).unwrap();
+        assert_eq!(fs::read(dir.join("x.bin")).unwrap(), b"hello world");
+        assert!(control.size_unverified());
+    }
+
+    #[test]
+    fn declared_length_download_is_not_flagged() {
+        let dir = workspace("known");
+        let mut faults = Faults::new(32 * 1024);
+        faults.ignore_ranges = true;
+        let server = spawn_server(faults);
+        let control = Arc::new(TransferControl::new(None).unwrap());
+        download_with_control(options(server.url(), &dir.join("f.bin"), 1), control.clone()).unwrap();
+        assert!(!control.size_unverified());
     }
 
     #[test]

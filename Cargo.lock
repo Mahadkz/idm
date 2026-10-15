@@ -5837,6 +5837,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys 0.52.0",
  "xdm-categories",
 ]
 

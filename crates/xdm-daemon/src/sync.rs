@@ -397,6 +397,8 @@ impl Service {
             bytes_per_second: None,
             proxy: proxy.clone(),
             stop: Arc::new(AtomicBool::new(false)),
+            temp_dir: None,
+            set_file_time: false,
         };
         let control = Arc::new(TransferControl::new(None)?);
         if let Err(error) = xdm_http::download_with_stall_timeout(options, control, stall) {

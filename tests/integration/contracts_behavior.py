@@ -49,8 +49,7 @@ EXPECTED_FAIL = {
     "single-use-request": "single-use request replay protection and HTML error detection on media downloads are not implemented",
     "eager-confirmation": "provisional download transfer during confirmation and download-later partial retention are not implemented",
     "duplicate-policy": "configurable duplicate policies (ask, numbered duplicate, overwrite, resume/completion prompt) are not exposed by the daemon",
-    "unknown-length-completion": "canceled unknown-length transfers cannot maintain recoverable partial checkpoint state",
-    "server-name-reconciliation": "daemon does not reconcile server Content-Disposition or MIME extensions with output destinations",
+    "unknown-length-completion": "EOF completion is flagged size_unverified, but canceled unknown-length transfers still cannot maintain recoverable partial checkpoint state",
     "synchronization": "synchronization queue mode with conditional re-download and retained-source tracking is not implemented",
     "recurrence-and-wake": "recurring schedule lacks DST transition handling, missed-run catchup policy and OS wake timer integration",
     "completion-precedence": "per-task completion action precedence and isolation from concurrent queue transfers are not implemented",
@@ -435,7 +434,7 @@ def test_unknown_length_completion():
                 task_id = daemon.submit(server.url("/chunked.bin"), output, wait=False)
                 daemon.cli("pause", task_id)
                 assert Path(f"{output}.part.meta").exists(), \
-                    "canceled unknown-length transfers cannot maintain recoverable partial checkpoint state"
+                    "EOF completion is flagged size_unverified, but canceled unknown-length transfers still cannot maintain recoverable partial checkpoint state"
             finally:
                 daemon.terminate()
     finally:
@@ -444,22 +443,98 @@ def test_unknown_length_completion():
 
 def test_server_name_reconciliation():
     r"""server-name-reconciliation: "Unicode/quoted disposition, MIME mismatch, redirected name, traversal payload, explicit override and an existing destination." """
-    server = Fixture()
+    import struct
+    routes = {
+        "/get.php": ("application/zip", None),
+        "/trav": ("application/octet-stream", 'attachment; filename="../../evil.bin"'),
+        "/quoted": ("application/octet-stream", "attachment; filename*=UTF-8''caf%C3%A9%20note.txt"),
+        "/page.zip": ("text/html", None),
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *unused):
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/final/redirected.pdf")
+                self.send_header("Content-Length", "0")
+                return self.end_headers()
+            kind, disposition = routes.get(path, ("application/pdf", None))
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            if disposition:
+                self.send_header("Content-Disposition", disposition.encode("latin-1", "replace").decode("latin-1"))
+            body = b"<!doctype html><html>Not found</html>" if path == "/page.zip" else b"x" * 64
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    holder = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    holder.daemon_threads = True
+    threading.Thread(target=holder.serve_forever, daemon=True).start()
     try:
-        server.set("/item", size=1024, disposition='attachment; filename="suggested.txt"')
         with tempfile.TemporaryDirectory(prefix="xdm-b07-") as temp:
             out = Path(temp)
             daemon = Daemon(out / "home", out / "state")
             try:
                 daemon.wait_listening()
-                task_id = daemon.submit(server.url("/item"), out / "item", wait=False)
-                task = daemon.info(task_id)
-                assert task.get("suggested_filename") == "suggested.txt", \
-                    "daemon does not reconcile server Content-Disposition or MIME extensions with output destinations"
+
+                def rpc(kind, payload):
+                    with socket.socket(socket.AF_UNIX) as raw:
+                        raw.connect(str(out / "state/daemon.sock"))
+                        token = (out / "state/ipc-token").read_text().strip()
+                        body = json.dumps({"version": 1, "token": token,
+                                           "command": {"type": kind, "payload": payload}}).encode()
+                        raw.sendall(struct.pack("=I", len(body)) + body)
+                        size = struct.unpack("=I", raw.recv(4))[0]
+                        data = b""
+                        while len(data) < size:
+                            data += raw.recv(size - len(data))
+                        return json.loads(data)
+
+                def add(name, path, **extra):
+                    payload = {"request_id": f"b07-{name}", "url": f"http://127.0.0.1:{holder.server_port}{path}",
+                               "output": str(out / "dl" / name), "headers": [], "method": "GET", "body": None,
+                               "priority": 1, "connections": 2, "name_from_server": True,
+                               "allow_duplicate": True}
+                    payload.update(extra)
+                    reply = rpc("submit_ex", payload)
+                    assert reply["ok"], reply
+                    return reply["task_id"]
+
+                ids = {
+                    "mime": add("a.dat", "/get.php"),
+                    "traversal": add("b.dat", "/trav"),
+                    "quoted": add("c.dat", "/quoted"),
+                    "redirect": add("d.dat", "/redirect"),
+                    "override": add("keep.bin", "/get.php", name_from_server=False),
+                    "html": add("e.dat", "/page.zip"),
+                }
+                for key, task_id in ids.items():
+                    row = daemon.wait_status(task_id, ("complete", "failed"), seconds=15)
+                    if key == "html":
+                        assert row["status"] == "failed" and "HTML page" in row["error"], row
+                    else:
+                        assert row["status"] == "complete", (key, row)
+                names = sorted(p.name for p in (out / "dl").iterdir())
+                assert "get.zip" in names, names
+                assert "evil.bin" in names and not (out / "evil.bin").exists(), names
+                assert "café note.txt" in names, names
+                assert "redirected.pdf" in names, names
+                assert "keep.bin" in names, names
+                # The same server name again lands on a numbered destination.
+                again = add("f.dat", "/get.php")
+                daemon.wait_status(again, ("complete",), seconds=15)
+                assert "get (2).zip" in sorted(p.name for p in (out / "dl").iterdir())
             finally:
                 daemon.terminate()
     finally:
-        server.close()
+        holder.shutdown()
 
 
 def test_queue_independent_start():

@@ -15,22 +15,66 @@ fn sibling(output: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{suffix}", output.display()))
 }
 
-fn sort_clause(sort: Option<&str>) -> Option<String> {
+/// SQL `CASE` that substitutes live values (taken from running transfers) for the
+/// persisted last-known column; ids and numbers are formatted from integers only.
+fn live_case(live: &[(i64, String)], fallback: &str) -> String {
+    if live.is_empty() {
+        return fallback.to_owned();
+    }
+    let arms: String = live
+        .iter()
+        .map(|(id, value)| format!(" WHEN {id} THEN {value}"))
+        .collect();
+    format!("CASE id{arms} ELSE {fallback} END")
+}
+
+fn sort_clause(sort: Option<&str>, inner: &crate::Inner) -> Option<String> {
     let raw = sort.unwrap_or("-id");
     let (descending, name) = match raw.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, raw.strip_prefix('+').unwrap_or(raw)),
     };
+    let live = |value: &dyn Fn(xdm_http::Progress) -> String| -> Vec<(i64, String)> {
+        inner
+            .active
+            .iter()
+            .filter_map(|(id, active)| {
+                let progress = match (&active.control, &active.ftp) {
+                    (Some(control), _) => Some(control.progress()),
+                    (None, Some(ftp)) => Some(ftp.progress()),
+                    _ => None,
+                }?;
+                Some((*id, value(progress)))
+            })
+            .collect()
+    };
     let column = match name {
-        "id" => "id",
-        "url" => "url COLLATE NOCASE",
-        "output" => "output COLLATE NOCASE",
-        "status" => "status",
-        "category" => "category COLLATE NOCASE",
-        "priority" => "priority",
-        "position" => "position",
-        "created" => "created_at",
-        "updated" => "updated_at",
+        "id" => "id".to_owned(),
+        "url" => "url COLLATE NOCASE".to_owned(),
+        "output" => "output COLLATE NOCASE".to_owned(),
+        "status" => "status".to_owned(),
+        "category" => "category COLLATE NOCASE".to_owned(),
+        "priority" => "priority".to_owned(),
+        "position" => "position".to_owned(),
+        "created" => "created_at".to_owned(),
+        "updated" => "updated_at".to_owned(),
+        // Total bytes: the live length while running, else the last known one.
+        "size" => live_case(
+            &live(&|p| p.total.unwrap_or(0).to_string()),
+            "COALESCE(size_total,0)",
+        ),
+        // downloaded/total as a fraction, so unknown totals sort first.
+        "progress" => live_case(
+            &live(&|p| match p.total {
+                Some(total) if total > 0 => format!("{:.6}", p.downloaded as f64 / total as f64),
+                _ => "0.0".to_owned(),
+            }),
+            "CASE WHEN COALESCE(size_total,0)>0 THEN CAST(COALESCE(size_done,0) AS REAL)/size_total ELSE 0.0 END",
+        ),
+        // Live transfer rate; idle tasks count as 0.
+        "rate" => live_case(&live(&|p| p.bytes_per_second.to_string()), "0"),
+        "last_try" => "COALESCE(last_try_at,0)".to_owned(),
+        "queue" => "COALESCE((SELECT name FROM queues WHERE id=COALESCE(NULLIF(tasks.queue_id,0),tasks.history_queue_id)),'') COLLATE NOCASE".to_owned(),
         _ => return None,
     };
     // The id tiebreak keeps pages stable while other columns tie.
@@ -178,9 +222,6 @@ impl Service {
         if limit == 0 || limit > MAX_PAGE {
             return Ok(Reply::error("limit must be 1..=2000"));
         }
-        let Some(order) = sort_clause(sort.as_deref()) else {
-            return Ok(Reply::error("unknown sort column"));
-        };
         let filter = filter.unwrap_or_default();
         let mut clauses = Vec::new();
         let mut values: Vec<Value> = Vec::new();
@@ -210,6 +251,9 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
+        let Some(order) = sort_clause(sort.as_deref(), &inner) else {
+            return Ok(Reply::error("unknown sort column"));
+        };
         let total: i64 = inner.db.query_row(
             &format!("SELECT COUNT(*) FROM tasks {wher}"),
             rusqlite::params_from_iter(values.iter()),
@@ -325,15 +369,15 @@ impl Service {
         if inner.moving.contains(&task_id) {
             return Ok(Reply::error("task file is being moved"));
         }
-        let row: Option<(String, String)> = rusqlite::OptionalExtension::optional(
+        let row: Option<(String, String, Option<String>)> = rusqlite::OptionalExtension::optional(
             inner.db.query_row(
-                "SELECT output,status FROM tasks WHERE id=?1",
+                "SELECT output,status,temp_dir FROM tasks WHERE id=?1",
                 [task_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ),
         )?;
         let shared = match &row {
-            Some((output, _)) if delete_partial => output_busy(&inner, output, task_id)?,
+            Some((output, _, _)) if delete_partial => output_busy(&inner, output, task_id)?,
             _ => false,
         };
         let transaction = inner.db.transaction()?;
@@ -347,11 +391,9 @@ impl Service {
         transaction.execute("DELETE FROM tasks WHERE id=?1", [task_id])?;
         transaction.commit()?;
         inner.queue_interrupted.remove(&task_id);
-        if let (true, false, Some((output, status))) = (delete_partial, shared, row) {
+        if let (true, false, Some((output, status, temp))) = (delete_partial, shared, row) {
             if status != "complete" {
-                let output = PathBuf::from(output);
-                for suffix in [".part", ".part.meta"] {
-                    let path = sibling(&output, suffix);
+                for path in crate::owned_partial_paths(Path::new(&output), temp.as_deref()) {
                     if regular_size(&path).is_some() {
                         let _ = std::fs::remove_file(path);
                     }
@@ -371,6 +413,75 @@ impl Service {
         let mut statement = inner.db.prepare("SELECT output FROM tasks")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Partial files of tasks that assemble in a temporary directory, and the
+    /// current temp setting, taken under the lock.
+    fn temp_partial_state(&self) -> Result<(HashSet<PathBuf>, Option<PathBuf>)> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("task lock poisoned"))?;
+        let mut statement = inner
+            .db
+            .prepare("SELECT output,temp_dir FROM tasks WHERE temp_dir IS NOT NULL AND temp_dir<>''")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut owned = HashSet::new();
+        for (output, temp) in rows.flatten() {
+            owned.extend(crate::owned_partial_paths(Path::new(&output), Some(&temp)));
+        }
+        Ok((owned, inner.temp_dir.clone().map(PathBuf::from)))
+    }
+
+    /// Unowned XDM checkpoints inside the temporary directory.
+    fn scan_temp_partials(
+        &self,
+        skip: &Path,
+        found: &mut Vec<PartialEntry>,
+        truncated: &mut bool,
+    ) -> Result<()> {
+        let (owned, temp) = self.temp_partial_state()?;
+        let Some(temp) = temp.and_then(|dir| std::fs::canonicalize(dir).ok()) else {
+            return Ok(());
+        };
+        if temp == skip {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(&temp)?.flatten() {
+            let meta_file = entry.path();
+            let Some(stem) = meta_file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".part.meta"))
+                .filter(|stem| !stem.is_empty())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let part = temp.join(format!("{stem}.part"));
+            if owned.contains(&meta_file) || owned.contains(&part) {
+                continue;
+            }
+            let Some(meta_size) = regular_size(&meta_file) else {
+                continue;
+            };
+            if !is_xdm_checkpoint(&meta_file) {
+                continue;
+            }
+            if found.len() >= MAX_PARTIALS {
+                *truncated = true;
+                break;
+            }
+            let part_size = regular_size(&part);
+            found.push(PartialEntry {
+                output: temp.join(&stem).to_string_lossy().into_owned(),
+                part: part_size.map(|_| part.to_string_lossy().into_owned()),
+                part_size: part_size.unwrap_or(0),
+                meta: Some(meta_file.to_string_lossy().into_owned()),
+                meta_size,
+            });
+        }
+        Ok(())
     }
 
     /// Unowned partial pairs directly in `directory`: a `.part.meta` that
@@ -403,6 +514,7 @@ impl Service {
                 owned.insert(directory.join(name));
             }
         }
+        let (temp_owned, _) = self.temp_partial_state()?;
         let mut found = Vec::new();
         let mut truncated = false;
         for entry in std::fs::read_dir(&directory)?.flatten() {
@@ -417,7 +529,10 @@ impl Service {
                 continue;
             };
             let output = directory.join(&base);
-            if owned.contains(&output) {
+            if owned.contains(&output)
+                || temp_owned.contains(&meta_file)
+                || temp_owned.contains(&directory.join(format!("{base}.part")))
+            {
                 continue;
             }
             let Some(meta_size) = regular_size(&meta_file) else {
@@ -440,6 +555,7 @@ impl Service {
                 meta_size,
             });
         }
+        self.scan_temp_partials(&directory, &mut found, &mut truncated)?;
         found.sort_by(|a, b| a.output.cmp(&b.output));
         Ok(Ok((found, truncated)))
     }
@@ -475,6 +591,17 @@ impl Service {
                     .map(|n| n.to_string_lossy().into_owned())
             })
             .collect();
+        let mut temp_owned = HashSet::new();
+        {
+            let mut statement = inner.db.prepare(
+                "SELECT output,temp_dir FROM tasks WHERE temp_dir IS NOT NULL AND temp_dir<>''",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            for (output, temp) in rows.flatten() {
+                temp_owned.extend(crate::owned_partial_paths(Path::new(&output), Some(&temp)));
+            }
+        }
         let mut deleted = 0;
         for path in &paths {
             let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) else {
@@ -484,7 +611,7 @@ impl Service {
                 .strip_suffix(".part.meta")
                 .or_else(|| name.strip_suffix(".part"))
                 .unwrap_or(name);
-            if names.contains(base) {
+            if names.contains(base) || temp_owned.contains(Path::new(path)) {
                 continue;
             }
             if regular_size(Path::new(path)).is_some() && std::fs::remove_file(path).is_ok() {

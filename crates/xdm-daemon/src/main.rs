@@ -50,6 +50,8 @@ struct SubmitFlags {
     /// Only the extended variant runs the duplicate-URL check.
     check_duplicates: bool,
     allow_duplicate: bool,
+    /// N41 opt-out; the default keeps the server's Last-Modified on the file.
+    skip_server_time: bool,
 }
 
 pub(crate) struct Inner {
@@ -71,6 +73,8 @@ pub(crate) struct Inner {
     pub(crate) proxy: String,
     /// Global N31 stall timeout in seconds applied to every HTTP task.
     pub(crate) stall_timeout: u64,
+    /// N38 setting: absolute directory for new tasks' `.part`/`.part.meta`.
+    pub(crate) temp_dir: Option<String>,
     /// Process-wide rate caps, host connection budgets and the usage counter.
     pub(crate) governor: Arc<xdm_http::Governor>,
     pub(crate) quota: bandwidth::Quota,
@@ -95,7 +99,7 @@ fn valid_method(method: &str) -> bool {
 
 /// HTTP statuses that retrying cannot fix.
 fn is_permanent_error(message: &str) -> bool {
-    ["HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410"]
+    ["HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410", xdm_http::HTML_INSTEAD_OF_FILE]
         .iter()
         .any(|status| message.contains(status))
 }
@@ -121,6 +125,18 @@ fn restart_reason(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Op
 
 /// The engine's partial-file and checkpoint paths, mirrored here so
 /// `TaskRestart` deletes exactly the files one task owns.
+/// Every partial file one task may own: beside its destination and, when the task
+/// assembles in a temporary directory (N38), the pair inside that directory.
+pub(crate) fn owned_partial_paths(output: &Path, temp: Option<&str>) -> Vec<PathBuf> {
+    let mut paths = http_part_paths(output).to_vec();
+    if let Some(temp) = temp.filter(|temp| !temp.is_empty()) {
+        let temp = std::fs::canonicalize(temp).unwrap_or_else(|_| PathBuf::from(temp));
+        let (part, meta) = xdm_http::partial_paths(output, Some(&temp));
+        paths.extend([part, meta]);
+    }
+    paths
+}
+
 fn http_part_paths(output: &Path) -> [PathBuf; 2] {
     [
         PathBuf::from(format!("{}.part", output.display())),
@@ -149,7 +165,7 @@ fn choose_server_destination(
 ) -> Result<PathBuf> {
     let output = Path::new(provisional);
     let provisional_name = output.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let Some(name) = xdm_http::server_filename(metadata, provisional_name) else {
+    let Some(name) = xdm_http::reconcile_server_name(metadata, provisional_name) else {
         return Ok(output.to_path_buf());
     };
     let directory = output.parent().unwrap_or(Path::new("/")).to_path_buf();
@@ -157,12 +173,21 @@ fn choose_server_destination(
         .inner
         .lock()
         .map_err(|_| io::Error::other("task lock poisoned"))?;
+    let temp: Option<String> = inner
+        .db
+        .query_row("SELECT temp_dir FROM tasks WHERE id=?1", [id], |row| row.get(0))
+        .optional()?
+        .flatten();
     let mut suffix = 1u32;
     let mut chosen = name.clone();
     loop {
         let candidate = directory.join(&chosen);
         let output_text = candidate.to_string_lossy();
+        // Someone else's partial files (another task, a browser) also occupy a name.
         let taken = std::fs::symlink_metadata(&candidate).is_ok()
+            || owned_partial_paths(&candidate, temp.as_deref())
+                .iter()
+                .any(|path| std::fs::symlink_metadata(path).is_ok())
             || inner
                 .db
                 .query_row(
@@ -334,6 +359,10 @@ struct Work {
     policy: ResumePolicy,
     /// N14: the final filename comes from the server response.
     name_from_server: bool,
+    /// N38: directory holding this task's partial files, when separate.
+    temp_dir: Option<PathBuf>,
+    /// N41: set the completed file's modification time from the server.
+    set_file_time: bool,
     /// Live FTP progress holder, mirrored inside the active entry.
     ftp: Option<Arc<FtpLive>>,
     /// Live-recording progress holder, mirrored inside the active entry.
@@ -375,6 +404,9 @@ pub(crate) fn set_setting(db: &Connection, key: &str, value: &str) -> rusqlite::
     Ok(())
 }
 
+/// Task-details notice of a transfer that ended at EOF without a declared length.
+const UNVERIFIED_NOTICE: &str = "The server did not declare a file size, so the download ended at the end of the stream and the file might be incomplete.";
+
 fn task_summaries(inner: &Inner, task_id: Option<i64>) -> Result<Vec<TaskSummary>> {
     query_summaries(
         inner,
@@ -390,12 +422,14 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
     tail: &str,
     params: P,
 ) -> Result<Vec<TaskSummary>> {
-    let mut stmt = inner.db.prepare(&format!("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason FROM tasks {tail}"))?;
+    let mut stmt = inner.db.prepare(&format!("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason,size_unverified,temp_dir FROM tasks {tail}"))?;
     let tasks = stmt
         .query_map(params, |row| {
             let output: String = row.get(2)?;
             let status: String = row.get(3)?;
             let id: i64 = row.get(0)?;
+            let temp_dir: Option<String> = row.get(22)?;
+            let size_unverified = row.get::<_, i64>(21)? != 0;
             let live = inner
                 .active
                 .get(&id)
@@ -418,7 +452,10 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                     .ok()
                     .map(|file| (file.len(), Some(file.len())))
             } else {
-                xdm_http::checkpoint_progress(std::path::Path::new(&output))
+                xdm_http::checkpoint_progress_in(
+                    std::path::Path::new(&output),
+                    temp_dir.as_deref().filter(|dir| !dir.is_empty()).map(std::path::Path::new),
+                )
                     .map(|(done, total)| (done, Some(total)))
                     .or_else(|| ftp_checkpoint_progress(std::path::Path::new(&output)))
             };
@@ -454,6 +491,8 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                 position: row.get(18)?,
                 auth_realm: row.get(19)?,
                 restart_reason: row.get(20)?,
+                size_unverified,
+                notice: size_unverified.then(|| UNVERIFIED_NOTICE.to_owned()),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -631,7 +670,7 @@ impl Service {
                 xdm_categories::classify_with(&rules, name, url_host(&url).as_deref(), None);
             let id = next_task_id(&inner.db)?;
             let kind = if url.starts_with("ftp://") { "ftp" } else { "http" };
-            let inserted = inner.db.execute("INSERT OR IGNORE INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,category,method,body,name_from_server,ignore_modified) VALUES (?9,?1,?2,?3,?4,?5,?6,'queued',?8,?7,?10,?11,?12,?13)", params![request_id,url,output,headers_json,priority,connections as i64,category,kind,id,method,body,flags.name_from_server,flags.ignore_modification_date])?;
+            let inserted = inner.db.execute("INSERT OR IGNORE INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,category,method,body,name_from_server,ignore_modified,preserve_time) VALUES (?9,?1,?2,?3,?4,?5,?6,'queued',?8,?7,?10,?11,?12,?13,?14)", params![request_id,url,output,headers_json,priority,connections as i64,category,kind,id,method,body,flags.name_from_server,flags.ignore_modification_date,!flags.skip_server_time])?;
             if inserted == 0 {
                 return Ok(Reply::error("destination is already assigned to a task"));
             }
@@ -816,6 +855,12 @@ impl Service {
             ("sync_etag", "TEXT"),
             ("sync_lastmod", "TEXT"),
             ("sync_len", "INTEGER"),
+            ("preserve_time", "INTEGER NOT NULL DEFAULT 1"),
+            ("temp_dir", "TEXT"),
+            ("size_unverified", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_try_at", "INTEGER"),
+            ("size_done", "INTEGER"),
+            ("size_total", "INTEGER"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {name} {definition}"))?;
@@ -906,6 +951,7 @@ impl Service {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| STALL_TIMEOUT_RANGE.contains(value))
             .unwrap_or(xdm_http::DEFAULT_STALL_TIMEOUT.as_secs());
+        let temp_dir = get_setting(&db, "temp_dir")?.filter(|dir| Path::new(dir).is_absolute());
         // Site logins live beside the task database; in-memory test databases
         // keep the store in memory only.
         let credentials = credentials::Store::load(
@@ -933,6 +979,7 @@ impl Service {
                 pending: HashMap::new(),
                 proxy: serde_json::to_string(&proxy).unwrap_or_default(),
                 stall_timeout,
+                temp_dir,
                 governor,
                 quota,
                 credentials,
@@ -1059,6 +1106,7 @@ impl Service {
                 name_from_server,
                 ignore_modification_date,
                 allow_duplicate,
+                preserve_server_time,
             } => {
                 self.submit_task(
                     request_id,
@@ -1074,6 +1122,7 @@ impl Service {
                         ignore_modification_date,
                         check_duplicates: true,
                         allow_duplicate,
+                        skip_server_time: !preserve_server_time,
                     },
                 )
             }
@@ -1126,6 +1175,53 @@ impl Service {
                 self.wake.notify_one();
                 let mut reply = Reply::accepted(0);
                 reply.stall_timeout_seconds = Some(seconds);
+                Ok(reply)
+            }
+            Command::SetTempDir { path } => {
+                let path = path.filter(|path| !path.is_empty());
+                if let Some(path) = &path {
+                    let directory = Path::new(path);
+                    if !directory.is_absolute()
+                        || directory
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                    {
+                        return Ok(Reply::error(
+                            "the temporary directory must be an absolute path without ..",
+                        ));
+                    }
+                    if let Err(error) = std::fs::create_dir_all(directory) {
+                        return Ok(Reply::error(format!("cannot use {path}: {error}")));
+                    }
+                    if !directory.is_dir() {
+                        return Ok(Reply::error(format!("{path} is not a directory")));
+                    }
+                }
+                // Stored canonical so ownership checks and scans compare equal paths.
+                let path = match path {
+                    Some(path) => match std::fs::canonicalize(&path) {
+                        Ok(canonical) => Some(canonical.to_string_lossy().into_owned()),
+                        Err(error) => return Ok(Reply::error(format!("cannot use {path}: {error}"))),
+                    },
+                    None => None,
+                };
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                set_setting(&inner.db, "temp_dir", path.as_deref().unwrap_or(""))?;
+                inner.temp_dir = path.clone();
+                let mut reply = Reply::accepted(0);
+                reply.temp_dir = path;
+                Ok(reply)
+            }
+            Command::GetTempDir => {
+                let inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                let mut reply = Reply::accepted(0);
+                reply.temp_dir = inner.temp_dir.clone();
                 Ok(reply)
             }
             Command::GetStallTimeout => {
@@ -1548,18 +1644,18 @@ impl Service {
                 "pause the task and wait for it to stop before restarting it",
             ));
         }
-        let output: Option<String> = inner
+        let output: Option<(String, Option<String>)> = inner
             .db
             .query_row(
-                "SELECT output FROM tasks WHERE id=?1 AND status='restart_required'",
+                "SELECT output,temp_dir FROM tasks WHERE id=?1 AND status='restart_required'",
                 [task_id],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?;
-        let Some(output) = output else {
+        let Some((output, temp)) = output else {
             return Ok(Reply::error("task is not waiting for a restart"));
         };
-        for path in http_part_paths(Path::new(&output)) {
+        for path in owned_partial_paths(Path::new(&output), temp.as_deref()) {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -1634,7 +1730,7 @@ impl Service {
                     }
                 }
                 let selected = if let Some((id, _)) = best {
-                    inner.db.query_row("SELECT id,url,output,headers_json,connections,kind,media_video,media_audio,media_mode_json,rate_limit,queue_id,method,body,name_from_server,ignore_modified FROM tasks WHERE id=?1", [id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,String>(5)?,row.get::<_,Option<i64>>(6)?,row.get::<_,Option<i64>>(7)?,row.get::<_,Option<String>>(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,i64>(10)?,row.get::<_,String>(11)?,row.get::<_,Option<Vec<u8>>>(12)?,row.get::<_,i64>(13)?,row.get::<_,i64>(14)?))).optional()?
+                    inner.db.query_row("SELECT id,url,output,headers_json,connections,kind,media_video,media_audio,media_mode_json,rate_limit,queue_id,method,body,name_from_server,ignore_modified,preserve_time,temp_dir FROM tasks WHERE id=?1", [id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,String>(5)?,row.get::<_,Option<i64>>(6)?,row.get::<_,Option<i64>>(7)?,row.get::<_,Option<String>>(8)?,row.get::<_,Option<i64>>(9)?,row.get::<_,i64>(10)?,row.get::<_,String>(11)?,row.get::<_,Option<Vec<u8>>>(12)?,row.get::<_,i64>(13)?,row.get::<_,i64>(14)?,row.get::<_,i64>(15)?,row.get::<_,Option<String>>(16)?))).optional()?
                 } else {
                     None
                 };
@@ -1654,6 +1750,8 @@ impl Service {
                     body,
                     name_from_server,
                     ignore_modified,
+                    preserve_time,
+                    stored_temp,
                 )) = selected
                 {
                     if kind == "http" && inner.governor.exceeded() {
@@ -1719,7 +1817,25 @@ impl Service {
                             control: control.clone().ok_or("HTTP control missing")?,
                         }
                     };
-                    inner.db.execute("UPDATE tasks SET status='running',retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+                    // N38: a task keeps the partial location it started with; only a
+                    // fresh HTTP task without partials beside its destination adopts
+                    // the current setting.
+                    let temp_dir = match stored_temp {
+                        Some(dir) => (!dir.is_empty()).then(|| PathBuf::from(dir)),
+                        None => {
+                            let beside = http_part_paths(Path::new(&output)).iter().any(|path| path.exists());
+                            let chosen = (matches!(kind, WorkKind::Http { .. }) && !beside)
+                                .then(|| inner.temp_dir.clone())
+                                .flatten();
+                            inner.db.execute(
+                                "UPDATE tasks SET temp_dir=?1 WHERE id=?2",
+                                params![chosen.clone().unwrap_or_default(), id],
+                            )?;
+                            chosen.map(PathBuf::from)
+                        }
+                    };
+                    let last_try = inner.clock.now();
+                    inner.db.execute("UPDATE tasks SET status='running',retry_at=NULL,last_try_at=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, last_try])?;
                     let stop = Arc::new(AtomicBool::new(false));
                     let stop_requested = Arc::new(AtomicBool::new(false));
                     inner.active.insert(
@@ -1744,6 +1860,8 @@ impl Service {
                         stop_requested,
                         policy: ResumePolicy { ignore_modification_date: ignore_modified != 0 },
                         name_from_server: name_from_server != 0,
+                        temp_dir,
+                        set_file_time: preserve_time != 0,
                         ftp,
                         media,
                     });
@@ -1830,6 +1948,8 @@ impl Service {
                                 bytes_per_second: None,
                                 proxy: work.proxy.clone(),
                                 stop: work.stop.clone(),
+                                temp_dir: work.temp_dir.clone(),
+                                set_file_time: work.set_file_time,
                             },
                             control,
                             work.stall_timeout,
@@ -2013,6 +2133,26 @@ impl Inner {
             [id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        // Last-known size and the unverified-length flag outlive the live counters.
+        if let Some(active) = self.active.get(&id) {
+            let snapshot = match (&active.control, &active.ftp) {
+                (Some(control), _) => Some((control.progress(), control.size_unverified())),
+                (None, Some(ftp)) => Some((ftp.progress(), false)),
+                _ => None,
+            };
+            if let Some((progress, unverified)) = snapshot {
+                let total = progress.total.or((status == "complete").then_some(progress.downloaded));
+                self.db.execute(
+                    "UPDATE tasks SET size_done=?1,size_total=?2,size_unverified=?3 WHERE id=?4",
+                    params![
+                        progress.downloaded as i64,
+                        total.map(|total| total as i64),
+                        i64::from(unverified && status == "complete"),
+                        id
+                    ],
+                )?;
+            }
+        }
         if status == "complete" {
             self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=CASE WHEN COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0) THEN queue_id ELSE 0 END,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
             return Ok(());
@@ -2402,6 +2542,7 @@ mod tests {
                     name_from_server: false,
                     ignore_modification_date: false,
                     allow_duplicate: allow,
+                    preserve_server_time: true,
                 })
                 .unwrap()
         };
@@ -2450,6 +2591,7 @@ mod tests {
                 name_from_server: true,
                 ignore_modification_date: true,
                 allow_duplicate: false,
+                preserve_server_time: true,
             })
             .unwrap()
             .task_id
@@ -2487,6 +2629,7 @@ mod tests {
             effective_url: "http://h/dir/final.bin".into(),
             content_disposition: Some(disposition.into()),
             content_length: Some(8),
+            content_type: None,
         };
         // The naming resolution runs before streaming; the row records it.
         let first = row("srv-first", &directory.join("plain.bin"));

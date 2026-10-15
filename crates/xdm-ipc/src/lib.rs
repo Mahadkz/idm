@@ -73,6 +73,10 @@ pub enum Command {
         /// `duplicate_of` instead of adding a task; pass true to allow it.
         #[serde(default)]
         allow_duplicate: bool,
+        /// Set the completed file's modification time from the server's
+        /// Last-Modified (HTTP) when valid (N41). On unless disabled.
+        #[serde(default = "default_true")]
+        preserve_server_time: bool,
     },
     SetProxy {
         proxy: ProxyChoice,
@@ -351,7 +355,8 @@ pub enum Command {
     },
     /// Paged task list: `limit` 1..=2000, stable order, `Reply::total`.
     /// `sort` is one of id, url, output, status, category, priority,
-    /// position, created, updated, optionally prefixed with `-` for
+    /// position, created, updated, size, progress, rate, last_try, queue,
+    /// optionally prefixed with `-` for
     /// descending (default `-id`, the order of `List`).
     ListPage {
         offset: u64,
@@ -380,6 +385,18 @@ pub enum Command {
         directory: String,
         paths: Vec<String>,
     },
+    /// Sets (absolute path) or clears (`None`) the temporary directory that
+    /// holds `.part`/`.part.meta` of tasks started afterwards (N38).
+    SetTempDir {
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Reads the temporary directory into `Reply::temp_dir`.
+    GetTempDir,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Mirrors `xdm_media::AudioFormat` with the identical serde shape so IPC stays
@@ -680,6 +697,13 @@ pub struct TaskSummary {
     /// resumable partial data cannot be completed without a full restart.
     #[serde(default)]
     pub restart_reason: Option<String>,
+    /// The transfer declared no length and ended at end-of-stream, so its
+    /// completeness could not be verified.
+    #[serde(default)]
+    pub size_unverified: bool,
+    /// Informational detail for task properties (for example the unverified-size notice).
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 fn main_queue_id() -> i64 {
@@ -840,6 +864,9 @@ pub struct Reply {
     /// Daemon package version; set by `ListPage` and `PartialScan` replies.
     #[serde(default)]
     pub daemon_version: Option<String>,
+    /// Temporary directory setting; set by `GetTempDir`/`SetTempDir` replies.
+    #[serde(default)]
+    pub temp_dir: Option<String>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -891,6 +918,7 @@ impl Reply {
             partials: Vec::new(),
             truncated: false,
             daemon_version: None,
+            temp_dir: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -922,6 +950,7 @@ impl Reply {
             partials: Vec::new(),
             truncated: false,
             daemon_version: None,
+            temp_dir: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -962,6 +991,7 @@ impl Reply {
             partials: Vec::new(),
             truncated: false,
             daemon_version: None,
+            temp_dir: None,
         }
     }
 }
@@ -1484,6 +1514,7 @@ mod tests {
             name_from_server: true,
             ignore_modification_date: true,
             allow_duplicate: true,
+            preserve_server_time: false,
         };
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &command).unwrap();
@@ -1498,13 +1529,14 @@ mod tests {
             "request_id": "e2", "url": "u", "output": "o", "priority": 0, "connections": 8,
             "body": null}});
         let Command::SubmitEx {
-            method, name_from_server, ignore_modification_date, allow_duplicate, ..
+            method, name_from_server, ignore_modification_date, allow_duplicate, preserve_server_time, ..
         } = serde_json::from_value(legacy).unwrap()
         else {
             unreachable!()
         };
         assert_eq!((method.as_str(), name_from_server, ignore_modification_date, allow_duplicate),
             ("GET", false, false, false));
+        assert!(preserve_server_time, "server time is on by default");
         let mut reply = Reply::list(Vec::new());
         assert!(reply.duplicate_of.is_none());
         reply.duplicate_of = Some(9);

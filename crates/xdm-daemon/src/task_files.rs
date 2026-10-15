@@ -4,7 +4,9 @@ use rusqlite::types::Value;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use xdm_ipc::{PartialEntry, Reply, TaskFilter};
+use xdm_ipc::{
+    BulkAction, BulkFailure, BulkReport, BulkSelection, Command, PartialEntry, Reply, TaskFilter,
+};
 
 const MAX_PARTIALS: usize = 10_000;
 const MAX_META_BYTES: u64 = 4 * 1024 * 1024;
@@ -72,7 +74,8 @@ fn sort_clause(sort: Option<&str>, inner: &crate::Inner) -> Option<String> {
             "CASE WHEN COALESCE(size_total,0)>0 THEN CAST(COALESCE(size_done,0) AS REAL)/size_total ELSE 0.0 END",
         ),
         // Live transfer rate; idle tasks count as 0.
-        "rate" => live_case(&live(&|p| p.bytes_per_second.to_string()), "0"),
+        // A bare `0` would read as an ORDER BY column index, so it is cast.
+        "rate" => live_case(&live(&|p| p.bytes_per_second.to_string()), "CAST(0 AS INTEGER)"),
         "last_try" => "COALESCE(last_try_at,0)".to_owned(),
         "queue" => "COALESCE((SELECT name FROM queues WHERE id=COALESCE(NULLIF(tasks.queue_id,0),tasks.history_queue_id)),'') COLLATE NOCASE".to_owned(),
         _ => return None,
@@ -211,7 +214,212 @@ fn normalized_destination(raw: &str) -> Option<PathBuf> {
     xdm_categories::valid_filename(name).then_some(normalized)
 }
 
+/// `WHERE` tail and bound values for a task filter.
+fn filter_clause(filter: TaskFilter) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut values: Vec<Value> = Vec::new();
+    if let Some(status) = filter.status {
+        clauses.push("status=?");
+        values.push(Value::Text(status));
+    }
+    if let Some(category) = filter.category {
+        clauses.push("category=? COLLATE NOCASE");
+        values.push(Value::Text(category));
+    }
+    if let Some(queue) = filter.queue_id {
+        clauses.push("queue_id=?");
+        values.push(Value::Integer(queue));
+    }
+    if let Some(search) = filter.search.filter(|text| !text.is_empty()) {
+        clauses.push("(url LIKE ? ESCAPE '\\' OR output LIKE ? ESCAPE '\\')");
+        values.push(Value::Text(like_escape(&search)));
+        values.push(Value::Text(like_escape(&search)));
+    }
+    let wher = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    (wher, values)
+}
+
 impl Service {
+    /// `TaskBulk`: resolve the selection once, then run the single-task
+    /// command per task so every rule and failure message is unchanged.
+    pub(crate) fn task_bulk(
+        &self,
+        action: BulkAction,
+        selection: BulkSelection,
+        expected_total: Option<u64>,
+    ) -> Result<Reply> {
+        let ids: Vec<i64> = match selection {
+            BulkSelection::Ids(ids) => {
+                let mut seen = HashSet::new();
+                ids.into_iter().filter(|id| seen.insert(*id)).collect()
+            }
+            BulkSelection::Filter(filter) => {
+                let (wher, values) = filter_clause(filter);
+                let inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                let mut stmt = inner
+                    .db
+                    .prepare(&format!("SELECT id FROM tasks {wher} ORDER BY id"))?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                    row.get::<_, i64>(0)
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        if let Some(expected) = expected_total {
+            if expected != ids.len() as u64 {
+                return Ok(Reply::error(format!(
+                    "selection changed: {} tasks match now but {expected} were expected; nothing was changed",
+                    ids.len()
+                )));
+            }
+        }
+        if let BulkAction::Priority { level } = &action {
+            if !(0..=2).contains(level) {
+                return Ok(Reply::error(
+                    "priority must be 0 (low), 1 (normal), or 2 (immediate)",
+                ));
+            }
+        }
+        let mut report = BulkReport {
+            matched: ids.len() as u64,
+            ..BulkReport::default()
+        };
+        // Pause, resume and priority are single UPDATEs: one transaction (one
+        // commit) for the whole selection, with the single command's SQL and messages.
+        if matches!(action, BulkAction::Pause | BulkAction::Resume | BulkAction::Priority { .. }) {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| io::Error::other("task lock poisoned"))?;
+            if matches!(action, BulkAction::Pause) {
+                for id in &ids {
+                    inner.queue_interrupted.remove(id);
+                    if let Some(active) = inner.active.get(id) {
+                        active.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        active.stop_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            let (sql, refusal) = match &action {
+                BulkAction::Pause => ("UPDATE tasks SET status=CASE WHEN status='running' THEN 'pausing' ELSE 'paused' END, updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('queued','running','quota_wait')", "task is not active or queued"),
+                BulkAction::Resume => ("UPDATE tasks SET status='queued',error=NULL,retry_count=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('paused','failed')", "task is not paused or failed"),
+                _ => ("UPDATE tasks SET priority=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('queued','paused','failed','quota_wait')", "task must be queued, paused, or failed to change priority"),
+            };
+            let level = if let BulkAction::Priority { level } = &action { *level } else { 0 };
+            let transaction = inner.db.transaction()?;
+            {
+                let mut statement = transaction.prepare(sql)?;
+                for id in &ids {
+                    let updated = if matches!(action, BulkAction::Priority { .. }) {
+                        statement.execute(rusqlite::params![id, level])?
+                    } else {
+                        statement.execute(rusqlite::params![id])?
+                    };
+                    if updated == 0 {
+                        report.failed += 1;
+                        if report.failures.len() < 100 {
+                            report.failures.push(BulkFailure { task_id: *id, error: refusal.into() });
+                        }
+                    } else {
+                        report.done += 1;
+                    }
+                }
+            }
+            transaction.commit()?;
+            drop(inner);
+            self.wake.notify_one();
+            let mut reply = Reply::list(Vec::new());
+            reply.total = report.matched;
+            reply.bulk = Some(report);
+            return Ok(reply);
+        }
+        // Queue moves are chunked like the single command's 500-task limit; a
+        // refused chunk is retried task by task so failures stay per task.
+        if let BulkAction::AssignQueue { queue_id } = &action {
+            for chunk in ids.chunks(500) {
+                let reply = self.command_inner(Command::AssignQueue {
+                    queue_id: *queue_id,
+                    task_ids: chunk.to_vec(),
+                })?;
+                if reply.ok {
+                    report.done += chunk.len() as u64;
+                    continue;
+                }
+                for id in chunk {
+                    let single = self.command_inner(Command::AssignQueue {
+                        queue_id: *queue_id,
+                        task_ids: vec![*id],
+                    })?;
+                    if single.ok {
+                        report.done += 1;
+                    } else {
+                        report.failed += 1;
+                        if report.failures.len() < 100 {
+                            report.failures.push(BulkFailure {
+                                task_id: *id,
+                                error: single.error.unwrap_or_default(),
+                            });
+                        }
+                    }
+                }
+            }
+            let mut reply = Reply::list(Vec::new());
+            reply.total = report.matched;
+            reply.bulk = Some(report);
+            return Ok(reply);
+        }
+        if matches!(action, BulkAction::Remove | BulkAction::RemoveWithPartials) {
+            self.bulk_remove(&ids, matches!(action, BulkAction::RemoveWithPartials), &mut report)?;
+            let mut reply = Reply::list(Vec::new());
+            reply.total = report.matched;
+            reply.bulk = Some(report);
+            return Ok(reply);
+        }
+        for id in ids {
+            let command = match &action {
+                BulkAction::Pause => Command::Pause { task_id: id },
+                BulkAction::Resume => Command::Resume { task_id: id },
+                BulkAction::Remove => Command::Remove { task_id: id },
+                BulkAction::RemoveWithPartials => Command::TaskRemoveEx {
+                    task_id: id,
+                    delete_partial: true,
+                },
+                BulkAction::Priority { level } => Command::SetPriority {
+                    task_id: id,
+                    priority: *level,
+                },
+                BulkAction::AssignQueue { queue_id } => Command::AssignQueue {
+                    queue_id: *queue_id,
+                    task_ids: vec![id],
+                },
+                BulkAction::Restart => Command::TaskRestart { task_id: id },
+            };
+            let reply = self.command_inner(command)?;
+            if reply.ok {
+                report.done += 1;
+            } else {
+                report.failed += 1;
+                if report.failures.len() < 100 {
+                    report.failures.push(BulkFailure {
+                        task_id: id,
+                        error: reply.error.unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        let mut reply = Reply::list(Vec::new());
+        reply.total = report.matched;
+        reply.bulk = Some(report);
+        Ok(reply)
+    }
+
     pub(crate) fn list_page(
         &self,
         offset: u64,
@@ -222,31 +430,7 @@ impl Service {
         if limit == 0 || limit > MAX_PAGE {
             return Ok(Reply::error("limit must be 1..=2000"));
         }
-        let filter = filter.unwrap_or_default();
-        let mut clauses = Vec::new();
-        let mut values: Vec<Value> = Vec::new();
-        if let Some(status) = filter.status {
-            clauses.push("status=?");
-            values.push(Value::Text(status));
-        }
-        if let Some(category) = filter.category {
-            clauses.push("category=? COLLATE NOCASE");
-            values.push(Value::Text(category));
-        }
-        if let Some(queue) = filter.queue_id {
-            clauses.push("queue_id=?");
-            values.push(Value::Integer(queue));
-        }
-        if let Some(search) = filter.search.filter(|text| !text.is_empty()) {
-            clauses.push("(url LIKE ? ESCAPE '\\' OR output LIKE ? ESCAPE '\\')");
-            values.push(Value::Text(like_escape(&search)));
-            values.push(Value::Text(like_escape(&search)));
-        }
-        let wher = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
+        let (wher, mut values) = filter_clause(filter.unwrap_or_default());
         let inner = self
             .inner
             .lock()
@@ -361,46 +545,39 @@ impl Service {
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
-        if inner.active.contains_key(&task_id) {
-            return Ok(Reply::error(
-                "pause the task and wait for it to stop before removing it",
-            ));
-        }
-        if inner.moving.contains(&task_id) {
-            return Ok(Reply::error("task file is being moved"));
-        }
-        let row: Option<(String, String, Option<String>)> = rusqlite::OptionalExtension::optional(
-            inner.db.query_row(
-                "SELECT output,status,temp_dir FROM tasks WHERE id=?1",
-                [task_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ),
-        )?;
-        let shared = match &row {
-            Some((output, _, _)) if delete_partial => output_busy(&inner, output, task_id)?,
-            _ => false,
-        };
-        let transaction = inner.db.transaction()?;
-        let removed = transaction.execute(
-            "INSERT INTO removed_tasks(task_id,request_id) SELECT id,request_id FROM tasks WHERE id=?1",
-            [task_id],
-        )?;
-        if removed == 0 {
-            return Ok(Reply::error("task not found"));
-        }
-        transaction.execute("DELETE FROM tasks WHERE id=?1", [task_id])?;
-        transaction.commit()?;
-        inner.queue_interrupted.remove(&task_id);
-        if let (true, false, Some((output, status, temp))) = (delete_partial, shared, row) {
-            if status != "complete" {
-                for path in crate::owned_partial_paths(Path::new(&output), temp.as_deref()) {
-                    if regular_size(&path).is_some() {
-                        let _ = std::fs::remove_file(path);
-                    }
+        remove_locked(&mut inner, task_id, delete_partial)
+    }
+
+    /// `TaskBulk` removal: one lock hold and one commit for the selection,
+    /// each task under `remove_locked`'s rules inside its own savepoint.
+    fn bulk_remove(&self, ids: &[i64], delete_partial: bool, report: &mut BulkReport) -> Result<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("task lock poisoned"))?;
+        inner.db.execute_batch("BEGIN IMMEDIATE")?;
+        for id in ids {
+            let reply = match remove_locked(&mut inner, *id, delete_partial) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    let _ = inner.db.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            };
+            if reply.ok {
+                report.done += 1;
+            } else {
+                report.failed += 1;
+                if report.failures.len() < 100 {
+                    report.failures.push(BulkFailure {
+                        task_id: *id,
+                        error: reply.error.unwrap_or_default(),
+                    });
                 }
             }
         }
-        Ok(Reply::accepted(task_id))
+        inner.db.execute_batch("COMMIT")?;
+        Ok(())
     }
 
     /// Task outputs as raw strings, taken under the lock; callers resolve
@@ -623,3 +800,62 @@ impl Service {
         Ok(reply)
     }
 }
+
+
+/// Removes one task with the daemon lock held; the caller owns `inner`.
+/// Unlinks happen after the owner and activity re-check, so no other task
+/// can claim the files in between.
+fn remove_locked(inner: &mut crate::Inner, task_id: i64, delete_partial: bool) -> Result<Reply> {
+        if inner.active.contains_key(&task_id) {
+            return Ok(Reply::error(
+                "pause the task and wait for it to stop before removing it",
+            ));
+        }
+        if inner.moving.contains(&task_id) {
+            return Ok(Reply::error("task file is being moved"));
+        }
+        let row: Option<(String, String, Option<String>)> = rusqlite::OptionalExtension::optional(
+            inner.db.query_row(
+                "SELECT output,status,temp_dir FROM tasks WHERE id=?1",
+                [task_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ),
+        )?;
+        let shared = match &row {
+            Some((output, _, _)) if delete_partial => output_busy(&inner, output, task_id)?,
+            _ => false,
+        };
+        inner.db.execute_batch("SAVEPOINT remove_one")?;
+        let removed = inner.db.execute(
+            "INSERT INTO removed_tasks(task_id,request_id) SELECT id,request_id FROM tasks WHERE id=?1",
+            [task_id],
+        );
+        let removed = match removed {
+            Ok(removed) => removed,
+            Err(error) => {
+                let _ = inner.db.execute_batch("ROLLBACK TO remove_one; RELEASE remove_one");
+                return Err(error.into());
+            }
+        };
+        if removed == 0 {
+            inner.db.execute_batch("RELEASE remove_one")?;
+            return Ok(Reply::error("task not found"));
+        }
+        if let Err(error) = inner.db.execute("DELETE FROM tasks WHERE id=?1", [task_id]) {
+            let _ = inner.db.execute_batch("ROLLBACK TO remove_one; RELEASE remove_one");
+            return Err(error.into());
+        }
+        inner.db.execute_batch("RELEASE remove_one")?;
+        inner.queue_interrupted.remove(&task_id);
+        if let (true, false, Some((output, status, temp))) = (delete_partial, shared, row) {
+            if status != "complete" {
+                for path in crate::owned_partial_paths(Path::new(&output), temp.as_deref()) {
+                    if regular_size(&path).is_some() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+        Ok(Reply::accepted(task_id))
+}
+

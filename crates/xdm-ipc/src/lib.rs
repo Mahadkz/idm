@@ -366,6 +366,15 @@ pub enum Command {
         #[serde(default)]
         filter: Option<TaskFilter>,
     },
+    /// Applies one action to many tasks, each under the rules of the
+    /// matching single-task command. `expected_total` refuses the whole
+    /// request when the selection size differs from what the user saw.
+    TaskBulk {
+        action: BulkAction,
+        selection: BulkSelection,
+        #[serde(default)]
+        expected_total: Option<u64>,
+    },
     /// Moves a completed task's file; never overwrites.
     TaskMoveFile {
         task_id: i64,
@@ -613,6 +622,42 @@ pub struct GrabReport {
     /// Files skipped because their URL already belongs to a task.
     #[serde(default)]
     pub skipped_duplicates: Vec<SkippedDuplicate>,
+}
+
+/// Action of `TaskBulk`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BulkAction {
+    Pause,
+    Resume,
+    Remove,
+    RemoveWithPartials,
+    Priority { level: i64 },
+    AssignQueue { queue_id: i64 },
+    Restart,
+}
+
+/// Which tasks a `TaskBulk` touches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkSelection {
+    Ids(Vec<i64>),
+    Filter(TaskFilter),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkFailure {
+    pub task_id: i64,
+    pub error: String,
+}
+
+/// Outcome of `TaskBulk`; `failures` is capped, `failed` is the full count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkReport {
+    pub matched: u64,
+    pub done: u64,
+    pub failed: u64,
+    pub failures: Vec<BulkFailure>,
 }
 
 /// Filter for `ListPage`; every set field must match.
@@ -871,6 +916,9 @@ pub struct Reply {
     /// Temporary directory setting; set by `GetTempDir`/`SetTempDir` replies.
     #[serde(default)]
     pub temp_dir: Option<String>,
+    /// Per-task outcome of `TaskBulk`.
+    #[serde(default)]
+    pub bulk: Option<BulkReport>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -923,6 +971,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            bulk: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -955,6 +1004,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            bulk: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -996,6 +1046,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            bulk: None,
         }
     }
 }
@@ -1577,5 +1628,24 @@ mod tests {
         let back: Reply = read_frame(&mut bytes.as_slice()).unwrap();
         assert_eq!(back.stall_timeout_seconds, Some(30));
     }
-}
 
+    #[test]
+    fn task_bulk_round_trips_and_old_replies_lack_bulk() {
+        let command = Command::TaskBulk {
+            action: BulkAction::Priority { level: 2 },
+            selection: BulkSelection::Filter(TaskFilter::default()),
+            expected_total: Some(5),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &command).unwrap();
+        let back: Command = read_frame(&mut bytes.as_slice()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
+        let mut json = serde_json::to_value(Reply::list(Vec::new())).unwrap();
+        json.as_object_mut().unwrap().remove("bulk");
+        let reply: Reply = serde_json::from_value(json).unwrap();
+        assert!(reply.bulk.is_none());
+    }
+}

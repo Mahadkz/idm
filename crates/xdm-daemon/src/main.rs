@@ -926,6 +926,8 @@ impl Service {
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS queue_events (id INTEGER PRIMARY KEY AUTOINCREMENT, queue_id INTEGER NOT NULL, execution INTEGER NOT NULL, outcome TEXT NOT NULL, action TEXT NOT NULL, action_status TEXT NOT NULL, at INTEGER NOT NULL);
              CREATE TRIGGER IF NOT EXISTS tasks_position AFTER INSERT ON tasks WHEN NEW.position=0 BEGIN UPDATE tasks SET position=NEW.id WHERE id=NEW.id; END;
+             CREATE INDEX IF NOT EXISTS tasks_by_output ON tasks(output);
+             CREATE INDEX IF NOT EXISTS tasks_by_queue_position ON tasks(queue_id,position);
              CREATE INDEX IF NOT EXISTS tasks_by_queue_order ON tasks(queue_id,status,priority DESC,position ASC,id ASC);
              UPDATE tasks SET position=id WHERE position=0;
              UPDATE tasks SET history_queue_id=queue_id,queue_id=0 WHERE status='complete' AND queue_id<>0 AND NOT COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0);",
@@ -1425,6 +1427,11 @@ impl Service {
                 sort,
                 filter,
             } => self.list_page(offset, limit, sort, filter),
+            Command::TaskBulk {
+                action,
+                selection,
+                expected_total,
+            } => self.task_bulk(action, selection, expected_total),
             Command::TaskMoveFile { task_id, new_path } => self.move_task_file(task_id, new_path),
             Command::PartialScan { directory } => Ok(match self.scan_partials(&directory)? {
                 Ok((found, truncated)) => {
@@ -2912,6 +2919,71 @@ mod tests {
         assert!(!reply.ok && reply.error.unwrap().contains("moved"));
         service.inner.lock().unwrap().moving.clear();
         assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
+    }
+
+    fn bulk(service: &Service, action: xdm_ipc::BulkAction, selection: xdm_ipc::BulkSelection, expected: Option<u64>) -> Reply {
+        service
+            .command(Command::TaskBulk { action, selection, expected_total: expected })
+            .unwrap()
+    }
+
+    #[test]
+    fn bulk_by_filter_guards_total_and_reports_per_task_failures() {
+        use xdm_ipc::{BulkAction, BulkSelection, TaskFilter};
+        let (service, _, _) = service(1000);
+        let ids: Vec<i64> = (0..6).map(|n| submit(&service, &format!("b{n}"))).collect();
+        let search = |text: &str| BulkSelection::Filter(TaskFilter { search: Some(text.into()), ..TaskFilter::default() });
+        // A stale expectation changes nothing.
+        let refused = bulk(&service, BulkAction::Pause, search("/b"), Some(5));
+        assert!(!refused.ok && refused.error.unwrap().contains("expected"));
+        assert!(service.command(Command::GetTask { task_id: ids[0] }).unwrap().tasks[0].status == "queued");
+        let paused = bulk(&service, BulkAction::Pause, search("/b"), Some(6));
+        let report = paused.bulk.unwrap();
+        assert!(paused.ok && report.matched == 6 && report.done == 6 && report.failed == 0);
+        // Pausing again fails per task with the single command's message.
+        let again = bulk(&service, BulkAction::Pause, BulkSelection::Ids(ids[..2].to_vec()), Some(2)).bulk.unwrap();
+        assert_eq!((again.done, again.failed), (0, 2));
+        assert!(again.failures[0].error.contains("not active"));
+        // Running tasks are refused for removal; the rest are removed.
+        service.inner.lock().unwrap().active.insert(ids[0], Active { queue_id: 0, stop: Arc::new(AtomicBool::new(false)), stop_requested: Arc::new(AtomicBool::new(false)), control: None, ftp: None, media: None });
+        let removed = bulk(&service, BulkAction::Remove, search("/b"), None).bulk.unwrap();
+        assert_eq!((removed.done, removed.failed), (5, 1));
+        assert!(removed.failures[0].error.contains("pause the task"));
+        let bad = bulk(&service, BulkAction::Priority { level: 9 }, search("/b"), None);
+        assert!(!bad.ok);
+    }
+
+    #[test]
+    fn every_documented_sort_key_works_with_no_running_task() {
+        let (service, _, _) = service(1000);
+        submit(&service, "s0");
+        for key in ["id", "url", "output", "status", "category", "priority", "position", "created", "updated", "size", "progress", "rate", "last_try", "queue"] {
+            for sign in ["", "-"] {
+                let reply = service
+                    .command(Command::ListPage { offset: 0, limit: 10, sort: Some(format!("{sign}{key}")), filter: None })
+                    .unwrap();
+                assert!(reply.ok && reply.tasks.len() == 1, "sort {sign}{key}: {:?}", reply.error);
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_handles_twenty_thousand_tasks() {
+        use xdm_ipc::{BulkAction, BulkSelection, TaskFilter};
+        let (service, _, _) = service(1000);
+        for n in 0..20_000 {
+            submit(&service, &format!("t{n}"));
+        }
+        let all = BulkSelection::Filter(TaskFilter::default());
+        let started = std::time::Instant::now();
+        let reply = bulk(&service, BulkAction::Pause, all, Some(20_000));
+        let pause_ms = started.elapsed().as_millis();
+        assert_eq!(reply.bulk.unwrap().done, 20_000);
+        let started = std::time::Instant::now();
+        let all = BulkSelection::Filter(TaskFilter { status: Some("paused".into()), ..TaskFilter::default() });
+        let reply = bulk(&service, BulkAction::Remove, all, Some(20_000));
+        println!("bulk 20k: pause {pause_ms} ms, remove {} ms", started.elapsed().as_millis());
+        assert_eq!(reply.bulk.unwrap().done, 20_000);
     }
 
     fn secret_entry(name: &str, cookie: &str) -> xdm_ipc::ImportEntry {

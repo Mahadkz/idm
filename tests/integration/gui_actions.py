@@ -718,6 +718,11 @@ def main():
                 cli("batch", f"http://example.invalid/g{chunk:02d}_[0001-0500].bin", base / f"bulk{chunk:02d}",
                     "--allow-duplicates")
             until(lambda: cli("list", "--limit", 1)["total"] == 20000, timeout=300)
+            # Show every sortable column in English so header positions are known.
+            saved_settings = json.loads(gui_settings_file.read_text())
+            saved_settings["language"] = "en"
+            saved_settings["columns"]["size"] = True
+            gui_settings_file.write_text(json.dumps(saved_settings))
             perf_env = {**env, "XDM_GUI_PERF": "1"}
             gui_log.flush()
             gui_log.seek(0)
@@ -755,6 +760,46 @@ def main():
             assert not [line for line in perf_lines("refresh") if "total=0 " in line]
             assert [line for line in perf_lines("refresh") if "total=500 sort=output " in line], \
                 "the File name header must sort in the daemon (sort=output) while the filter holds"
+
+            # Header sorts for columns without a stored column now use the daemon's keys.
+            def sorted_by(key, header_x):
+                before = len(perf_lines("refresh"))
+                click(main_window, header_x, 413)
+                until(lambda: any(f"sort={key} " in line for line in perf_lines("refresh")[before:]), timeout=30)
+            sorted_by("size", 200)
+            sorted_by("-size", 200)
+            sorted_by("progress", 403)
+            sorted_by("rate", 488)
+            sorted_by("queue", 836)
+            sorted_by("output", 70)  # back to File name
+
+            # Ctrl+A selects every task matching the filter, beyond the loaded rows.
+            click(main_window, 620, 254)  # Clear the search
+            until(lambda: "total=20000 " in (perf_lines("refresh") or [""])[-1], timeout=30)
+            click(main_window, 120, 457)
+            key("ctrl+a")
+            time.sleep(0.5)
+            gui_log.flush()
+            started = time.monotonic()
+            click(main_window, 735, 80)  # Resume -> TaskBulk resume with the filter and expected total
+            until(lambda: cli("list", "--limit", 1, "--status", "queued")["total"] == 20000, timeout=300)
+            click(main_window, 642, 80)  # Pause
+            until(lambda: cli("list", "--limit", 1, "--status", "paused")["total"] == 20000, timeout=300)
+            assert cli("list", "--limit", 1, "--status", "queued")["total"] == 0
+            print(f"select-all resume+pause of 20000 tasks through the GUI: {time.monotonic() - started:.1f}s")
+
+            # Queues dialog: daemon calls run off the UI thread and still work, including bulk assign.
+            click(main_window, 739, 30)
+            queues_win = until(lambda: window("XDM.*Queues$"))
+            type_field(queues_win, 160, 286, "Bulk")
+            type_field(queues_win, 480, 286, "2")
+            click(queues_win, 82, 342)  # Create
+            bulk_queue = until(lambda: next((q for q in cli("list")["queues"] if q["name"] == "Bulk"), None))
+            started = time.monotonic()
+            click(queues_win, 390, 446)  # Assign: all 20000 matching tasks
+            until(lambda: cli("list", "--limit", 1, "--queue", bulk_queue["id"])["total"] == 20000, timeout=600)
+            print(f"select-all assign of 20000 tasks to a queue through the GUI: {time.monotonic() - started:.1f}s")
+            assert gui.poll() is None
             samples = []
             for line in perf_lines("refresh") + perf_lines("page-fetch"):
                 for key in ("ui_thread_total", "fetch_to_install", "fetch_to_render"):

@@ -818,6 +818,59 @@ fn daemon_command(args: Vec<String>) {
             }
             Command::ListPage { offset, limit, sort, filter: Some(filter) }
         }
+        // daemon bulk ACTION [LEVEL|QUEUE_ID] [--ids 1,2 | --status S --category C --queue ID --search T] [--expect N]
+        // ACTION: pause resume remove remove-with-partials restart priority LEVEL assign-queue ID
+        Some("bulk") if args.len() >= 2 => {
+            let mut rest = args[2..].iter().peekable();
+            let action = match args[1].as_str() {
+                "pause" => xdm_ipc::BulkAction::Pause,
+                "resume" => xdm_ipc::BulkAction::Resume,
+                "remove" => xdm_ipc::BulkAction::Remove,
+                "remove-with-partials" => xdm_ipc::BulkAction::RemoveWithPartials,
+                "restart" => xdm_ipc::BulkAction::Restart,
+                "priority" => xdm_ipc::BulkAction::Priority {
+                    level: rest.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
+                },
+                "assign-queue" => xdm_ipc::BulkAction::AssignQueue {
+                    queue_id: rest.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
+                },
+                _ => usage(),
+            };
+            let mut ids: Option<Vec<i64>> = None;
+            let mut expect = None;
+            let mut filter = xdm_ipc::TaskFilter::default();
+            while let Some(flag) = rest.next() {
+                let value = rest.next().unwrap_or_else(|| usage());
+                match flag.as_str() {
+                    "--ids" => {
+                        ids = Some(
+                            value
+                                .split(',')
+                                .map(|id| id.trim().parse().unwrap_or_else(|_| usage()))
+                                .collect(),
+                        )
+                    }
+                    "--expect" => expect = Some(value.parse().unwrap_or_else(|_| usage())),
+                    "--status" => filter.status = Some(value.clone()),
+                    "--category" => filter.category = Some(value.clone()),
+                    "--queue" => filter.queue_id = Some(value.parse().unwrap_or_else(|_| usage())),
+                    "--search" => filter.search = Some(value.clone()),
+                    _ => usage(),
+                }
+            }
+            let filtered = filter != xdm_ipc::TaskFilter::default();
+            if ids.is_some() && filtered {
+                usage();
+            }
+            Command::TaskBulk {
+                action,
+                selection: match ids {
+                    Some(ids) => xdm_ipc::BulkSelection::Ids(ids),
+                    None => xdm_ipc::BulkSelection::Filter(filter),
+                },
+                expected_total: expect,
+            }
+        }
         Some("move-file") if args.len() == 3 => Command::TaskMoveFile {
             task_id: args[1].parse().unwrap_or_else(|_| usage()),
             new_path: args[2].clone(),
@@ -1253,7 +1306,7 @@ fn send_daemon(command: Command) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart] [--temp-dir ABSOLUTE_DIR] [--no-server-time]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://HOST:PORT [--proxy-user USER --proxy-password-file FILE|-] [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon list [--offset N] [--limit 1..2000] [--sort COL] [--status S] [--category C] [--queue ID] [--search TEXT]\n       xdm-cli daemon move-file ID NEW_PATH|partials DIR|partials-delete DIR PATH...|remove ID --delete-partial\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://HOST:PORT [BYPASS,...]  (credentials: daemon proxy-login, never in the URL)\n       xdm-cli daemon proxy-login USER PASSWORD_FILE|-   (store proxy credentials; requeues tasks waiting on a 407)\n       xdm-cli daemon proxy-login-clear\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon temp-dir get|ABSOLUTE_DIR|off\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|playlist FILE_OR_URL ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon diagnostics OUT.zip|OUT_DIR|version
+        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart] [--temp-dir ABSOLUTE_DIR] [--no-server-time]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://HOST:PORT [--proxy-user USER --proxy-password-file FILE|-] [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon list [--offset N] [--limit 1..2000] [--sort COL] [--status S] [--category C] [--queue ID] [--search TEXT]\n       xdm-cli daemon bulk pause|resume|remove|remove-with-partials|restart|priority LEVEL|assign-queue ID [--ids 1,2 | --status S --category C --queue ID --search T] [--expect N]\n       xdm-cli daemon move-file ID NEW_PATH|partials DIR|partials-delete DIR PATH...|remove ID --delete-partial\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://HOST:PORT [BYPASS,...]  (credentials: daemon proxy-login, never in the URL)\n       xdm-cli daemon proxy-login USER PASSWORD_FILE|-   (store proxy credentials; requeues tasks waiting on a 407)\n       xdm-cli daemon proxy-login-clear\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon temp-dir get|ABSOLUTE_DIR|off\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|playlist FILE_OR_URL ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon diagnostics OUT.zip|OUT_DIR|version
        xdm-cli daemon grab PROJECT.json ABSOLUTE_DIRECTORY [--start] [--queue ID]
        xdm-cli daemon grab-status REQUEST_ID|grab-save NAME PROJECT.json|grab-projects|grab-remove NAME
        xdm-cli daemon category list|save NAME EXT,EXT|- ABSOLUTE_DIRECTORY [*.site,...]|remove NAME

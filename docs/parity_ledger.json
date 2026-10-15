@@ -409,7 +409,12 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Missing: .part and.meta sit beside destination; no distinct temp-root setting or cross-filesystem finalization.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/engine_gaps.py",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "N39",
@@ -439,7 +444,12 @@
       "source_doc": "idm_core_queue_contracts.md",
       "current_behavior": "Missing: no preserve-server-date option or timestamp write.",
       "status": "missing",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/engine_gaps.py",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/main.rs",
+        "crates/xdm-ipc/src/lib.rs"
+      ]
     },
     {
       "id": "N42",

@@ -50,10 +50,10 @@
 | N35 | Pause/resume with one connection | implemented | Implemented (2026-10-13): connections=1 uses a single range worker with a `.part… | tests/integration/http_engine.py |
 | N36 | Non-range pause/restart | partial | Partial: Single-stream non-range pause retains .part without metadata; next atte… | tests/integration/http_engine.py, tests/integration/restart_required.py |
 | N37 | Crash recovery and stale running states | partial | Partial: daemon maps running/pausing→queued at open; segmented checkpoint valida… | tests/integration/contracts_core.py |
-| N38 | Separate temporary and final directories | missing | Missing: .part and.meta sit beside destination; no distinct temp-root setting or… | — |
+| N38 | Separate temporary and final directories | missing | Missing: .part and.meta sit beside destination; no distinct temp-root setting or… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N39 | Disk-full and access-denied assembly | partial | Partial (2026-10-13): disk-space preflight via `fstatvfs` and rollback of failed… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N40 | Large files and filesystem limits | implemented | Implemented (2026-10-13): u64 offsets/lengths and set_len; >4 GiB crossing verif… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
-| N41 | File timestamps | missing | Missing: no preserve-server-date option or timestamp write. | — |
+| N41 | File timestamps | missing | Missing: no preserve-server-date option or timestamp write. | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N42 | Finalize, rename and output conflicts | partial | Partial (2026-10-13): publication uses a hard link plus removal of `.part` (chec… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N43 | Orphan partial cleanup | missing | Missing: stopped-task remove retains files by design; no orphan inventory/cleanu… | — |
 | N44 | Default/per-server connection caps | partial | Partial: per-task 1–16 connections and daemon job cap 1–16. HTTP engine per-host… | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
@@ -195,8 +195,6 @@
 | N27 | Browser proxy/VPN context fallback | missing | idm_core_queue_contracts.md |
 | N28 | Windows dial-up/VPN and redial | missing | idm_core_queue_contracts.md |
 | N32 | Overlap/data-corruption validation | partial | idm_core_queue_contracts.md |
-| N38 | Separate temporary and final directories | missing | idm_core_queue_contracts.md |
-| N41 | File timestamps | missing | idm_core_queue_contracts.md |
 | N43 | Orphan partial cleanup | missing | idm_core_queue_contracts.md |
 | N48 | Resource efficiency contract | partial | idm_core_queue_contracts.md |
 | Q12 | Missed runs and daemon availability | partial | idm_core_queue_contracts.md |
@@ -206,7 +204,7 @@
 | Q19 | Schedule/order/settings durability | partial | idm_core_queue_contracts.md |
 | Q20 | Pause/resume/redownload state semantics | partial | idm_core_queue_contracts.md |
 
-**Count: 15**
+**Count: 13**
 
 ### Partial contracts WITH tests (next priority)
 

@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = ROOT / "tests/integration"
 # Helpers imported by suites or fixtures, not suites themselves.
-HELPERS = {"http_fixture.py", "proxy_fixture.py"}
+HELPERS = {"http_fixture.py", "proxy_fixture.py", "auth_harness.py"}
 WINDOWS = os.name == "nt"
 EXE = ".exe" if WINDOWS else ""
 

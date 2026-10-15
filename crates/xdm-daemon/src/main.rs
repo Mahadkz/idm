@@ -3257,6 +3257,8 @@ mod tests {
     fn ftp_partials_share_the_http_temp_naming_and_are_owned() {
         let temp = std::env::temp_dir().join(format!("xdm-ftp-own-{}", std::process::id()));
         std::fs::create_dir_all(&temp).unwrap();
+        // owned_partial_paths canonicalizes the temp dir (verbatim \\?\ paths on Windows).
+        let temp = std::fs::canonicalize(&temp).unwrap();
         let output = Path::new(abs!("/nonexistent-xdm-test/dir/file.bin"));
         let (ftp_part, ftp_check) = xdm_ftp::partial_paths(output, Some(&temp));
         assert_eq!(ftp_part, xdm_http::partial_paths(output, Some(&temp)).0);

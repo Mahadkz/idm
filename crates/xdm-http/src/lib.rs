@@ -31,8 +31,7 @@ mod sysproxy;
 pub use diagnostics::{Classified, ErrorKind, classify, classify_reqwest};
 pub use sysproxy::{Pac, SystemProxy, status as system_proxy_status};
 use diagnostics::classified;
-use digest::AuthState;
-pub use digest::Login;
+pub use digest::{Answer as AuthAnswer, AuthState, Login};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 

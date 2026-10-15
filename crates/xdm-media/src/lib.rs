@@ -1,8 +1,9 @@
 //! Clear, public HLS/DASH inspection, FFmpeg stream-copy jobs, and live
 //! "stop and save" recording. DRM, credential replay, and transcoding are
-//! outside this implementation.
+//! outside this implementation. ffmpeg only talks to a private loopback relay (see `relay.rs`).
 
-use reqwest::blocking::Client;
+mod relay;
+use relay::Relay;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -108,26 +109,6 @@ fn validate_headers(headers: &[(String, String)]) -> Result<()> {
     Ok(())
 }
 
-/// Splits browser-style headers into per-protocol ffmpeg input options:
-/// User-Agent and Referer get their own flags, everything else is CRLF-joined
-/// for `-headers`.
-fn web_header_args(headers: &[(String, String)]) -> Result<Vec<(String, String)>> {
-    validate_headers(headers)?;
-    let mut lines = String::new();
-    let mut options = Vec::new();
-    for (name, value) in headers {
-        match name.to_ascii_lowercase().as_str() {
-            "user-agent" => options.push(("-user_agent".to_owned(), value.clone())),
-            "referer" => options.push(("-referer".to_owned(), value.clone())),
-            _ => lines.push_str(&format!("{name}: {value}\r\n")),
-        }
-    }
-    if !lines.is_empty() {
-        options.push(("-headers".to_owned(), lines));
-    }
-    Ok(options)
-}
-
 fn manifest_kind(url: &str) -> Result<&'static str> {
     let path = reqwest::Url::parse(url)?.path().to_ascii_lowercase();
     if path.ends_with(".m3u8") {
@@ -196,56 +177,8 @@ pub fn with_origin_login<R>(login: Option<OriginLogin>, job: impl FnOnce() -> R)
     result
 }
 
-/// `Authorization` value for a manifest request, only for the login's own origin.
-fn origin_authorization(target: &reqwest::Url) -> Option<String> {
-    ORIGIN_LOGIN.with(|slot| {
-        let slot = slot.borrow();
-        let login = slot.as_ref()?;
-        let home = reqwest::Url::parse(&login.url).ok()?;
-        if home.origin() != target.origin() || login.username.contains(':') {
-            return None;
-        }
-        let host = target.host_str().unwrap_or("").trim_matches(['[', ']']);
-        let loopback = host.eq_ignore_ascii_case("localhost")
-            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
-        if target.scheme() != "https" && !loopback && !login.allow_insecure {
-            return None;
-        }
-        Some(format!("Basic {}", base64(format!("{}:{}", login.username, login.password).as_bytes())))
-    })
-}
-
-fn base64(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for i in 0..4 {
-            out.push(if i <= chunk.len() { TABLE[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
-}
-
-/// Client that forwards the given web headers; used for the local manifest checks
-/// so protected manifests fail before ffmpeg ever runs.
-fn clear_client(headers: &[(String, String)]) -> Result<Client> {
-    let mut builder = Client::builder().timeout(Duration::from_secs(20));
-    let mut applied = reqwest::header::HeaderMap::new();
-    for (name, value) in headers {
-        if !name.eq_ignore_ascii_case("user-agent") {
-            // reqwest treats referer as a transfer-time option, so it rides as a plain header.
-            applied.insert(
-                reqwest::header::HeaderName::from_bytes(name.as_bytes())?,
-                reqwest::header::HeaderValue::from_str(value)?,
-            );
-            continue;
-        }
-        builder = builder.user_agent(value);
-    }
-    Ok(builder.default_headers(applied).build()?)
+fn current_origin_login() -> Option<OriginLogin> {
+    ORIGIN_LOGIN.with(|slot| slot.borrow().clone())
 }
 
 /// Manifest walk results: subtitle rendition playlists plus live detection.
@@ -259,9 +192,8 @@ struct ManifestScan {
 /// Validates the whole clear manifest chain and returns the subtitle rendition
 /// playlist URLs (master only, manifest order, matching ffprobe stream order)
 /// alongside the live-stream verdict.
-fn walk_manifest_report(url: &str, headers: &[(String, String)]) -> Result<ManifestScan> {
+fn walk_manifest_report(url: &str, relay: &Relay) -> Result<ManifestScan> {
     let master = manifest_kind(url)?;
-    let client = clear_client(headers)?;
     let mut pending = vec![reqwest::Url::parse(url)?];
     let mut visited = HashSet::new();
     let mut scan = ManifestScan { renditions: Vec::new(), live: false };
@@ -272,21 +204,19 @@ fn walk_manifest_report(url: &str, headers: &[(String, String)]) -> Result<Manif
         if visited.len() > 32 {
             return Err(err("too many nested playlists"));
         }
-        let mut request = client.get(current.clone());
-        if let Some(value) = origin_authorization(&current) {
-            request = request.header(reqwest::header::AUTHORIZATION, value);
-        }
-        let response = request.send()?.error_for_status()?;
-        if response
-            .content_length()
-            .is_some_and(|n| n > 4 * 1024 * 1024)
-        {
+        let (response, final_url) =
+            relay.upstream().send("GET", &current, None, Some(Duration::from_secs(20)))?;
+        let response = response.error_for_status()?;
+        if response.content_length().is_some_and(|n| n > relay::MANIFEST_LIMIT) {
             return Err(err("manifest too large"));
         }
-        let bytes = response.bytes()?;
-        if bytes.len() > 4 * 1024 * 1024 {
+        let mut bytes = Vec::new();
+        response.take(relay::MANIFEST_LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > relay::MANIFEST_LIMIT {
             return Err(err("manifest too large"));
         }
+        // Relative references resolve against where the manifest was finally served.
+        let current = final_url;
         let text = std::str::from_utf8(&bytes)?;
         if master == "hls" {
             if !text.starts_with("#EXTM3U") {
@@ -364,26 +294,28 @@ fn walk_manifest_report(url: &str, headers: &[(String, String)]) -> Result<Manif
     Ok(scan)
 }
 
-fn walk_manifest(url: &str, headers: &[(String, String)]) -> Result<Vec<String>> {
-    Ok(walk_manifest_report(url, headers)?.renditions)
+fn walk_manifest(url: &str, relay: &Relay) -> Result<Vec<String>> {
+    Ok(walk_manifest_report(url, relay)?.renditions)
 }
 
-fn check_manifest(url: &str, headers: &[(String, String)]) -> Result<()> {
-    walk_manifest(url, headers).map(|_| ())
+/// Starts the job's relay after validating the headers.
+fn start_relay(url: &str, headers: &[(String, String)]) -> Result<Relay> {
+    validate_headers(headers)?;
+    manifest_kind(url)?;
+    Relay::start(&reqwest::Url::parse(url)?, headers)
 }
 
-fn probe(url: &str, headers: &[(String, String)]) -> Result<Value> {
-    check_manifest(url, headers)?;
-    ffprobe(url, headers)
+fn probe(url: &str, relay: &Relay) -> Result<Value> {
+    walk_manifest(url, relay)?;
+    ffprobe(relay)
 }
 
-/// ffprobe stream JSON for an already validated manifest URL.
-fn ffprobe(url: &str, headers: &[(String, String)]) -> Result<Value> {
+/// ffprobe stream JSON for an already validated manifest, read through the relay.
+fn ffprobe(relay: &Relay) -> Result<Value> {
     let mut command = Command::new("ffprobe");
     command.args(CLEAR_INPUT_ARGS);
-    command.args(header_flat_args(headers)?);
     command.args(["-v", "error", "-show_streams", "-of", "json"]);
-    command.arg(url);
+    command.arg(relay.manifest_url());
     let output = command.output()?;
     if !output.status.success() {
         return Err(err(format!(
@@ -392,16 +324,6 @@ fn ffprobe(url: &str, headers: &[(String, String)]) -> Result<Value> {
         )));
     }
     Ok(serde_json::from_slice(&output.stdout)?)
-}
-
-/// Header options flattened into "-flag value" pairs for the child process.
-fn header_flat_args(headers: &[(String, String)]) -> Result<Vec<String>> {
-    let mut flat = Vec::new();
-    for (option, value) in web_header_args(headers)? {
-        flat.push(option);
-        flat.push(value);
-    }
-    Ok(flat)
 }
 
 fn numeric(value: &Value) -> Option<u64> {
@@ -447,8 +369,12 @@ pub fn inspect(url: &str) -> Result<Vec<Track>> {
 }
 
 pub fn inspect_with_headers(url: &str, headers: &[(String, String)]) -> Result<Vec<Track>> {
-    let data = probe(url, headers)?;
-    tracks_from_probe(&data)
+    let relay = start_relay(url, headers)?;
+    inspect_in(url, &relay)
+}
+
+fn inspect_in(url: &str, relay: &Relay) -> Result<Vec<Track>> {
+    tracks_from_probe(&probe(url, relay)?)
 }
 
 pub fn inspect_report(url: &str) -> Result<Inspection> {
@@ -457,8 +383,13 @@ pub fn inspect_report(url: &str) -> Result<Inspection> {
 
 /// [`inspect_with_headers`] plus the live verdict, in one manifest walk.
 pub fn inspect_report_with_headers(url: &str, headers: &[(String, String)]) -> Result<Inspection> {
-    let scan = walk_manifest_report(url, headers)?;
-    let data = ffprobe(url, headers)?;
+    let relay = start_relay(url, headers)?;
+    inspect_report_in(url, &relay)
+}
+
+fn inspect_report_in(url: &str, relay: &Relay) -> Result<Inspection> {
+    let scan = walk_manifest_report(url, relay)?;
+    let data = ffprobe(relay)?;
     Ok(Inspection { tracks: tracks_from_probe(&data)?, live: scan.live })
 }
 
@@ -681,12 +612,12 @@ pub fn record_live(
     if stop.load(Ordering::Relaxed) {
         return Err(err("paused"));
     }
-    validate_headers(headers)?;
-    let report = inspect_report_with_headers(url, headers).ok();
+    let relay = start_relay(url, headers)?;
+    let report = inspect_report_in(url, &relay).ok();
     let live = match &report {
         Some(report) => report.live,
         // ffprobe can fail on live manifests; the walk alone decides.
-        None => walk_manifest_report(url, headers)?.live,
+        None => walk_manifest_report(url, &relay)?.live,
     };
     if let Some(report) = &report {
         if !report
@@ -721,8 +652,7 @@ pub fn record_live(
     }
     command.args(["-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
-    command.args(header_flat_args(headers)?);
-    command.arg("-i").arg(url);
+    command.arg("-i").arg(relay.manifest_url());
     command.args(["-map", &format!("0:{video}")]);
     if let Some(audio) = audio {
         command.args(["-map", &format!("0:{audio}")]);
@@ -801,8 +731,8 @@ pub fn download_with_headers(
     if output.exists() {
         return Err(err("media destination already exists"));
     }
-    validate_headers(headers)?;
-    let tracks = inspect_with_headers(url, headers)?;
+    let relay = start_relay(url, headers)?;
+    let tracks = inspect_in(url, &relay)?;
     if !tracks
         .iter()
         .any(|track| track.kind == "video" && track.index == video)
@@ -816,7 +746,7 @@ pub fn download_with_headers(
     }) {
         return Err(err("selected audio track is unavailable"));
     }
-    let renditions = walk_manifest(url, headers)?;
+    let renditions = walk_manifest(url, &relay)?;
     let subtitle_tracks: Vec<usize> = tracks
         .iter()
         .filter(|track| track.kind == "subtitle")
@@ -853,14 +783,12 @@ pub fn download_with_headers(
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
-    command.args(header_flat_args(headers)?);
-    command.arg("-i").arg(url);
+    command.arg("-i").arg(relay.manifest_url());
     // Each selected subtitle track rides in as its own rendition playlist
     // input: master-opened subtitle streams lose their packets.
     for &(slot, _) in &chosen {
         command.args(CLEAR_INPUT_ARGS);
-        command.args(header_flat_args(headers)?);
-        command.arg("-i").arg(&renditions[slot]);
+        command.arg("-i").arg(relay.url_for(&renditions[slot])?);
     }
     command.args(["-map", &format!("0:{video}")]);
     if let Some(audio) = audio {
@@ -885,7 +813,7 @@ pub fn download_audio(
     headers: &[(String, String)],
     stop: &AtomicBool,
 ) -> Result<()> {
-    validate_headers(headers)?;
+    let relay = start_relay(url, headers)?;
     if output.exists() {
         return Err(err("audio destination already exists"));
     }
@@ -893,7 +821,7 @@ pub fn download_audio(
         .extension()
         .and_then(|value| value.to_str())
         .ok_or_else(|| err("audio output needs a file extension"))?;
-    let tracks = inspect_with_headers(url, headers)?;
+    let tracks = inspect_in(url, &relay)?;
     let source = tracks
         .iter()
         .find(|track| track.kind == "audio" && track.index == audio_track)
@@ -912,8 +840,7 @@ pub fn download_audio(
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
-    command.args(header_flat_args(headers)?);
-    command.args(["-i", url, "-map", &format!("0:{audio_track}")]);
+    command.args(["-i", &relay.manifest_url(), "-map", &format!("0:{audio_track}")]);
     match plan.reencode {
         Some((encoder, bitrate_kbps)) => command.args([
             "-c:a",
@@ -934,7 +861,7 @@ pub fn save_subtitles(
     headers: &[(String, String)],
     stop: &AtomicBool,
 ) -> Result<()> {
-    validate_headers(headers)?;
+    let relay = start_relay(url, headers)?;
     if output.exists() {
         return Err(err("subtitle destination already exists"));
     }
@@ -949,7 +876,7 @@ pub fn save_subtitles(
     } else {
         return Err(err("subtitle sidecar extension must be .srt or .vtt"));
     };
-    let tracks = inspect_with_headers(url, headers)?;
+    let tracks = inspect_in(url, &relay)?;
     let subtitle_tracks: Vec<usize> = tracks
         .iter()
         .filter(|track| track.kind == "subtitle")
@@ -959,7 +886,7 @@ pub fn save_subtitles(
         .iter()
         .position(|&index| index == track)
         .ok_or_else(|| err("selected subtitle track is unavailable"))?;
-    let renditions = walk_manifest(url, headers)?;
+    let renditions = walk_manifest(url, &relay)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -972,14 +899,13 @@ pub fn save_subtitles(
     let mut command = Command::new("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
-    command.args(header_flat_args(headers)?);
     if renditions.len() > slot {
         // Demux the rendition playlist itself: master-opened subtitle streams
         // lose their packets in current ffmpeg builds.
-        command.args(["-i", &renditions[slot]]);
+        command.args(["-i", &relay.url_for(&renditions[slot])?]);
         command.args(["-map", "0:0"]);
     } else {
-        command.args(["-i", url, "-map", &format!("0:{track}")]);
+        command.args(["-i", &relay.manifest_url(), "-map", &format!("0:{track}")]);
     }
     command.args(["-c:s", encoder, "-f", muxer, "-y"]).arg(&temporary);
     run_ffmpeg_job(command, &temporary, output, stop)
@@ -1091,35 +1017,9 @@ mod tests {
     }
 
     #[test]
-    fn headers_split_into_ffmpeg_options() {
-        let options = web_header_args(&[
-            ("Cookie".to_owned(), "a=1".to_owned()),
-            ("User-Agent".to_owned(), "xdm/1".to_owned()),
-            ("Referer".to_owned(), "https://example.test/".to_owned()),
-            ("Authorization".to_owned(), "Bearer t".to_owned()),
-        ])
-        .unwrap();
-        assert_eq!(options[0].0, "-user_agent");
-        assert_eq!(options[0].1, "xdm/1");
-        assert_eq!(options[1].0, "-referer");
-        assert_eq!(options[1].1, "https://example.test/");
-        assert_eq!(options[2].0, "-headers");
-        assert_eq!(
-            options[2].1,
-            "Cookie: a=1\r\nAuthorization: Bearer t\r\n"
-        );
-    }
-
-    #[test]
     fn newline_in_headers_is_rejected() {
-        assert!(web_header_args(&[("Cookie".to_owned(), "a\r\nEvil: x".to_owned())]).is_err());
-        assert!(web_header_args(&[("Bad\nName".to_owned(), "v".to_owned())]).is_err());
-        assert!(
-            web_header_args(&[("Cookie".to_owned(), "a\r\nEvil: x".to_owned())])
-                .unwrap_err()
-                .to_string()
-                .contains("header")
-        );
+        assert!(validate_headers(&[("Cookie".to_owned(), "a\r\nEvil: x".to_owned())]).is_err());
+        assert!(validate_headers(&[("Bad\nName".to_owned(), "v".to_owned())]).is_err());
     }
 
     #[test]
@@ -1285,25 +1185,17 @@ mod tests {
     }
 
     #[test]
-    fn origin_login_applies_to_its_origin_only() {
-        let login = OriginLogin {
-            url: "https://a.example/master.m3u8".into(),
-            username: "u".into(),
-            password: "p".into(),
-            allow_insecure: false,
-        };
-        with_origin_login(Some(login), || {
-            let at = |url: &str| origin_authorization(&reqwest::Url::parse(url).unwrap());
-            assert_eq!(at("https://a.example/sub.m3u8").as_deref(), Some("Basic dTpw"));
-            assert!(at("https://b.example/seg.ts").is_none());
-            assert!(at("https://a.example:8443/seg.ts").is_none());
-            assert!(at("http://a.example/seg.ts").is_none());
-        });
-        assert!(origin_authorization(&reqwest::Url::parse("https://a.example/").unwrap()).is_none());
-        let loopback = OriginLogin { url: "http://127.0.0.1:9/m.m3u8".into(), username: "u".into(), password: "p".into(), allow_insecure: false };
-        with_origin_login(Some(loopback), || {
-            assert!(origin_authorization(&reqwest::Url::parse("http://127.0.0.1:9/x").unwrap()).is_some());
-            assert!(origin_authorization(&reqwest::Url::parse("http://localhost:9/x").unwrap()).is_none());
-        });
+    fn relay_rewrites_references_and_scopes_headers() {
+        let base = reqwest::Url::parse("https://a.example/v/master.m3u8").unwrap();
+        let headers = vec![("Cookie".to_owned(), "sid=1".to_owned())];
+        let relay = Relay::start(&base, &headers).unwrap();
+        let manifest = relay.manifest_url();
+        assert!(manifest.starts_with("http://127.0.0.1:") && manifest.ends_with("/master.m3u8"));
+        assert!(!manifest.contains("a.example"));
+        let other = relay.url_for("https://b.example/seg.ts").unwrap();
+        assert!(other.ends_with("/seg.ts") && !other.contains("b.example"));
+        // 128+ bits of token in the path.
+        let token = manifest.split('/').nth(3).unwrap();
+        assert!(token.len() >= 32 && token.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

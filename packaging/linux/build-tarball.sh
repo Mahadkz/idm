@@ -82,6 +82,8 @@ for f in "$REPO_ROOT"/install/linux/*; do
 done
 cp -a -- "$REPO_ROOT"/install/windows/*.ps1 "$STAGE/install/windows/"
 install -m 644 -- "$REPO_ROOT/LICENSE" "$STAGE/LICENSE"
+[ -f "$OUT_DIR/THIRD_PARTY_LICENSES.md" ] || "$REPO_ROOT/packaging/licenses.sh" "$OUT_DIR/THIRD_PARTY_LICENSES.md"
+install -m 644 -- "$OUT_DIR/THIRD_PARTY_LICENSES.md" "$STAGE/THIRD_PARTY_LICENSES.md"
 
 say "creating $TARBALL"
 tar -czf "$TARBALL" -C "$OUT_DIR" "$STAGE_NAME"

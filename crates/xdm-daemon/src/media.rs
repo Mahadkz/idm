@@ -123,39 +123,39 @@ mod tests {
         // A live recording targets the containers xdm-media's recorder muxes.
         assert!(live(
             "live-mp4",
-            "/nonexistent-xdm-test/take.mp4",
+            abs!("/nonexistent-xdm-test/take.mp4"),
             MediaMode::Live { video: 0, audio: Some(1), max_seconds: Some(60) }
         ));
         assert!(live(
             "live-mkv",
-            "/nonexistent-xdm-test/take.mkv",
+            abs!("/nonexistent-xdm-test/take.mkv"),
             MediaMode::Live { video: 0, audio: None, max_seconds: None }
         ));
         // Sidecars, raw extensions, zeroed or oversized caps, and unbounded
         // track indices stay rejected.
         assert!(!live(
             "live-srt",
-            "/nonexistent-xdm-test/take.srt",
+            abs!("/nonexistent-xdm-test/take.srt"),
             MediaMode::Live { video: 0, audio: None, max_seconds: None }
         ));
         assert!(!live(
             "live-ts",
-            "/nonexistent-xdm-test/take.ts",
+            abs!("/nonexistent-xdm-test/take.ts"),
             MediaMode::Live { video: 0, audio: None, max_seconds: None }
         ));
         assert!(!live(
             "live-zero-cap",
-            "/nonexistent-xdm-test/take.mp4",
+            abs!("/nonexistent-xdm-test/take.mp4"),
             MediaMode::Live { video: 0, audio: None, max_seconds: Some(0) }
         ));
         assert!(!live(
             "live-over-cap",
-            "/nonexistent-xdm-test/take.mp4",
+            abs!("/nonexistent-xdm-test/take.mp4"),
             MediaMode::Live { video: 0, audio: None, max_seconds: Some(xdm_ipc::MAX_LIVE_SECONDS + 1) }
         ));
         assert!(!live(
             "live-bad-track",
-            "/nonexistent-xdm-test/take.mp4",
+            abs!("/nonexistent-xdm-test/take.mp4"),
             MediaMode::Live { video: 20000, audio: None, max_seconds: None }
         ));
     }
@@ -169,7 +169,7 @@ mod tests {
             .command(Command::SubmitMediaJob {
                 request_id: "live-cat".into(),
                 url: "http://127.0.0.1:1/master.m3u8".into(),
-                output: "/nonexistent-xdm-test/live.mkv".into(),
+                output: abs!("/nonexistent-xdm-test/live.mkv").into(),
                 headers: Vec::new(),
                 mode: MediaMode::Live { video: 2, audio: Some(3), max_seconds: Some(30) },
                 priority: 1,
@@ -209,7 +209,7 @@ mod tests {
         };
         let accepted = audio(
             "m-audio",
-            "/nonexistent-xdm-test/song.mp3",
+            abs!("/nonexistent-xdm-test/song.mp3"),
             MediaAudioFormat::Mp3 { bitrate_kbps: 96 },
         );
         assert!(accepted.ok, "{:?}", accepted.error);
@@ -218,7 +218,7 @@ mod tests {
         assert!(
             audio(
                 "m-audio",
-                "/nonexistent-xdm-test/song.mp3",
+                abs!("/nonexistent-xdm-test/song.mp3"),
                 MediaAudioFormat::Mp3 { bitrate_kbps: 96 }
             )
             .ok
@@ -226,7 +226,7 @@ mod tests {
         assert!(
             !audio(
                 "m-audio",
-                "/nonexistent-xdm-test/song.mp3",
+                abs!("/nonexistent-xdm-test/song.mp3"),
                 MediaAudioFormat::Mp3 { bitrate_kbps: 128 }
             )
             .ok
@@ -234,17 +234,17 @@ mod tests {
         for (name, output, format) in [
             (
                 "bad-ext",
-                "/nonexistent-xdm-test/song.m4a",
+                abs!("/nonexistent-xdm-test/song.m4a"),
                 MediaAudioFormat::Mp3 { bitrate_kbps: 96 },
             ),
             (
                 "bad-bitrate",
-                "/nonexistent-xdm-test/song.mp3",
+                abs!("/nonexistent-xdm-test/song.mp3"),
                 MediaAudioFormat::Mp3 { bitrate_kbps: 400 },
             ),
             (
                 "original-wrong-container",
-                "/nonexistent-xdm-test/song.srt",
+                abs!("/nonexistent-xdm-test/song.srt"),
                 MediaAudioFormat::Original,
             ),
         ] {
@@ -254,7 +254,7 @@ mod tests {
         for (name, output, mode) in [
             (
                 "mkv-subs-ok",
-                "/nonexistent-xdm-test/film.mkv",
+                abs!("/nonexistent-xdm-test/film.mkv"),
                 MediaMode::Video {
                     video: 2,
                     audio: None,
@@ -263,12 +263,12 @@ mod tests {
             ),
             (
                 "subs-ok",
-                "/nonexistent-xdm-test/film.vtt",
+                abs!("/nonexistent-xdm-test/film.vtt"),
                 MediaMode::Subtitles { track: 3 },
             ),
             (
                 "video-no-manifest",
-                "/nonexistent-xdm-test/film.mp4",
+                abs!("/nonexistent-xdm-test/film.mp4"),
                 MediaMode::Video {
                     video: 2,
                     audio: None,
@@ -303,7 +303,7 @@ mod tests {
                 .command(Command::SubmitMediaJob {
                     request_id: "m-evil".into(),
                     url: "http://127.0.0.1:1/master.m3u8".into(),
-                    output: "/nonexistent-xdm-test/evil.mp4".into(),
+                    output: abs!("/nonexistent-xdm-test/evil.mp4").into(),
                     headers: vec![("Cookie".into(), "a\r\nEvil: x".into())],
                     mode: MediaMode::Video {
                         video: 0,

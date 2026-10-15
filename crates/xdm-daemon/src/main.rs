@@ -1,3 +1,9 @@
+/// Test paths: a rooted path without a drive letter is not absolute on Windows.
+#[cfg(all(test, windows))]
+macro_rules! abs { ($s:literal) => { concat!("C:", $s) }; }
+#[cfg(all(test, not(windows)))]
+macro_rules! abs { ($s:literal) => { $s }; }
+
 mod bandwidth;
 mod dbsafety;
 mod lock;
@@ -2605,7 +2611,7 @@ mod tests {
             .command(Command::Submit {
                 request_id: name.into(),
                 url: format!("http://127.0.0.1:1/{name}"),
-                output: format!("/nonexistent-xdm-test/{name}"),
+                output: format!("{}/{name}", abs!("/nonexistent-xdm-test")),
                 headers: Vec::new(),
                 priority: 1,
                 connections: 1,
@@ -2631,7 +2637,7 @@ mod tests {
             .command(Command::SubmitRequest {
                 request_id: name.into(),
                 url: format!("http://127.0.0.1:1/{name}"),
-                output: format!("/nonexistent-xdm-test/{name}"),
+                output: format!("{}/{name}", abs!("/nonexistent-xdm-test")),
                 headers: Vec::new(),
                 method: method.into(),
                 body: body.map(<[u8]>::to_vec),
@@ -2810,7 +2816,7 @@ mod tests {
                 .command(Command::SubmitEx {
                     request_id: request_id.into(),
                     url: url.into(),
-                    output: format!("/nonexistent-xdm-test/{name}"),
+                    output: format!("{}/{name}", abs!("/nonexistent-xdm-test")),
                     headers: Vec::new(),
                     method: "GET".into(),
                     body: None,
@@ -2843,7 +2849,7 @@ mod tests {
             .command(Command::Submit {
                 request_id: "dup-legacy".into(),
                 url: "http://example.test/path".into(),
-                output: "/nonexistent-xdm-test/dup-legacy.bin".into(),
+                output: abs!("/nonexistent-xdm-test/dup-legacy.bin").into(),
                 headers: Vec::new(),
                 priority: 1,
                 connections: 1,
@@ -2859,7 +2865,7 @@ mod tests {
             .command(Command::SubmitEx {
                 request_id: "flags-in".into(),
                 url: "http://example.test/f.bin".into(),
-                output: "/nonexistent-xdm-test/flags.bin".into(),
+                output: abs!("/nonexistent-xdm-test/flags.bin").into(),
                 headers: Vec::new(),
                 method: "GET".into(),
                 body: None,
@@ -2876,7 +2882,7 @@ mod tests {
         let work = service.next_work().unwrap();
         assert_eq!(work.id, id);
         assert!(work.name_from_server && work.policy.ignore_modification_date);
-        assert_eq!(work.output, PathBuf::from("/nonexistent-xdm-test/flags.bin"));
+        assert_eq!(work.output, PathBuf::from(abs!("/nonexistent-xdm-test/flags.bin")));
         // Legacy submissions default both policies off.
         let legacy = submit(&service, "flags-legacy");
         let work = service.next_work().unwrap();
@@ -2984,7 +2990,7 @@ mod tests {
             .command(Command::Redownload {
                 task_id: source,
                 request_id: "post-clone".into(),
-                output: "/nonexistent-xdm-test/clone.bin".into(),
+                output: abs!("/nonexistent-xdm-test/clone.bin").into(),
             })
             .unwrap();
         assert!(reply.ok);
@@ -3157,9 +3163,9 @@ mod tests {
         service.inner.lock().unwrap().moving.insert(id);
         assert!(!service.command(Command::Remove { task_id: id }).unwrap().ok);
         assert!(!service.command(Command::TaskRestart { task_id: id }).unwrap().ok);
-        assert!(!service.command(Command::TaskMoveFile { task_id: id, new_path: "/tmp/x-moving.bin".into() }).unwrap().ok);
+        assert!(!service.command(Command::TaskMoveFile { task_id: id, new_path: abs!("/tmp/x-moving.bin").into() }).unwrap().ok);
         let reply = service
-            .command(Command::Redownload { task_id: id, request_id: "rd".into(), output: "/nonexistent-xdm-test/rd.bin".into() })
+            .command(Command::Redownload { task_id: id, request_id: "rd".into(), output: abs!("/nonexistent-xdm-test/rd.bin").into() })
             .unwrap();
         assert!(!reply.ok && reply.error.unwrap().contains("moved"));
         service.inner.lock().unwrap().moving.clear();
@@ -3188,7 +3194,7 @@ mod tests {
             service
                 .command(Command::ImportListEx {
                     request_id: "secret-1".into(),
-                    directory: "/nonexistent-xdm-test/dir".into(),
+                    directory: abs!("/nonexistent-xdm-test/dir").into(),
                     entries: vec![secret_entry("s.bin", cookie)],
                     enqueue: false,
                     allow_duplicate: false,
@@ -3215,7 +3221,7 @@ mod tests {
         let reply = service
             .command(Command::ImportListEx {
                 request_id: "secret-2".into(),
-                directory: "/nonexistent-xdm-test/dir".into(),
+                directory: abs!("/nonexistent-xdm-test/dir").into(),
                 entries: vec![secret_entry("done.bin", "session=TOPSECRET")],
                 enqueue: false,
                 allow_duplicate: false,
@@ -3237,7 +3243,7 @@ mod tests {
             let reply = service
                 .command(Command::ImportListEx {
                     request_id: format!("forbid-{name}"),
-                    directory: "/nonexistent-xdm-test/dir".into(),
+                    directory: abs!("/nonexistent-xdm-test/dir").into(),
                     entries: vec![entry],
                     enqueue: false,
                     allow_duplicate: false,
@@ -3251,12 +3257,12 @@ mod tests {
     fn ftp_partials_share_the_http_temp_naming_and_are_owned() {
         let temp = std::env::temp_dir().join(format!("xdm-ftp-own-{}", std::process::id()));
         std::fs::create_dir_all(&temp).unwrap();
-        let output = Path::new("/nonexistent-xdm-test/dir/file.bin");
+        let output = Path::new(abs!("/nonexistent-xdm-test/dir/file.bin"));
         let (ftp_part, ftp_check) = xdm_ftp::partial_paths(output, Some(&temp));
         assert_eq!(ftp_part, xdm_http::partial_paths(output, Some(&temp)).0);
         let owned = owned_partial_paths(output, Some(temp.to_str().unwrap()));
         assert!(owned.contains(&ftp_part) && owned.contains(&ftp_check));
-        assert!(owned.contains(&PathBuf::from("/nonexistent-xdm-test/dir/file.bin.part.ftp")));
+        assert!(owned.contains(&PathBuf::from(abs!("/nonexistent-xdm-test/dir/file.bin.part.ftp"))));
     }
 
     #[test]
@@ -3321,7 +3327,7 @@ mod tests {
             .command(Command::Submit {
                 request_id: "ftp-1".into(),
                 url: "ftp://downloads.invalid/pub/pubbig.bin".into(),
-                output: "/nonexistent-xdm-test/ftp.bin".into(),
+                output: abs!("/nonexistent-xdm-test/ftp.bin").into(),
                 headers: Vec::new(),
                 priority: 1,
                 connections: 1,
@@ -3340,7 +3346,7 @@ mod tests {
             .command(Command::Submit {
                 request_id: "bad-scheme".into(),
                 url: "ftps://downloads.invalid/x".into(),
-                output: "/nonexistent-xdm-test/bad".into(),
+                output: abs!("/nonexistent-xdm-test/bad").into(),
                 headers: Vec::new(),
                 priority: 1,
                 connections: 1,
@@ -3368,11 +3374,11 @@ mod tests {
                 })
                 .unwrap()
         };
-        let mkv = job(&service, "m-mkv", "/nonexistent-xdm-test/film.mkv", MediaMode::Video { video: 2, audio: Some(3), subtitles: vec![5] }).task_id.unwrap();
+        let mkv = job(&service, "m-mkv", abs!("/nonexistent-xdm-test/film.mkv"), MediaMode::Video { video: 2, audio: Some(3), subtitles: vec![5] }).task_id.unwrap();
         let audio_id = job(
             &service,
             "m-song",
-            "/nonexistent-xdm-test/song.mp3",
+            abs!("/nonexistent-xdm-test/song.mp3"),
             MediaMode::Audio { track: 1, format: MediaAudioFormat::Mp3 { bitrate_kbps: 96 } },
         )
         .task_id
@@ -3402,7 +3408,7 @@ mod tests {
                 .command(Command::SubmitMedia {
                     request_id: "legacy-media".into(),
                     url: "http://127.0.0.1:1/master.m3u8".into(),
-                    output: "/nonexistent-xdm-test/plain.mp4".into(),
+                    output: abs!("/nonexistent-xdm-test/plain.mp4").into(),
                     video: 2,
                     audio: Some(3),
                     priority: 1,
@@ -3564,7 +3570,7 @@ mod tests {
             .command(Command::Submit {
                 request_id: "auth-explicit".into(),
                 url: "http://127.0.0.1:1/explicit.bin".into(),
-                output: "/nonexistent-xdm-test/auth-explicit.bin".into(),
+                output: abs!("/nonexistent-xdm-test/auth-explicit.bin").into(),
                 headers: vec![("Authorization".into(), "Bearer supplied".into())],
                 priority: 2,
                 connections: 1,
@@ -3602,7 +3608,7 @@ mod tests {
                 .command(Command::SubmitMediaJob {
                     request_id: request_id.into(),
                     url: "http://127.0.0.1:1/master.m3u8".into(),
-                    output: format!("/nonexistent-xdm-test/{request_id}.mkv"),
+                    output: format!("{}/{request_id}.mkv", abs!("/nonexistent-xdm-test")),
                     headers,
                     mode: MediaMode::Live {
                         video: 0,

@@ -138,7 +138,7 @@ mod tests {
             .command(Command::CategorySave {
                 name: "Video".into(),
                 extensions: vec!["mp4".into(), "webm".into()],
-                destination: "/media".into(),
+                destination: abs!("/media").into(),
                 sites: Vec::new(),
             })
             .unwrap();
@@ -159,7 +159,7 @@ mod tests {
                 .find(|rule| rule.name == name)
                 .unwrap()
         };
-        assert_eq!(rule(&service, "Video").destination, "/media");
+        assert_eq!(rule(&service, "Video").destination, abs!("/media"));
         // Rule edits survive a reopen.
         let path = std::env::temp_dir().join(format!("xdm-category-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -247,7 +247,7 @@ mod tests {
             category(
                 "rule-ext",
                 "http://plain.test/x/letter.epub",
-                "/nonexistent-xdm-test/letter.epub"
+                abs!("/nonexistent-xdm-test/letter.epub")
             ),
             "Ebooks"
         );
@@ -256,7 +256,7 @@ mod tests {
             category(
                 "rule-site",
                 "http://www.pub.test/x.zip",
-                "/nonexistent-xdm-test/marsh.zip"
+                abs!("/nonexistent-xdm-test/marsh.zip")
             ),
             "Publisher"
         );

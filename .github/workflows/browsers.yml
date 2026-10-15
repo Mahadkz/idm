@@ -13,7 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
       - name: System packages
         run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb
@@ -37,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
       - name: System packages
         run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb

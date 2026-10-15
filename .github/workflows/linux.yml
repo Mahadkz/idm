@@ -20,9 +20,15 @@ jobs:
           targets: x86_64-pc-windows-gnu
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
-      - uses: FedericoCarboni/setup-ffmpeg@v3
+      # The media code and suites are developed against a current ffmpeg/ffprobe master build;
+      # Ubuntu's apt ffmpeg 6.1 does not expose the HLS WebVTT subtitle track the tests expect.
+      - name: Current static ffmpeg
+        run: |
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          curl -fsSL --retry 5 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
       # media_live_tasks is skipped while authenticated live streams fail on main (open item: a

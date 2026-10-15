@@ -13,6 +13,11 @@ fn default_submit_method() -> String {
     "GET".into()
 }
 
+pub mod ops;
+
+/// IPC protocol number negotiated by `Hello`; bump on incompatible changes.
+pub const PROTOCOL: u32 = 1;
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 /// Replies may be larger than requests (a 2000-row `ListPage`); requests stay
 /// bounded by `MAX_FRAME`.
@@ -25,7 +30,7 @@ pub struct Request {
     pub command: Command,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Command {
     Submit {
@@ -402,6 +407,51 @@ pub enum Command {
     },
     /// Reads the temporary directory into `Reply::temp_dir`.
     GetTempDir,
+    /// Stores the manual proxy's credentials in the daemon's credential store
+    /// (never in the proxy URL) and requeues tasks waiting on a 407.
+    ProxyLogin {
+        username: String,
+        password: String,
+    },
+    /// Forgets the stored proxy credentials.
+    ProxyLoginClear,
+    /// Allows (or forbids again) Basic over cleartext http:// to non-loopback
+    /// hosts for one saved login.
+    LoginSetInsecure {
+        id: i64,
+        allow: bool,
+    },
+    /// Version handshake: the reply carries `daemon_version` and `protocol`.
+    Hello { client_version: String, protocol: u32 },
+}
+
+/// Debug output of a command never includes password fields (`LoginSave`,
+/// `TaskProvideLogin`, `ProxyLogin`, and any future variant with a `password`).
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn mask(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, entry) in map.iter_mut() {
+                        if key.to_ascii_lowercase().contains("password") {
+                            *entry = serde_json::Value::String("<hidden>".into());
+                        } else {
+                            mask(entry);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(mask),
+                _ => {}
+            }
+        }
+        match serde_json::to_value(self) {
+            Ok(mut value) => {
+                mask(&mut value);
+                write!(f, "Command({value})")
+            }
+            Err(_) => f.write_str("Command(<unprintable>)"),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -753,6 +803,15 @@ pub struct TaskSummary {
     /// Informational detail for task properties (for example the unverified-size notice).
     #[serde(default)]
     pub notice: Option<String>,
+    /// Typed failure class of the last error (`dns`, `connect_refused`,
+    /// `connect_timeout`, `tls`, `read_timeout`, `http_status`, `disk`, `auth`,
+    /// `proxy_config`, `network`, `other`); absent while the task has no error.
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    /// The `auth_required` challenge came from the proxy (407), so the
+    /// credentials to supply are the proxy's (`daemon proxy-login`).
+    #[serde(default)]
+    pub auth_proxy: bool,
 }
 
 fn main_queue_id() -> i64 {
@@ -919,6 +978,13 @@ pub struct Reply {
     /// Per-task outcome of `TaskBulk`.
     #[serde(default)]
     pub bulk: Option<BulkReport>,
+    /// How the proxy setting resolves right now (`GetProxy`), for example the
+    /// imported OS settings or "PAC not supported"; never carries credentials.
+    #[serde(default)]
+    pub proxy_note: Option<String>,
+    /// IPC protocol number; set by the `Hello` reply.
+    #[serde(default)]
+    pub protocol: Option<u32>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -972,6 +1038,8 @@ impl Reply {
             daemon_version: None,
             temp_dir: None,
             bulk: None,
+            proxy_note: None,
+            protocol: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -1005,6 +1073,8 @@ impl Reply {
             daemon_version: None,
             temp_dir: None,
             bulk: None,
+            proxy_note: None,
+            protocol: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -1047,6 +1117,8 @@ impl Reply {
             daemon_version: None,
             temp_dir: None,
             bulk: None,
+            proxy_note: None,
+            protocol: None,
         }
     }
 }
@@ -1377,6 +1449,19 @@ mod tests {
         assert!(!bad_bitrate.valid("opus"));
         let sidecar = MediaMode::Subtitles { track: 0 };
         assert!(sidecar.valid("srt") && sidecar.valid("vtt") && !sidecar.valid("mp3"));
+    }
+
+    #[test]
+    fn command_debug_hides_passwords() {
+        for command in [
+            Command::LoginSave { pattern: "http://h/".into(), username: "u".into(), password: "hunter2".into(), enabled: true },
+            Command::TaskProvideLogin { task_id: 1, username: "u".into(), password: "hunter2".into(), remember: false },
+            Command::ProxyLogin { username: "u".into(), password: "hunter2".into() },
+        ] {
+            let text = format!("{command:?}");
+            assert!(!text.contains("hunter2") && text.contains("<hidden>"), "{text}");
+        }
+        assert!(format!("{:?}", Command::GetProxy).contains("get_proxy"));
     }
 
     #[test]

@@ -847,6 +847,7 @@ fn remove_locked(inner: &mut crate::Inner, task_id: i64, delete_partial: bool) -
         }
         inner.db.execute_batch("RELEASE remove_one")?;
         inner.queue_interrupted.remove(&task_id);
+    inner.task_logins.remove(&task_id);
         if let (true, false, Some((output, status, temp))) = (delete_partial, shared, row) {
             if status != "complete" {
                 for path in crate::owned_partial_paths(Path::new(&output), temp.as_deref()) {

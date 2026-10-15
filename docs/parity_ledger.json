@@ -14,12 +14,12 @@
       "partial": 10
     },
     "idm_behavior_review.md": {
-      "partial": 34,
-      "missing": 5
+      "partial": 36,
+      "missing": 3
     }
   },
   "source_sha256": {
-    "tests/integration/contracts_behavior.py": "1600f5195e8f693c0c99fe4243b23e1b7ebbc1b26b5605f7263b41f55bca2ede"
+    "tests/integration/contracts_behavior.py": "ec7123fe0001fd2eabf1b6572703226a50dd452d2d047237d64aefe22690bcbf"
   },
   "contracts": [
     {
@@ -133,11 +133,16 @@
       "id": "N11",
       "title": "Authentication retries and expiry",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, no automatic retry (queue retry policy excludes 401/407); Basic auth implemented via credential store (N10); `TaskProvideLogin` IPC accepts credentials (file or stdin) and requeues; wrong credentials recorded as `auth_required` again, not failed. No Digest/NTLM negotiation, no password-expiry workflow, no proxy auth (407). [Integration fixture](../tests/integration/credentials.py) covers challenge→auth_required, requeue, wrong password, disabled entry, stdin, secret handling.",
+      "current_behavior": "Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, no automatic retry (queue retry policy excludes 401/407); Basic auth implemented via credential store (N10); `TaskProvideLogin` IPC accepts credentials (file or stdin) and requeues; wrong credentials recorded as `auth_required` again, not failed. Digest (RFC 7616: MD5, SHA-256 and their -sess forms, qop=auth, per-request nc/cnonce, stale=true renewal) is implemented in the engine alongside Basic: the daemon hands the login to the engine, which answers the server's own challenge (no preemptive Basic), caches the scheme, and gives every request, ranged ones included, its own Authorization; a repeated 401 is final, so wrong credentials never loop. `TaskProvideLogin` credentials are kept in memory for that task even without `--remember`. No NTLM/Negotiate, no password-expiry workflow, no `auth-int`. Proxy 407: see N23. [Digest fixture](../tests/integration/digest_auth.py) and RFC 2617/7616 unit vectors. [Integration fixture](../tests/integration/credentials.py) covers challenge→auth_required, requeue, wrong password, disabled entry, stdin, secret handling.",
       "status": "partial",
       "test_refs": [
+        "tests/integration/digest_auth.py",
         "tests/integration/credentials.py",
-        "crates/xdm-daemon/src/credentials.rs"
+        "tests/integration/auth_harness.py",
+        "crates/xdm-http/src/digest.rs",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/credentials.rs",
+        "crates/xdm-daemon/src/main.rs"
       ]
     },
     {
@@ -206,10 +211,16 @@
       "id": "N17",
       "title": "Timeouts, DNS and diagnostics",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: blocking client has30-second request timeout; network errors propagate. No separate DNS/connect/read-idle limits or structured diagnostics. [Core contracts](../tests/integration/contracts_core.py) `test_N17_timeouts_and_refusals` exercises refusal, NXDOMAIN, and stalled-server timeout.",
+      "current_behavior": "Partial: blocking client has30-second request timeout; network errors propagate. Failures are classified into a typed `error_kind` (`dns`, `connect_refused`, `connect_timeout`, `tls`, `read_timeout`, `http_status`, `disk`, `auth`, `proxy_config`, `network`, `other`) stored on tasks (`#[serde(default)]`) and shown in task details (`notice`). The connect budget ends just before the stall timeout so a hung connect is distinct from a silent server. [Rust fixtures](../crates/xdm-http/tests/diagnostics.rs) and [daemon fixture](../tests/integration/diagnostics.py) cover each class including self-signed TLS. [Core contracts](../tests/integration/contracts_core.py) `test_N17_timeouts_and_refusals` exercises refusal, NXDOMAIN, and stalled-server timeout.",
       "status": "partial",
       "test_refs": [
-        "tests/integration/contracts_core.py"
+        "tests/integration/diagnostics.py",
+        "tests/integration/contracts_core.py",
+        "crates/xdm-http/tests/diagnostics.rs",
+        "tests/integration/auth_harness.py",
+        "crates/xdm-http/src/diagnostics.rs",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/main.rs"
       ]
     },
     {
@@ -264,11 +275,16 @@
       "id": "N23",
       "title": "Manual per-protocol proxy",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http and https targets (HTTP proxy, HTTPS CONNECT, credentials in URL user info); CLI `--proxy`. Fixture routes a 4-connection transfer through a logging forward proxy. No daemon/GUI settings model, no FTP proxy, no 407 prompt. [Engine fixture](../tests/integration/http_engine.py) and [request_context fixture](../tests/integration/request_context.py) verify HTTP proxy, HTTPS CONNECT, and persisted manual proxy routing.",
+      "current_behavior": "Partial (2026-10-13): engine `Proxy::Manual` takes separate proxy URLs for http and https targets (HTTP proxy, HTTPS CONNECT, credentials in URL user info); CLI `--proxy`. Fixture routes a 4-connection transfer through a logging forward proxy. Proxy credentials are stored in the credential store (`daemon proxy-login USER PASSWORD_FILE`), never in the proxy URL, settings or exports (a URL with user info is split on `SetProxy` and on daemon start); a 407 (plain response or CONNECT refusal) parks the task in `auth_required` with `auth_proxy` and the proxy realm, and `proxy-login` requeues it. Only Basic proxy authentication is sent (reqwest limitation: no Digest/NTLM proxy auth). No FTP proxy, no GUI. [Proxy-auth fixture](../tests/integration/proxy_auth.py). [Engine fixture](../tests/integration/http_engine.py) and [request_context fixture](../tests/integration/request_context.py) verify HTTP proxy, HTTPS CONNECT, and persisted manual proxy routing.",
       "status": "partial",
       "test_refs": [
+        "tests/integration/proxy_auth.py",
         "tests/integration/http_engine.py",
-        "tests/integration/request_context.py"
+        "tests/integration/request_context.py",
+        "tests/integration/auth_harness.py",
+        "crates/xdm-http/src/lib.rs",
+        "crates/xdm-daemon/src/credentials.rs",
+        "crates/xdm-daemon/src/main.rs"
       ]
     },
     {
@@ -295,9 +311,13 @@
       "id": "N26",
       "title": "System proxy/PAC/WPAD",
       "source_doc": "idm_core_queue_contracts.md",
-      "current_behavior": "Partial: `Proxy::System` uses proxy environment variables only (fixture verifies they are honored and that `--no-proxy` ignores them). No OS settings import, PAC evaluation or WPAD.",
+      "current_behavior": "Partial: `Proxy::System` uses proxy environment variables only (fixture verifies they are honored and that `--no-proxy` ignores them). `system` mode now also imports GNOME/GTK settings (`gsettings list-recursively org.gnome.system.proxy`, bounded to 2 s), KDE `kioslaverc`, and on Windows HKCU Internet Settings (ProxyEnable/ProxyServer/ProxyOverride/AutoConfigURL; compile-checked only), including ignore-hosts. A PAC URL or WPAD discovery is recorded and fails the task with \"PAC not supported\" (`error_kind` `proxy_config`) instead of silently going direct; `daemon proxy get` reports the resolution in `proxy_note`. No PAC evaluation (no JS engine added). [System-proxy fixture](../tests/integration/system_proxy.py) fakes `gsettings` and `kioslaverc`.",
       "status": "partial",
-      "test_refs": []
+      "test_refs": [
+        "tests/integration/system_proxy.py",
+        "tests/integration/auth_harness.py",
+        "crates/xdm-http/src/sysproxy.rs"
+      ]
     },
     {
       "id": "N27",
@@ -1582,14 +1602,14 @@
       "title": "Crawler supports manual login, excludes logout patterns, uses relative folders a",
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "grabber.crawl: pending; grabber.destination: pending; grabber.project: pending",
-      "status": "missing",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_behavior.py"
       ],
       "behavior_suite": {
         "test_function": "test_grabber_auth_and_offline",
-        "result": "xfail",
-        "reason": "exclude_patterns filter collected files only so logout pages are still crawled, and saved HTML is stored verbatim without local link rewriting"
+        "result": "pass",
+        "reason": null
       }
     },
     {
@@ -1690,14 +1710,14 @@
       "title": "Downloaded M3U can offer its MP3 links as one download or a batch, separate from",
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; browser.all_links: pending",
-      "status": "missing",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_behavior.py"
       ],
       "behavior_suite": {
         "test_function": "test_playlist_link_expansion",
-        "result": "xfail",
-        "reason": "list import treats every non-comment line as a task so HLS media playlists expand into segment tasks (no HLS tag detection)"
+        "result": "pass",
+        "reason": null
       }
     },
     {

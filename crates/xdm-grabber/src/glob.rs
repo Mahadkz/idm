@@ -37,6 +37,29 @@ pub fn matches_any(patterns: &[String], text: &str) -> bool {
     patterns.iter().any(|pattern| matches(pattern, text))
 }
 
+/// Like `matches_any`, also trying the percent-decoded form of `url`
+/// (repeatedly, so `%256F` cannot hide a character either), so an encoded
+/// `/log%6Fut` cannot slip past a `*logout*` pattern.
+pub fn matches_any_url(patterns: &[String], url: &str) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let mut form = url.to_string();
+    for _ in 0..4 {
+        if matches_any(patterns, &form) {
+            return true;
+        }
+        let decoded = percent_encoding::percent_decode_str(&form)
+            .decode_utf8_lossy()
+            .into_owned();
+        if decoded == form {
+            return false;
+        }
+        form = decoded;
+    }
+    matches_any(patterns, &form)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +81,15 @@ mod tests {
         assert!(matches("", ""));
         assert!(!matches("", "x"));
         assert!(!matches("*.zip", "http://host/a.zi"));
+    }
+
+    #[test]
+    fn encoded_urls_are_matched_in_decoded_form() {
+        let patterns = vec!["*logout*".to_string()];
+        assert!(matches_any_url(&patterns, "http://h/log%6Fut"));
+        assert!(matches_any_url(&patterns, "http://h/log%256Fut"));
+        assert!(!matches_any(&patterns, "http://h/log%6Fut"));
+        assert!(!matches_any_url(&patterns, "http://h/login"));
     }
 
     #[test]

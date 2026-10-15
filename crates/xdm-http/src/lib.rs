@@ -5,7 +5,7 @@ use reqwest::blocking::{Client, Response};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
     HeaderMap, HeaderName, HeaderValue, IF_RANGE, LAST_MODIFIED, PROXY_AUTHENTICATE, RANGE, RETRY_AFTER,
-    WWW_AUTHENTICATE,
+    WWW_AUTHENTICATE, AUTHORIZATION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,12 +25,24 @@ pub use governor::{
     pattern_matches, resolve,
 };
 use governor::pace;
+mod diagnostics;
+mod digest;
+mod sysproxy;
+pub use diagnostics::{Classified, ErrorKind, classify, classify_reqwest};
+pub use sysproxy::{Pac, SystemProxy, status as system_proxy_status};
+use diagnostics::classified;
+use digest::AuthState;
+pub use digest::Login;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub url: String,
+    /// Origin credentials answered to 401 challenges (Basic or Digest, N11).
+    pub login: Option<Login>,
+    /// Credentials for a manual proxy, sent as `Proxy-Authorization: Basic` (N23).
+    pub proxy_login: Option<Login>,
     pub output: PathBuf,
     pub connections: usize,
     pub restart: bool,
@@ -73,6 +85,8 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             url: String::new(),
+            login: None,
+            proxy_login: None,
             output: PathBuf::new(),
             connections: 8,
             restart: false,
@@ -361,6 +375,7 @@ struct Request {
     url: String,
     method: Method,
     body: Option<Vec<u8>>,
+    auth: Option<Arc<AuthState>>,
 }
 
 impl Request {
@@ -382,10 +397,57 @@ impl Request {
             url: options.url.clone(),
             method,
             body: options.body.clone(),
+            auth: options.login.clone().map(|login| Arc::new(AuthState::new(login))),
         })
     }
 
+    /// Sends one request and answers a 401 challenge with the saved login. Every
+    /// request, ranged ones included, carries its own `Authorization`; a repeated 401
+    /// is returned to the caller instead of being retried.
     fn send(
+        &self,
+        client: &Client,
+        range: Option<String>,
+        validator: Option<&str>,
+    ) -> reqwest::Result<Response> {
+        let Some(auth) = &self.auth else {
+            return self.send_once(client, range, validator);
+        };
+        let origin = reqwest::Url::parse(&self.url).ok().map(|url| url.origin());
+        let mut sent = auth.has_scheme();
+        let mut response = self.send_once(client, range.clone(), validator)?;
+        for _ in 0..2 {
+            if response.status() != StatusCode::UNAUTHORIZED {
+                if sent && response.status().is_success() {
+                    auth.confirm();
+                }
+                return Ok(response);
+            }
+            // Credentials belong to the transfer's origin only.
+            if origin.as_ref() != Some(&response.url().origin()) {
+                return Ok(response);
+            }
+            let values: Vec<String> = response
+                .headers()
+                .get_all(WWW_AUTHENTICATE)
+                .iter()
+                .filter_map(|value| value.to_str().ok().map(str::to_owned))
+                .collect();
+            match auth.answer(&values, response.url().as_str(), sent) {
+                digest::Answer::GiveUp => return Ok(response),
+                digest::Answer::Retry => {
+                    sent = true;
+                    response = self.send_once(client, range.clone(), validator)?;
+                }
+            }
+        }
+        if sent && response.status().is_success() {
+            auth.confirm();
+        }
+        Ok(response)
+    }
+
+    fn send_once(
         &self,
         client: &Client,
         range: Option<String>,
@@ -402,6 +464,9 @@ impl Request {
         }
         if let Some(body) = &self.body {
             request = request.body(body.clone());
+        }
+        if let Some(value) = self.auth.as_ref().and_then(|auth| auth.header(self.method.as_str())) {
+            request = request.header(AUTHORIZATION, value);
         }
         request.send()
     }
@@ -751,13 +816,37 @@ fn challenge_error(response: &Response) -> Option<Box<dyn Error + Send + Sync>> 
         }
         _ => return None,
     };
-    let value = response.headers().get(header_name)?.to_str().ok()?;
+    let Some(value) = response.headers().get(header_name).and_then(|v| v.to_str().ok()) else {
+        // A proxy that answers 407 without naming a scheme still needs credentials.
+        return (status == StatusCode::PROXY_AUTHENTICATION_REQUIRED).then(|| {
+            Box::new(AuthRequired(AuthChallenge {
+                status: 407,
+                scheme: "Basic".into(),
+                realm: None,
+            })) as Box<dyn Error + Send + Sync>
+        });
+    };
     let (scheme, realm) = parse_challenge(value)?;
     Some(Box::new(AuthRequired(AuthChallenge {
         status: status.as_u16(),
         scheme,
         realm,
     })))
+}
+
+/// A CONNECT tunnel refused with 407 reaches the client as a transport error without
+/// the proxy's headers, so the realm is unknown.
+fn proxy_auth_failure(error: &reqwest::Error) -> Option<Box<dyn Error + Send + Sync>> {
+    let text = describe(error).to_ascii_lowercase();
+    // hyper-util words a tunnel's 407 as "proxy authorization required".
+    (text.contains("proxy authentication required") || text.contains("proxy authorization required"))
+        .then(|| {
+            Box::new(AuthRequired(AuthChallenge {
+                status: 407,
+                scheme: "Basic".into(),
+                realm: None,
+            })) as Box<dyn Error + Send + Sync>
+        })
 }
 
 /// Strict Content-Range parser. Returns inclusive start/end and complete size.
@@ -1043,10 +1132,79 @@ fn retryable(status: StatusCode) -> bool {
 }
 
 
+/// Applies the proxy mode (and manual-proxy credentials) to a client builder. Shared
+/// with the daemon's own HTTP checks so every request honors one routing policy.
+pub fn apply_proxy(
+    mut builder: reqwest::blocking::ClientBuilder,
+    proxy: &Proxy,
+    login: Option<&Login>,
+) -> Result<reqwest::blocking::ClientBuilder> {
+    let manual = |builder: reqwest::blocking::ClientBuilder,
+                  http: &Option<String>,
+                  https: &Option<String>,
+                  bypass: &[String]| {
+        let mut builder = builder.no_proxy();
+        let bypass = reqwest::NoProxy::from_string(&bypass.join(","));
+        let configure = |url: &str, secure: bool| -> Result<reqwest::Proxy> {
+            let socks = url.starts_with("socks");
+            let (url, credentials) = match login {
+                Some(login) if socks => (with_userinfo(url, login), None),
+                other => (url.to_owned(), other),
+            };
+            let proxy = if secure { reqwest::Proxy::https(&url)? } else { reqwest::Proxy::http(&url)? };
+            let proxy = match credentials {
+                Some(login) => proxy.basic_auth(&login.username, &login.password),
+                None => proxy,
+            };
+            Ok(proxy.no_proxy(bypass.clone()))
+        };
+        if let Some(url) = http {
+            builder = builder.proxy(configure(url, false)?);
+        }
+        if let Some(url) = https {
+            builder = builder.proxy(configure(url, true)?);
+        }
+        Ok::<_, Box<dyn Error + Send + Sync>>(builder)
+    };
+    match proxy {
+        Proxy::System => match sysproxy::resolve() {
+            sysproxy::Resolved::Environment | sysproxy::Resolved::Direct => {}
+            sysproxy::Resolved::Settings(found) => {
+                if found.pac.is_some() {
+                    return Err(classified(
+                        ErrorKind::ProxyConfig,
+                        format!(
+                            "{}; choose a manual proxy or direct connections in the proxy settings",
+                            found.describe()
+                        ),
+                    ));
+                }
+                builder = manual(builder, &found.http, &found.https, &found.bypass)?;
+            }
+        },
+        Proxy::Direct => builder = builder.no_proxy(),
+        Proxy::Manual { http, https, bypass } => builder = manual(builder, http, https, bypass)?,
+    }
+    Ok(builder)
+}
+
+/// URL with percent-encoded user info (SOCKS credentials travel in the URL).
+fn with_userinfo(url: &str, login: &Login) -> String {
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    let (scheme, rest) = url.split_once("://").unwrap_or(("socks5", url));
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    format!(
+        "{scheme}://{}:{}@{rest}",
+        utf8_percent_encode(&login.username, NON_ALPHANUMERIC),
+        utf8_percent_encode(&login.password, NON_ALPHANUMERIC)
+    )
+}
+
 fn client(
     headers: &[(String, String)],
     method: &Method,
     proxy: &Proxy,
+    proxy_login: Option<&Login>,
     stall_timeout: Duration,
 ) -> Result<Client> {
     let mut map = HeaderMap::new();
@@ -1105,30 +1263,18 @@ fn client(
     // The blocking client has no `read_timeout` (that builder is async-only), but its
     // `timeout` is re-armed for every body read, so it doubles as the N31 socket idle
     // timeout; it also bounds connect and response headers, where no byte flows either.
-    let mut builder = Client::builder()
+    // The connect budget ends just before the overall one so a connection attempt that
+    // never completes is told apart from a server that stalls after connecting (N17).
+    let connect = stall_timeout
+        .saturating_sub(Duration::from_millis(250).min(stall_timeout / 4))
+        .max(Duration::from_millis(1));
+    let builder = Client::builder()
         .timeout(stall_timeout)
+        .connect_timeout(connect)
         .default_headers(map)
         .referer(false)
         .redirect(policy);
-    match proxy {
-        Proxy::System => {}
-        Proxy::Direct => builder = builder.no_proxy(),
-        Proxy::Manual {
-            http,
-            https,
-            bypass,
-        } => {
-            builder = builder.no_proxy();
-            let bypass = reqwest::NoProxy::from_string(&bypass.join(","));
-            if let Some(url) = http {
-                builder = builder.proxy(reqwest::Proxy::http(url)?.no_proxy(bypass.clone()));
-            }
-            if let Some(url) = https {
-                builder = builder.proxy(reqwest::Proxy::https(url)?.no_proxy(bypass));
-            }
-        }
-    }
-    Ok(builder.build()?)
+    Ok(apply_proxy(builder, proxy, proxy_login)?.build()?)
 }
 
 fn retry_after(response: &Response) -> Option<Duration> {
@@ -1172,16 +1318,22 @@ fn retry_send(
     stop: &AtomicBool,
 ) -> Result<Response> {
     let mut last = String::new();
+    let mut kind = ErrorKind::Other;
     for attempt in 0..=RETRIES {
         let after = match request.send(client, range.clone(), None) {
             Ok(r) if retryable(r.status()) => {
                 last = format!("HTTP {}", r.status());
+                kind = ErrorKind::HttpStatus;
                 retry_after(&r)
             }
             Ok(r) => return Ok(r),
             Err(e) if e.is_redirect() => return Err(err(describe(&e))),
             Err(e) => {
+                if let Some(proxy_auth) = proxy_auth_failure(&e) {
+                    return Err(proxy_auth);
+                }
                 last = describe(&e);
+                kind = classify_reqwest(&e);
                 None
             }
         };
@@ -1189,7 +1341,7 @@ fn retry_send(
             wait_retry(attempt, after, stop)?;
         }
     }
-    Err(err(format!("request retries exhausted: {last}")))
+    Err(classified(kind, format!("request retries exhausted: {last}")))
 }
 
 /// Opens the resource once, from `offset` to its end, and keeps the response for adoption.
@@ -1693,12 +1845,15 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                     validator.as_deref(),
                 ) {
                     Ok(r) => r,
-                    Err(_) if failures < RETRIES => {
+                    Err(e) if failures < RETRIES && proxy_auth_failure(&e).is_none() => {
                         failures += 1;
                         wait_retry(failures, None, &shared.stop)?;
                         continue;
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        return Err(proxy_auth_failure(&e)
+                            .unwrap_or_else(|| classified(classify_reqwest(&e), describe(&e))))
+                    }
                 };
                 let status = response.status();
                 if status != StatusCode::PARTIAL_CONTENT {
@@ -2056,7 +2211,7 @@ fn run_transfer(
         let _ = fs::remove_file(&meta);
     }
     let request = Request::new(&options)?;
-    let client = client(&options.headers, &request.method, &options.proxy, stall_timeout)?;
+    let client = client(&options.headers, &request.method, &options.proxy, options.proxy_login.as_ref(), stall_timeout)?;
     // GET transfers keep the original header-only identity so older checkpoints stay resumable.
     let context = if request.method == Method::GET && request.body.is_none() {
         serde_json::to_vec(&options.headers)?
@@ -2813,6 +2968,7 @@ mod property_tests {
                 url: "http://example.invalid/f".into(),
                 method: Method::GET,
                 body: None,
+                auth: None,
             },
             file,
             meta,

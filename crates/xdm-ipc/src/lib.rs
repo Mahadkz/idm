@@ -393,6 +393,14 @@ pub enum Command {
     },
     /// Reads the temporary directory into `Reply::temp_dir`.
     GetTempDir,
+    /// Stores the manual proxy's credentials in the daemon's credential store
+    /// (never in the proxy URL) and requeues tasks waiting on a 407.
+    ProxyLogin {
+        username: String,
+        password: String,
+    },
+    /// Forgets the stored proxy credentials.
+    ProxyLoginClear,
 }
 
 fn default_true() -> bool {
@@ -708,6 +716,15 @@ pub struct TaskSummary {
     /// Informational detail for task properties (for example the unverified-size notice).
     #[serde(default)]
     pub notice: Option<String>,
+    /// Typed failure class of the last error (`dns`, `connect_refused`,
+    /// `connect_timeout`, `tls`, `read_timeout`, `http_status`, `disk`, `auth`,
+    /// `proxy_config`, `network`, `other`); absent while the task has no error.
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    /// The `auth_required` challenge came from the proxy (407), so the
+    /// credentials to supply are the proxy's (`daemon proxy-login`).
+    #[serde(default)]
+    pub auth_proxy: bool,
 }
 
 fn main_queue_id() -> i64 {
@@ -871,6 +888,10 @@ pub struct Reply {
     /// Temporary directory setting; set by `GetTempDir`/`SetTempDir` replies.
     #[serde(default)]
     pub temp_dir: Option<String>,
+    /// How the proxy setting resolves right now (`GetProxy`), for example the
+    /// imported OS settings or "PAC not supported"; never carries credentials.
+    #[serde(default)]
+    pub proxy_note: Option<String>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -923,6 +944,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            proxy_note: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -955,6 +977,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            proxy_note: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -996,6 +1019,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            proxy_note: None,
         }
     }
 }

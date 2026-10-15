@@ -16,13 +16,23 @@ use xdm_ipc::LoginSummary;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// One saved login. `pattern` is `scheme://[*.]host[:port][/path prefix]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Login {
     pub id: i64,
     pub pattern: String,
     pub username: String,
     pub password: String,
     pub enabled: bool,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login")
+            .field("pattern", &self.pattern)
+            .field("username", &self.username)
+            .field("password", &"<hidden>")
+            .finish()
+    }
 }
 
 /// A parsed login pattern.
@@ -188,6 +198,27 @@ pub fn basic_token(username: &str, password: &str) -> String {
     base64_encode(format!("{username}:{password}").as_bytes())
 }
 
+/// Splits `user:password@` out of a proxy URL so the secret goes to the credential
+/// store and never into settings or exports. Returns the cleaned URL and the
+/// decoded credentials when the URL carried any.
+pub fn split_proxy_userinfo(url: &str) -> (String, Option<(String, String)>) {
+    use percent_encoding::percent_decode_str;
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return (url.to_owned(), None);
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return (url.to_owned(), None);
+    };
+    let (userinfo, tail) = (&rest[..at], &rest[at + 1..]);
+    let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    let decode = |text: &str| percent_decode_str(text).decode_utf8_lossy().into_owned();
+    (
+        format!("{scheme}://{tail}"),
+        Some((decode(user), decode(password))),
+    )
+}
+
 /// Fields a saved login carries, so callers can validate before storing.
 pub fn valid_login_fields(username: &str, password: &str) -> bool {
     !username.is_empty()
@@ -197,10 +228,28 @@ pub fn valid_login_fields(username: &str, password: &str) -> bool {
         && !password.chars().any(char::is_control)
 }
 
+/// Credentials of the manual proxy (N23); they never appear in the proxy URL.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProxyCredential {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for ProxyCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyCredential")
+            .field("username", &self.username)
+            .field("password", &"<hidden>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct File {
     version: u32,
     logins: Vec<Login>,
+    #[serde(default)]
+    proxy: Option<ProxyCredential>,
 }
 
 /// In-memory login table with protected at-rest persistence.
@@ -209,6 +258,7 @@ pub struct Store {
     /// `None` keeps the store in memory (test databases).
     path: Option<PathBuf>,
     logins: Vec<Login>,
+    proxy: Option<ProxyCredential>,
     next_id: i64,
 }
 
@@ -218,6 +268,7 @@ impl Store {
         let mut store = Self {
             path,
             logins: Vec::new(),
+            proxy: None,
             next_id: 1,
         };
         let Some(path) = &store.path else {
@@ -240,6 +291,7 @@ impl Store {
             .max()
             .unwrap_or(1);
         store.logins = file.logins;
+        store.proxy = file.proxy;
         Ok(store)
     }
 
@@ -280,6 +332,32 @@ impl Store {
         };
         self.persist()?;
         Ok(id)
+    }
+
+    /// The stored proxy credentials, when any.
+    pub fn proxy_login(&self) -> Option<&ProxyCredential> {
+        self.proxy.as_ref()
+    }
+
+    /// Stores (or replaces) the proxy credentials.
+    pub fn set_proxy_login(&mut self, username: &str, password: &str) -> Result<()> {
+        if !valid_login_fields(username, password) {
+            return Err("username needs 1–128 printable bytes and the password 0–1024".into());
+        }
+        self.proxy = Some(ProxyCredential {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        });
+        self.persist()
+    }
+
+    /// Forgets the proxy credentials; reports whether any were stored.
+    pub fn clear_proxy_login(&mut self) -> Result<bool> {
+        let had = self.proxy.take().is_some();
+        if had {
+            self.persist()?;
+        }
+        Ok(had)
     }
 
     pub fn remove(&mut self, id: i64) -> Result<bool> {
@@ -329,6 +407,7 @@ impl Store {
         let plain = serde_json::to_vec(&File {
             version: 1,
             logins: self.logins.clone(),
+            proxy: self.proxy.clone(),
         })?;
         let sealed = seal(&plain)?;
         let tmp = path.with_extension("json.tmp");
@@ -493,6 +572,33 @@ mod tests {
         ] {
             assert!(parse_pattern(pattern).is_err(), "{pattern}");
         }
+    }
+
+    #[test]
+    fn proxy_userinfo_is_split_out_and_decoded() {
+        assert_eq!(
+            split_proxy_userinfo("http://al%40ice:p%3Aw@proxy.example:3128"),
+            ("http://proxy.example:3128".into(), Some(("al@ice".into(), "p:w".into())))
+        );
+        assert_eq!(split_proxy_userinfo("socks5://bob@h:1"), ("socks5://h:1".into(), Some(("bob".into(), String::new()))));
+        assert_eq!(split_proxy_userinfo("http://h:1/x@y"), ("http://h:1/x@y".into(), None));
+        assert_eq!(split_proxy_userinfo("http://h:1"), ("http://h:1".into(), None));
+    }
+
+    #[test]
+    fn proxy_credentials_persist_sealed_and_hide_from_debug() {
+        let path = std::env::temp_dir().join(format!("xdm-proxycred-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::load(Some(path.clone())).unwrap();
+        store.set_proxy_login("pu", "pp-secret").unwrap();
+        assert!(!format!("{store:?}").contains("pp-secret"));
+        let reloaded = Store::load(Some(path.clone())).unwrap();
+        assert_eq!(reloaded.proxy_login().map(|c| c.password.as_str()), Some("pp-secret"));
+        assert!(Store::load(Some(path.clone())).unwrap().summaries().is_empty());
+        let mut again = reloaded;
+        assert!(again.clear_proxy_login().unwrap());
+        assert!(Store::load(Some(path.clone())).unwrap().proxy_login().is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

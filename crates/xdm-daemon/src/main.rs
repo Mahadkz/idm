@@ -80,6 +80,9 @@ pub(crate) struct Inner {
     pub(crate) quota: bandwidth::Quota,
     /// Saved site logins for HTTP authentication (N10).
     pub(crate) credentials: credentials::Store,
+    /// Credentials typed for one task (`TaskProvideLogin` without `--remember`):
+    /// kept in memory only, never persisted, dropped when the task completes.
+    pub(crate) task_logins: HashMap<i64, xdm_http::Login>,
     /// Live crawls keyed by their site-grab request ID.
     pub(crate) grabs: HashMap<String, GrabHandle>,
     /// Crawls waiting for the worker loop, which owns the service handle.
@@ -352,6 +355,10 @@ struct Work {
     output: PathBuf,
     kind: WorkKind,
     proxy: Proxy,
+    /// Site login answered to 401 challenges by the HTTP engine (Basic/Digest, N11).
+    login: Option<xdm_http::Login>,
+    /// Credentials of the manual proxy, from the credential store (N23).
+    proxy_login: Option<xdm_http::Login>,
     /// N31 idle cap handed to the HTTP engine for this task.
     stall_timeout: Duration,
     stop: Arc<AtomicBool>,
@@ -424,7 +431,7 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
     tail: &str,
     params: P,
 ) -> Result<Vec<TaskSummary>> {
-    let mut stmt = inner.db.prepare(&format!("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason,size_unverified,temp_dir FROM tasks {tail}"))?;
+    let mut stmt = inner.db.prepare(&format!("SELECT id,url,output,status,priority,error,kind,category,rate_limit,connections,created_at,updated_at,media_video,media_audio,queue_id,history_queue_id,retry_count,retry_at,position,auth_realm,restart_reason,size_unverified,temp_dir,error_kind,auth_proxy FROM tasks {tail}"))?;
     let tasks = stmt
         .query_map(params, |row| {
             let output: String = row.get(2)?;
@@ -432,6 +439,9 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
             let id: i64 = row.get(0)?;
             let temp_dir: Option<String> = row.get(22)?;
             let size_unverified = row.get::<_, i64>(21)? != 0;
+            let error: Option<String> = row.get(5)?;
+            // A kind only describes a live error text.
+            let error_kind: Option<String> = row.get::<_, Option<String>>(23)?.filter(|_| error.is_some());
             let live = inner
                 .active
                 .get(&id)
@@ -472,7 +482,7 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                 output,
                 status,
                 priority: row.get(4)?,
-                error: row.get(5)?,
+                error,
                 downloaded: live
                     .map(|p| p.downloaded)
                     .or(recording.map(|(bytes, _)| bytes))
@@ -499,11 +509,24 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                 auth_realm: row.get(19)?,
                 restart_reason: row.get(20)?,
                 size_unverified,
-                notice: size_unverified.then(|| UNVERIFIED_NOTICE.to_owned()),
+                notice: size_unverified.then(|| UNVERIFIED_NOTICE.to_owned()).or_else(|| {
+                    error_kind.as_deref().and_then(failure_label).map(|label| format!("Failure class: {label}"))
+                }),
+                error_kind,
+                auth_proxy: row.get::<_, i64>(24)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(tasks)
+}
+
+/// Human label of a stored `error_kind` for task details.
+fn failure_label(kind: &str) -> Option<&'static str> {
+    use xdm_http::ErrorKind::*;
+    [Dns, ConnectRefused, ConnectTimeout, Tls, ReadTimeout, HttpStatus, Disk, Auth, ProxyConfig, Network, Other]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == kind)
+        .map(|candidate| candidate.label())
 }
 
 fn request_was_removed(db: &Connection, request_id: &str) -> rusqlite::Result<bool> {
@@ -868,6 +891,8 @@ impl Service {
             ("last_try_at", "INTEGER"),
             ("size_done", "INTEGER"),
             ("size_total", "INTEGER"),
+            ("error_kind", "TEXT"),
+            ("auth_proxy", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 db.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {name} {definition}"))?;
@@ -965,6 +990,25 @@ impl Service {
             (database.as_os_str() != ":memory:")
                 .then(|| database.parent().unwrap_or(Path::new(".")).join("credentials.json")),
         )?;
+        let mut credentials = credentials;
+        let mut proxy = proxy;
+        // Older databases may hold `user:password@` inside the proxy URL; move it
+        // to the credential store and rewrite the setting without it.
+        if let Proxy::Manual { http, https, .. } = &mut proxy {
+            let mut moved = None;
+            for url in http.iter_mut().chain(https.iter_mut()) {
+                let (clean, found) = credentials::split_proxy_userinfo(url);
+                if found.is_some() {
+                    *url = clean;
+                    moved = found;
+                }
+            }
+            if let Some((user, password)) = moved {
+                if credentials.set_proxy_login(&user, &password).is_ok() {
+                    set_setting(&db, "proxy", &serde_json::to_string(&proxy)?)?;
+                }
+            }
+        }
         db.execute(
             "UPDATE tasks SET status='queued', error=NULL WHERE status IN ('running','pausing')",
             [],
@@ -990,6 +1034,7 @@ impl Service {
                 governor,
                 quota,
                 credentials,
+                task_logins: HashMap::new(),
                 grabs: HashMap::new(),
                 pending_grabs: Vec::new(),
                 pending_syncs: Vec::new(),
@@ -1134,8 +1179,19 @@ impl Service {
                 )
             }
             Command::SetProxy { proxy } => {
-                let parsed: Proxy =
+                let mut parsed: Proxy =
                     serde_json::from_value(serde_json::to_value(&proxy)?).map_err(|e| e.to_string())?;
+                // Credentials in a proxy URL move to the credential store (N23).
+                let mut extracted = None;
+                if let Proxy::Manual { http, https, .. } = &mut parsed {
+                    for url in http.iter_mut().chain(https.iter_mut()) {
+                        let (clean, found) = credentials::split_proxy_userinfo(url);
+                        if found.is_some() {
+                            *url = clean;
+                            extracted = found;
+                        }
+                    }
+                }
                 if let Proxy::Manual { http, https, .. } = &parsed {
                     for url in http.iter().chain(https.iter()) {
                         if !PROXY_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
@@ -1151,6 +1207,11 @@ impl Service {
                     .inner
                     .lock()
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
+                if let Some((user, password)) = extracted {
+                    if let Err(error) = inner.credentials.set_proxy_login(&user, &password) {
+                        return Ok(Reply::error(format!("proxy credentials rejected: {error}")));
+                    }
+                }
                 set_setting(&inner.db, "proxy", &stored)?;
                 inner.proxy = stored.clone();
                 let mut reply = Reply::accepted(0);
@@ -1164,7 +1225,27 @@ impl Service {
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
                 let mut reply = Reply::accepted(0);
                 reply.proxy = serde_json::from_str(&inner.proxy).ok();
+                let mode: Proxy = serde_json::from_str(&inner.proxy).unwrap_or_default();
+                reply.proxy_note = Some(match mode {
+                    Proxy::System => format!("system: {}", xdm_http::system_proxy_status()),
+                    Proxy::Direct => "direct connections".into(),
+                    Proxy::Manual { .. } => match inner.credentials.proxy_login() {
+                        Some(stored) => format!("manual proxy with stored credentials for {}", stored.username),
+                        None => "manual proxy without credentials".into(),
+                    },
+                });
                 Ok(reply)
+            }
+            Command::ProxyLogin { username, password } => self.proxy_login(username, password),
+            Command::ProxyLoginClear => {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                if !inner.credentials.clear_proxy_login()? {
+                    return Ok(Reply::error("no proxy credentials are stored"));
+                }
+                Ok(Reply::accepted(0))
             }
             Command::SetStallTimeout { seconds } => {
                 if !STALL_TIMEOUT_RANGE.contains(&seconds) {
@@ -1783,6 +1864,7 @@ impl Service {
                     // own origin only, unless the submitter set a header
                     // already. Media manifests replay them the same way so
                     // ffmpeg opens every chain document authenticated.
+                    let mut found: Option<xdm_http::Login> = None;
                     if (kind == "http" || kind == "media")
                         && !headers
                             .iter()
@@ -1790,10 +1872,25 @@ impl Service {
                         && let Ok(parsed) = Url::parse(&url)
                         && let Some(login) = inner.credentials.find(&parsed)
                     {
-                        headers.push((
-                            "Authorization".into(),
-                            format!("Basic {}", credentials::basic_token(&login.username, &login.password)),
-                        ));
+                        if kind == "http" {
+                            // The engine answers the server's actual challenge
+                            // (Basic or Digest) so a password is never sent in a
+                            // scheme the server did not ask for.
+                            found = Some(xdm_http::Login {
+                                username: login.username.clone(),
+                                password: login.password.clone(),
+                            });
+                        } else {
+                            headers.push((
+                                "Authorization".into(),
+                                format!("Basic {}", credentials::basic_token(&login.username, &login.password)),
+                            ));
+                        }
+                    }
+                    if kind == "http"
+                        && let Some(typed) = inner.task_logins.get(&id)
+                    {
+                        found = Some(typed.clone());
                     }
                     let stored_mode = if kind == "media" {
                         Some(
@@ -1863,6 +1960,11 @@ impl Service {
                         output: PathBuf::from(output),
                         kind,
                         proxy: serde_json::from_str(&inner.proxy).unwrap_or_default(),
+                        login: found,
+                        proxy_login: inner.credentials.proxy_login().map(|stored| xdm_http::Login {
+                            username: stored.username.clone(),
+                            password: stored.password.clone(),
+                        }),
                         stall_timeout: Duration::from_secs(inner.stall_timeout),
                         stop,
                         stop_requested,
@@ -1946,6 +2048,8 @@ impl Service {
                         });
                         download_ex(
                             Options {
+                                login: work.login.clone(),
+                                proxy_login: work.proxy_login.clone(),
                                 url: work.url,
                                 output: work.output,
                                 connections,
@@ -2069,12 +2173,24 @@ impl Service {
                         daemon_stopped(&work.stop, &work.stop_requested),
                         interrupted_for_queue,
                     );
+                    // N17: the failure class is kept typed next to the message.
+                    let error_kind = match &result {
+                        Err(e) if status != "paused" && status != "queued" => {
+                            Some(xdm_http::classify(e.as_ref()).as_str())
+                        }
+                        _ => None,
+                    };
+                    let proxy_challenge = challenge.as_ref().is_some_and(|c| c.status == 407);
                     let _ = inner.finish_task(
                         work.id,
                         status,
                         error,
                         challenge.and_then(|challenge| challenge.realm),
                         reason,
+                    );
+                    let _ = inner.db.execute(
+                        "UPDATE tasks SET error_kind=?1,auth_proxy=?2 WHERE id=?3",
+                        params![error_kind, i64::from(proxy_challenge), work.id],
                     );
                     inner.active.remove(&work.id);
                     service.wake.notify_one();
@@ -2164,6 +2280,7 @@ impl Inner {
             }
         }
         if status == "complete" {
+            self.task_logins.remove(&id);
             self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=CASE WHEN COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0) THEN queue_id ELSE 0 END,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
             // Replay secrets are not kept once a task is done, except where a sync
             // queue still revalidates it with them.
@@ -3230,11 +3347,14 @@ mod tests {
         let injected = submit(&service, "auth-inject");
         let work = service.next_work().unwrap();
         assert_eq!(work.id, injected);
-        let WorkKind::Http { headers, .. } = work.kind else { unreachable!() };
+        // HTTP tasks hand the login to the engine, which answers the server's own
+        // challenge (Basic or Digest); no scheme is preselected as a header.
         assert_eq!(
-            headers,
-            vec![("Authorization".into(), format!("Basic {}", credentials::basic_token("alice", "s3cret")))]
+            work.login,
+            Some(xdm_http::Login { username: "alice".into(), password: "s3cret".into() })
         );
+        let WorkKind::Http { headers, .. } = work.kind else { unreachable!() };
+        assert!(headers.is_empty());
         // A submitter-provided Authorization header is never overridden, and a
         // disabled login does not apply.
         service
@@ -3260,6 +3380,7 @@ mod tests {
         let work = service.next_work().unwrap();
         assert_eq!(work.id, explicit);
         let WorkKind::Http { headers, .. } = work.kind else { unreachable!() };
+        assert_eq!(work.login, None);
         assert_eq!(headers, vec![("Authorization".into(), "Bearer supplied".into())]);
         // With no matching enabled login the task leaves with clean headers.
         let plain = submit(&service, "auth-plain");

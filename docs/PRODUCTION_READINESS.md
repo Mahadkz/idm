@@ -35,11 +35,11 @@ Match IDM's structure and workflows using the mapped dialogs (`docs/idm_control_
 | Item | Status | Evidence |
 |---|---|---|
 | CI on every push: Linux build + all suites (Xvfb), Windows build + tests, browser tests, warnings-as-errors, Windows cross-build | Not started | |
-| Versioning: `--version` on every binary, IPC protocol version negotiation, schema version and migration tests from every previous release | Not started | |
-| Logging: leveled logs with rotation and size cap, no secrets, log location documented | Not started | |
-| Crash handling: panic hook writes a redacted crash report; daemon restarts cleanly; diagnostics bundle command | Not started | |
-| Single-instance daemon lock, graceful shutdown that checkpoints all transfers, data-directory permissions | Not started | |
-| Database safety: integrity check, backup before migration, recovery from corruption | Not started | |
+| Versioning: `--version` on every binary, IPC protocol version negotiation, schema version and migration tests from every previous release | Partial | `--version` on cli/daemon/gui/native-host and `Hello` handshake with protocol check (tests/integration/ops_hardening.py, xdm-ipc ops tests); schema `user_version` + backup-on-migrate test (daemon `migration_backs_up_old_database_and_keeps_three`). Not done: migration tests from every previous release (only the oldest fixture schema) |
+| Logging: leveled logs with rotation and size cap, no secrets, log location documented | Partial | In-house logger `<data>/logs/xdm-daemon.log` (5 MiB x 3, `XDM_LOG`), redaction tests in xdm-ipc `ops::tests`; ops_hardening.py checks no secret in log. Daemon logs lifecycle/client errors only; log location not yet in user docs |
+| Crash handling: panic hook writes a redacted crash report; daemon restarts cleanly; diagnostics bundle command | Partial | Panic hook writes redacted crash report to `<data>/crash/` (10 kept; unit test), `xdm-cli daemon diagnostics OUT.zip|DIR` (ops_hardening.py). Not exercised: a real daemon panic end to end, GUI hook on a display, automatic daemon restart |
+| Single-instance daemon lock, graceful shutdown that checkpoints all transfers, data-directory permissions | Partial | flock/LockFileEx lock (lock.rs test + ops_hardening.py second daemon refused, stale lock reused), SIGTERM graceful shutdown with resumable checkpoint (ops_hardening.py), data dir 0700 / token 0600 tests. Windows lock, ctrl handler and permissions compile-checked only, untested |
+| Database safety: integrity check, backup before migration, recovery from corruption | Partial | `quick_check` at startup with refusal message (`corrupt_database_is_refused_with_guidance`), backup before migration keeping 3, WAL + synchronous=NORMAL. No automatic corruption recovery (manual restore from backup) |
 | Security: threat model document, all security reviews' findings closed, fuzzing in CI, dependency audit (cargo audit/deny), no secrets in logs/exports/argv | In progress | security reviews in git history |
 | Performance gate: benchmark in CI with regression thresholds; idle CPU/RAM budgets | Partial | bench/ |
 | Packaging: Linux AppImage and .deb, Windows installer (per-user, upgrade/uninstall), extension packages (.zip/.xpi), third-party license notices | Partial | packaging/, install/ |

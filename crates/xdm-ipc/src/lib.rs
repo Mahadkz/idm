@@ -13,6 +13,11 @@ fn default_submit_method() -> String {
     "GET".into()
 }
 
+pub mod ops;
+
+/// IPC protocol number negotiated by `Hello`; bump on incompatible changes.
+pub const PROTOCOL: u32 = 1;
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 /// Replies may be larger than requests (a 2000-row `ListPage`); requests stay
 /// bounded by `MAX_FRAME`.
@@ -393,6 +398,8 @@ pub enum Command {
     },
     /// Reads the temporary directory into `Reply::temp_dir`.
     GetTempDir,
+    /// Version handshake: the reply carries `daemon_version` and `protocol`.
+    Hello { client_version: String, protocol: u32 },
 }
 
 fn default_true() -> bool {
@@ -871,6 +878,9 @@ pub struct Reply {
     /// Temporary directory setting; set by `GetTempDir`/`SetTempDir` replies.
     #[serde(default)]
     pub temp_dir: Option<String>,
+    /// IPC protocol number; set by the `Hello` reply.
+    #[serde(default)]
+    pub protocol: Option<u32>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -923,6 +933,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            protocol: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -955,6 +966,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            protocol: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -996,6 +1008,7 @@ impl Reply {
             truncated: false,
             daemon_version: None,
             temp_dir: None,
+            protocol: None,
         }
     }
 }

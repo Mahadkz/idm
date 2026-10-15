@@ -1114,6 +1114,7 @@ fn process(message: Value, paths: &Paths) -> Value {
 }
 
 fn main() {
+    xdm_ipc::ops::handle_version_flag("xdm-native-host");
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();

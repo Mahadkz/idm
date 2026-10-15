@@ -1,4 +1,7 @@
 mod bandwidth;
+mod dbsafety;
+mod lock;
+mod shutdown;
 mod categories;
 mod credentials;
 mod grabber;
@@ -815,7 +818,9 @@ impl Service {
         adapter: Arc<dyn CompletionAdapter>,
     ) -> Result<Arc<Self>> {
         let db = Connection::open(database)?;
+        dbsafety::prepare(&db, database)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
+        db.pragma_update(None, "synchronous", "NORMAL")?;
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS tasks (
              id INTEGER PRIMARY KEY,
@@ -936,6 +941,7 @@ impl Service {
             "UPDATE queue_events SET action_status='suppressed' WHERE action_status='pending'",
             [],
         )?;
+        dbsafety::finish(&db, database)?;
         let max_concurrent = db
             .query_row(
                 "SELECT value FROM settings WHERE key='max_concurrent'",
@@ -1632,6 +1638,7 @@ impl Service {
                 remember,
             } => self.task_provide_login(task_id, username, password, remember),
             Command::TaskRestart { task_id } => self.task_restart(task_id),
+            Command::Hello { .. } => Ok(Reply::error("handshake is answered by the connection handler")),
         }
     }
 
@@ -1689,6 +1696,15 @@ impl Service {
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
         loop {
+            if shutdown::requested() {
+                // No new transfers once shutdown began.
+                inner = self
+                    .wake
+                    .wait_timeout(inner, Duration::from_secs(1))
+                    .map_err(|_| io::Error::other("task lock poisoned"))?
+                    .0;
+                continue;
+            }
             queue_tick(&mut inner)?;
             bandwidth::quota_tick(&mut inner)?;
             let now = unix_now();
@@ -2237,6 +2253,21 @@ fn handle(
     let request: Request = read_frame(&mut stream)?;
     let reply = if request.version != 1 || request.token != token {
         Reply::error("unauthorized or unsupported protocol")
+    } else if shutdown::requested() {
+        Reply::error("daemon is shutting down")
+    } else if let Command::Hello { client_version, protocol } = &request.command {
+        xdm_ipc::ops::log_debug(&format!("hello from client {client_version} protocol {protocol}"));
+        let mut reply = Reply::list(Vec::new());
+        reply.daemon_version = Some(xdm_ipc::ops::VERSION.to_owned());
+        reply.protocol = Some(xdm_ipc::PROTOCOL);
+        if *protocol != xdm_ipc::PROTOCOL {
+            reply.ok = false;
+            reply.error = Some(format!(
+                "incompatible protocol: client speaks {protocol}, daemon speaks {}",
+                xdm_ipc::PROTOCOL
+            ));
+        }
+        reply
     } else {
         service
             .command(request.command)
@@ -2270,10 +2301,66 @@ fn handle(
     Ok(())
 }
 
+impl Service {
+    /// Stops accepting work, stops every transfer so it checkpoints (the
+    /// workers record them as queued, which resumes after restart), waits a
+    /// bounded time, then flushes the WAL into the database file.
+    fn shutdown(&self, wait: Duration) {
+        shutdown::request();
+        xdm_ipc::ops::log_info("shutdown requested: stopping transfers");
+        if let Ok(mut inner) = self.inner.lock() {
+            interrupt_queue_workers(&mut inner, None);
+        }
+        self.wake.notify_all();
+        let deadline = Instant::now() + wait;
+        loop {
+            let remaining = self.inner.lock().map_or(0, |inner| inner.active.len());
+            if remaining == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                xdm_ipc::ops::log_warn(&format!("shutdown timed out with {remaining} transfers still stopping"));
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if let Ok(inner) = self.inner.lock() {
+            let _ = inner.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+        xdm_ipc::ops::log_info("shutdown complete");
+    }
+}
+
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
+
+fn fatal(message: impl std::fmt::Display) -> ! {
+    xdm_ipc::ops::log_error(&message.to_string());
+    eprintln!("xdm-daemon: {message}");
+    std::process::exit(1);
+}
+
 fn main() -> Result<()> {
+    xdm_ipc::ops::handle_version_flag("xdm-daemon");
+    shutdown::block_signals();
     let paths = Paths::open()?;
-    let listener = paths.listen()?;
-    let service = Service::open(&paths)?;
+    xdm_ipc::ops::init_logging(&paths.dir, "xdm-daemon");
+    xdm_ipc::ops::install_panic_hook(&paths.dir, "xdm-daemon");
+    let _instance = lock::acquire(&paths.dir).unwrap_or_else(|e| fatal(e));
+    xdm_ipc::ops::log_info(&format!("starting {}", xdm_ipc::ops::version_line("xdm-daemon")));
+    let listener = paths.listen().unwrap_or_else(|e| fatal(format!("cannot listen: {e}")));
+    let service = Service::open(&paths).unwrap_or_else(|e| fatal(e));
+    {
+        let service = service.clone();
+        let socket = paths.socket.clone();
+        thread::spawn(move || {
+            shutdown::wait_for_signal();
+            if cfg!(unix) {
+                let _ = std::fs::remove_file(&socket);
+            }
+            service.shutdown(SHUTDOWN_WAIT);
+            std::process::exit(0);
+        });
+    }
     let worker = service.clone();
     thread::spawn(move || worker.run());
     let syncer = service.clone();
@@ -2308,6 +2395,7 @@ fn main() -> Result<()> {
                 let token = paths.token.clone();
                 thread::spawn(move || {
                     if let Err(e) = handle(stream, service, token) {
+                        xdm_ipc::ops::log_warn(&format!("client error: {e}"));
                         eprintln!("client error: {e}");
                     }
                 });
@@ -3205,6 +3293,65 @@ mod tests {
         // Reopening is idempotent.
         Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly)).unwrap();
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn migration_backs_up_old_database_and_keeps_three() {
+        let dir = std::env::temp_dir().join(format!("xdm-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tasks.sqlite3");
+        let make_old = || {
+            let _ = std::fs::remove_file(&path);
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE tasks (id INTEGER PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, url TEXT NOT NULL, output TEXT NOT NULL UNIQUE, headers_json TEXT NOT NULL, priority INTEGER NOT NULL, connections INTEGER NOT NULL, status TEXT NOT NULL, error TEXT);
+                 INSERT INTO tasks(id,request_id,url,output,headers_json,priority,connections,status) VALUES (7,'a','http://x/a','/o/a','[]',1,1,'queued');",
+            )
+            .unwrap();
+        };
+        make_old();
+        Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly)).unwrap();
+        let backups = dbsafety::list_backups(&path);
+        assert_eq!(backups.len(), 1);
+        // The backup holds the pre-migration schema and rows.
+        let old = Connection::open(&backups[0]).unwrap();
+        let columns: Vec<String> = old
+            .prepare("PRAGMA table_info(tasks)")
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!columns.contains(&"position".to_owned()));
+        assert_eq!(old.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        drop(old);
+        let version: i64 = Connection::open(&path).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, dbsafety::SCHEMA_VERSION);
+        // Already current: no further backup.
+        Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly)).unwrap();
+        assert_eq!(dbsafety::list_backups(&path).len(), 1);
+        for _ in 0..4 {
+            make_old();
+            Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly)).unwrap();
+        }
+        assert_eq!(dbsafety::list_backups(&path).len(), dbsafety::BACKUPS_KEPT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_database_is_refused_with_guidance() {
+        let dir = std::env::temp_dir().join(format!("xdm-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tasks.sqlite3");
+        std::fs::write(&path, vec![0x5au8; 8192]).unwrap();
+        let error = Service::open_db(&path, Arc::new(FakeClock::new(1000, 0)), Arc::new(RecordOnly))
+            .err()
+            .expect("corrupt database must not open");
+        assert!(error.to_string().contains("integrity check"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0x5au8; 8192], "file untouched");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn auth_error(status: u16, realm: Option<&str>) -> Error {

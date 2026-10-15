@@ -4,10 +4,10 @@
 
 | Document | Implemented | Partial | Different | Missing | Unknown | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| idm_core_queue_contracts.md | 11 | 45 | 5 | 8 | 0 | 69 |
+| idm_core_queue_contracts.md | 11 | 47 | 5 | 6 | 0 | 69 |
 | idm_browser_behavior_contracts.md | 41 | 10 | 8 | 3 | 0 | 62 |
-| idm_behavior_review.md | 0 | 27 | 0 | 12 | 0 | 39 |
-| **Total** | **52** | **82** | **13** | **23** | **0** | **170** |
+| idm_behavior_review.md | 0 | 32 | 0 | 7 | 0 | 39 |
+| **Total** | **52** | **89** | **13** | **16** | **0** | **170** |
 
 ## Contract Details
 
@@ -19,14 +19,14 @@
 | N04 | Range capability and boundaries | implemented | Implemented static path: strict Content-Range parser, bounded segments, identity… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N05 | Ignored or malformed partial response | partial | Partial: Malformed probe falls back to full transfer; a server that stops honori… | tests/integration/http_engine.py, tests/integration/restart_required.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs |
 | N06 | Representation compression | different | Restricted: sends Accept-Encoding identity and rejects nonidentity final/range r… | — |
-| N07 | Known and unknown response length | partial | Partial: unknown size streams the adopted full response until EOF with total/ETA… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
+| N07 | Known and unknown response length | partial | Partial: unknown size streams the adopted full response until EOF with total/ETA… | tests/integration/http_engine.py, tests/integration/contracts_core.py, tests/integration/engine_gaps.py |
 | N08 | Redirect chains and credentials | partial | Partial: maximum ten hops; Referer is not rewritten on redirect. Cookie/Authoriz… | tests/integration/http_engine.py |
 | N09 | Cookie/User-Agent/Referer/header forwarding | partial | Partial: HTTP header list is persisted and shared among workers; engine owns Ran… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N10 | Origin/path login credentials | implemented | Implemented on Linux (2026-10-13): site/path credential store with pattern match… | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs, crates/xdm-daemon/src/main.rs |
 | N11 | Authentication retries and expiry | partial | Partial (2026-10-13): 401 challenge produces `auth_required` status with realm, … | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs |
 | N12 | Remote-object validators | partial | Partial: checks size/final URL/header-context hash and available strong ETag/dat… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N13 | Ignore modification-time preference | implemented | Implemented: `ResumePolicy { ignore_modification_date: true }` (set per task thr… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
-| N14 | User-visible filename/type changes | partial | Partial: Resolves server-chosen filenames from `Content-Disposition` (RFC 6266 p… | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N14 | User-visible filename/type changes | partial | Partial: Resolves server-chosen filenames from `Content-Disposition` (RFC 6266 p… | tests/integration/naming_duplicates.py, tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N15 | Permission/permanent HTTP errors | partial | Partial:403/404 nonretryable; daemon records failed. Error is text rather than t… | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py |
 | N16 | Transient server/network retries | partial | Partial: probe/full requests retry up to four times on network/408/429/5xx honor… | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py |
 | N17 | Timeouts, DNS and diagnostics | partial | Partial: blocking client has30-second request timeout; network errors propagate.… | tests/integration/contracts_core.py |
@@ -50,10 +50,10 @@
 | N35 | Pause/resume with one connection | implemented | Implemented (2026-10-13): connections=1 uses a single range worker with a `.part… | tests/integration/http_engine.py |
 | N36 | Non-range pause/restart | partial | Partial: Single-stream non-range pause retains .part without metadata; next atte… | tests/integration/http_engine.py, tests/integration/restart_required.py |
 | N37 | Crash recovery and stale running states | partial | Partial: daemon maps running/pausing→queued at open; segmented checkpoint valida… | tests/integration/contracts_core.py |
-| N38 | Separate temporary and final directories | missing | Missing: .part and.meta sit beside destination; no distinct temp-root setting or… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N38 | Separate temporary and final directories | partial | Partial: HTTP tasks keep `.part` and `.part.meta` in an optional absolute temp d… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N39 | Disk-full and access-denied assembly | partial | Partial (2026-10-13): disk-space preflight via `fstatvfs` and rollback of failed… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N40 | Large files and filesystem limits | implemented | Implemented (2026-10-13): u64 offsets/lengths and set_len; >4 GiB crossing verif… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
-| N41 | File timestamps | missing | Missing: no preserve-server-date option or timestamp write. | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
+| N41 | File timestamps | partial | Partial: HTTP completed files take their modification time from a valid `Last-Mo… | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs |
 | N42 | Finalize, rename and output conflicts | partial | Partial (2026-10-13): publication uses a hard link plus removal of `.part` (chec… | tests/integration/http_engine.py, tests/integration/contracts_core.py |
 | N43 | Orphan partial cleanup | missing | Missing: stopped-task remove retains files by design; no orphan inventory/cleanu… | — |
 | N44 | Default/per-server connection caps | partial | Partial: per-task 1–16 connections and daemon job cap 1–16. HTTP engine per-host… | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs |
@@ -149,18 +149,18 @@
 | appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | gui.appearance: pending; task.progress: partial | tests/integration/contracts_behavior.py |
 | browser-platform-health | Original health depends on elevation, BFE, drivers/helpers a… | partial | browser.integration: partial; platform.privilege: platform-pending | tests/integration/contracts_behavior.py |
 | category-retroactive | Extension/site rules and last-used paths classify future fil… | partial | settings.categories: partial; settings.paths: partial | tests/integration/contracts_behavior.py |
-| completion-power | Task, queue and grabber completion can request shutdown/slee… | missing | power.shutdown: pending; power.restart: pending; task.completion: pending; grabb… | tests/integration/contracts_behavior.py |
+| completion-power | Task, queue and grabber completion can request shutdown/slee… | partial | power.shutdown: pending; power.restart: pending; task.completion: pending; grabb… | tests/integration/contracts_behavior.py |
 | completion-precedence | Per-file settings can be unavailable during queue processing… | partial | task.completion: pending; app.exit: partial; queue.schedule: partial; task.progr… | tests/integration/contracts_behavior.py |
-| completion-program-and-scanner | Completion can open a configured file; scanner arguments acc… | missing | security.scanner: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| completion-program-and-scanner | Completion can open a configured file; scanner arguments acc… | partial | security.scanner: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
 | connection-profiles-and-host-caps | Default profile/connection count and per-server exceptions a… | partial | settings.connections: partial; settings.host_connections: pending | tests/integration/contracts_behavior.py |
 | content-identity-recovery | Changed date/size can restart a task; date checking can be d… | partial | task.resume: partial; settings.downloads: partial | tests/integration/contracts_behavior.py |
 | duplicate-policy | Remembered duplicate policies are ask, numbered duplicate, o… | partial | task.duplicate: partial; settings.downloads: partial | tests/integration/contracts_behavior.py |
 | eager-confirmation | Transfer may start while confirmation is visible, so Downloa… | partial | task.add: partial; settings.downloads: partial; queue.assignment: partial | tests/integration/contracts_behavior.py |
 | file-actions | Move/rename, open-with, configurable double-click and comple… | partial | task.properties: partial; task.completion: pending | tests/integration/contracts_behavior.py |
 | force-bypass-capture | Force and bypass modifier sets must not conflict; force capt… | missing | browser.shortcuts: pending | tests/integration/contracts_behavior.py |
-| generated-batch | A URL wildcard expands numeric/alphabetic sequences with wid… | missing | batch.generated: pending | tests/integration/contracts_behavior.py |
+| generated-batch | A URL wildcard expands numeric/alphabetic sequences with wid… | partial | batch.generated: pending | tests/integration/contracts_behavior.py |
 | grabber-auth-and-offline | Crawler supports manual login, excludes logout patterns, use… | missing | grabber.crawl: pending; grabber.destination: pending; grabber.project: pending | tests/integration/contracts_behavior.py |
-| grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | missing | grabber.load: pending; grabber.save: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
+| grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | partial | grabber.load: pending; grabber.save: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
 | limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | speed.task: partial | tests/integration/contracts_behavior.py |
 | live-stop-save | Stopping live recording can finalize captured content, with … | partial | media.overlay: pending; task.resume: partial | tests/integration/contracts_behavior.py |
 | minimum-media-size | Separate audio/video panel thresholds only apply when total … | missing | media.minimum: pending | tests/integration/contracts_behavior.py |
@@ -168,7 +168,7 @@
 | player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | media.overlay: pending; browser.types: partial; browser.exceptions: pending | tests/integration/contracts_behavior.py |
 | playlist-link-expansion | Downloaded M3U can offer its MP3 links as one download or a … | missing | media.overlay: pending; browser.all_links: pending | tests/integration/contracts_behavior.py |
 | proxy-selection | Manual, auto-detected, system and none modes; PAC, protocol-… | missing | settings.proxy: pending | tests/integration/contracts_behavior.py |
-| quality-and-track-catalog | Other quality may appear only after player selection; separa… | missing | media.overlay: pending | tests/integration/contracts_behavior.py |
+| quality-and-track-catalog | Other quality may appear only after player selection; separa… | partial | media.overlay: pending | tests/integration/contracts_behavior.py |
 | queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | queue.manage: partial; queue.master: partial | tests/integration/contracts_behavior.py |
 | queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | queue.files: partial; queue.schedule: partial | tests/integration/contracts_behavior.py |
 | quota-window | A megabyte-per-hour-window budget can warn, stop downloads a… | missing | settings.quota: pending | tests/integration/contracts_behavior.py |
@@ -213,12 +213,12 @@
 | N02 | HTTP methods and request bodies | partial | tests/integration/request_context.py | idm_core_queue_contracts.md |
 | N03 | One-shot and expiring URLs | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
 | N05 | Ignored or malformed partial response | partial | tests/integration/http_engine.py, tests/integration/restart_required.py, tests/integration/http_fixture.py, crates/xdm-http/src/lib.rs | idm_core_queue_contracts.md |
-| N07 | Known and unknown response length | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
+| N07 | Known and unknown response length | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py, tests/integration/engine_gaps.py | idm_core_queue_contracts.md |
 | N08 | Redirect chains and credentials | partial | tests/integration/http_engine.py | idm_core_queue_contracts.md |
 | N09 | Cookie/User-Agent/Referer/header forwarding | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N11 | Authentication retries and expiry | partial | tests/integration/credentials.py, crates/xdm-daemon/src/credentials.rs | idm_core_queue_contracts.md |
 | N12 | Remote-object validators | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
-| N14 | User-visible filename/type changes | partial | tests/integration/naming_duplicates.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
+| N14 | User-visible filename/type changes | partial | tests/integration/naming_duplicates.py, tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | N15 | Permission/permanent HTTP errors | partial | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N16 | Transient server/network retries | partial | tests/integration/http_engine.py, tests/integration/cli_http.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N17 | Timeouts, DNS and diagnostics | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
@@ -232,7 +232,9 @@
 | N34 | Checkpoint schema and write ordering | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N36 | Non-range pause/restart | partial | tests/integration/http_engine.py, tests/integration/restart_required.py | idm_core_queue_contracts.md |
 | N37 | Crash recovery and stale running states | partial | tests/integration/contracts_core.py | idm_core_queue_contracts.md |
+| N38 | Separate temporary and final directories | partial | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | N39 | Disk-full and access-denied assembly | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
+| N41 | File timestamps | partial | tests/integration/engine_gaps.py, crates/xdm-http/src/lib.rs, crates/xdm-daemon/src/main.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | N42 | Finalize, rename and output conflicts | partial | tests/integration/http_engine.py, tests/integration/contracts_core.py | idm_core_queue_contracts.md |
 | N44 | Default/per-server connection caps | partial | tests/integration/bandwidth.py, crates/xdm-http/src/governor.rs, crates/xdm-daemon/src/bandwidth.rs | idm_core_queue_contracts.md |
 | N45 | Per-file limiter and remembered exceptions | partial | tests/integration/bandwidth.py, tests/integration/task_rate.py | idm_core_queue_contracts.md |
@@ -263,15 +265,20 @@
 | appearance-and-progress | System dark mode, font choice/reset and progress tab/start-v… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | browser-platform-health | Original health depends on elevation, BFE, drivers/helpers a… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | category-retroactive | Extension/site rules and last-used paths classify future fil… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| completion-power | Task, queue and grabber completion can request shutdown/slee… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | completion-precedence | Per-file settings can be unavailable during queue processing… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| completion-program-and-scanner | Completion can open a configured file; scanner arguments acc… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | connection-profiles-and-host-caps | Default profile/connection count and per-server exceptions a… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | content-identity-recovery | Changed date/size can restart a task; date checking can be d… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | duplicate-policy | Remembered duplicate policies are ask, numbered duplicate, o… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | eager-confirmation | Transfer may start while confirmation is visible, so Downloa… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | file-actions | Move/rename, open-with, configurable double-click and comple… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| generated-batch | A URL wildcard expands numeric/alphabetic sequences with wid… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | live-stop-save | Stopping live recording can finalize captured content, with … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| quality-and-track-catalog | Other quality may appear only after player selection; separa… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | recurrence-and-wake | Daily/weekday and periodic jobs require the application runn… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
@@ -286,4 +293,4 @@
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 
-**Count: 75**
+**Count: 82**

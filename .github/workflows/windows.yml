@@ -1,0 +1,24 @@
+name: windows
+on:
+  push:
+  pull_request:
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - name: Integration suites (Unix-socket-only suites report SKIP with a reason)
+        run: python tests/run_all.py
+      - name: GUI smoke (software renderer, daemon + xdm-gui)
+        run: python tests/gui_smoke.py

@@ -34,7 +34,7 @@ Match IDM's structure and workflows using the mapped dialogs (`docs/idm_control_
 
 | Item | Status | Evidence |
 |---|---|---|
-| CI on every push: Linux build + all suites (Xvfb), Windows build + tests, browser tests, warnings-as-errors, Windows cross-build | Not started | |
+| CI on every push: Linux build + all suites (Xvfb), Windows build + tests, browser tests, warnings-as-errors, Windows cross-build | In progress | .github/workflows/{linux,windows,browsers,audit}.yml, tests/run_all.py; awaiting first GitHub run; Firefox real-browser test and Windows named-pipe Python client not yet written |
 | Versioning: `--version` on every binary, IPC protocol version negotiation, schema version and migration tests from every previous release | Not started | |
 | Logging: leveled logs with rotation and size cap, no secrets, log location documented | Not started | |
 | Crash handling: panic hook writes a redacted crash report; daemon restarts cleanly; diagnostics bundle command | Not started | |

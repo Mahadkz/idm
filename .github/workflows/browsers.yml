@@ -1,0 +1,49 @@
+name: browsers
+on:
+  push:
+  pull_request:
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  chromium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb
+      - run: cargo build -p xdm-daemon -p xdm-native-host -p xdm-cli
+      # Branded Chrome ignores --load-extension, so use Chrome for Testing.
+      - name: Install Chrome for Testing
+        run: |
+          out=$(npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/cft")
+          echo "$out"
+          echo "XDM_CHROME_FOR_TESTING=${out#* }" >> "$GITHUB_ENV"
+      - name: Real Chrome handoff
+        run: xvfb-run -a python3 tests/run_all.py --strict --only chromium_real
+  firefox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb
+      - run: cargo build -p xdm-daemon -p xdm-native-host -p xdm-cli
+      - name: Firefox extension lint and unit handoff
+        run: |
+          npx --yes web-ext lint --source-dir extensions/firefox
+          node tests/integration/firefox_handoff.mjs
+      # A real-Firefox handoff (tests/integration/firefox_real.mjs, using XDM_FIREFOX) does not
+      # exist yet: it would need web-ext run or Marionette to load the add-on. Until then the
+      # production-readiness row stays open; run_all.py reports it as SKIP if the file is added
+      # without XDM_FIREFOX.

@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / "target/debug/xdm-cli"
 BIN = Path.home() / ".local/bin"
 os.environ["PATH"] = f"{BIN}:{os.environ['PATH']}"
+HOSTS = "b.test=127.0.0.1,pub.test=127.0.0.1"
+os.environ["XDM_MEDIA_TEST_HOSTS"] = HOSTS
 COOKIE, BEARER = "sid=cookie-secret-4711", "Bearer token-secret-9001"
 USER, PASSWORD = "reluser", "relay-pass-8842"
 LOG, LOCK = [], threading.Lock()
@@ -70,12 +72,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.headers.get("Cookie") != COOKIE or self.headers.get("Authorization") != BEARER:
                 return self.reply(403)
             if name == "master.m3u8":
-                return self.reply(200, playlist(f"http://localhost:{self.server.other}/"),
+                return self.reply(200, playlist(f"http://b.test:{self.server.other}/"),
                                   "application/vnd.apple.mpegurl")
         elif self.server.name == "B":
             if name in SEGMENTS:
                 return self.reply(200, SEGMENTS[name], "video/mp2t")
             return self.reply(404)
+        elif self.server.name == "P":   # "public" manifest pointing at private targets
+            if name == "evil.m3u8":
+                targets = [f"http://127.0.0.1:{self.server.other}/loot.ts", "http://169.254.169.254/latest.ts",
+                           f"http://10.255.255.1:81/x.ts"]
+                body = ("#EXTM3U\n#EXT-X-TARGETDURATION:3\n" + "".join(f"#EXTINF:2.0,\n{t}\n" for t in targets)
+                        + "#EXT-X-ENDLIST\n").encode()
+                return self.reply(200, body, "application/vnd.apple.mpegurl")
+            return self.reply(404)
+        elif self.server.name == "T":   # target that must never be reached through the relay
+            return self.reply(200, b"SECRET-INTERNAL")
         elif self.server.name == "D":
             return self.digest(name)
         elif self.server.name == "S":   # Basic, segments via relative paths
@@ -128,6 +140,19 @@ def sample_argv(samples, stop):
         time.sleep(0.01)
 
 
+def raw_status(port, target):
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    s.sendall(f"GET {target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    data = b""
+    while b"\r\n" not in data:
+        chunk = s.recv(256)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    return int(data.split(b" ")[1]) if data else 0
+
+
 def status_of(url):
     try:
         return urllib.request.urlopen(url, timeout=5).status
@@ -135,11 +160,46 @@ def status_of(url):
         return e.code
 
 
+def proxy_routing(origin):
+    """Manual proxy carries every upstream request; Direct ignores http_proxy from the environment."""
+    tmp = Path(tempfile.mkdtemp(prefix="xdm-relay-proxy-"))
+    log = tmp / "proxy.log"
+    log.touch()
+    fixture = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "proxy_fixture.py"), str(log)],
+                               stdout=subprocess.PIPE, text=True)
+    ports = json.loads(fixture.stdout.readline())
+    proxy_url = f"http://127.0.0.1:{ports['http']}"
+    daemon = Daemon("xdm-relay-px-", env_extra={"PATH": os.environ["PATH"], "http_proxy": proxy_url})
+    base_url = f"http://127.0.0.1:{origin.server_port}/"
+    try:
+        daemon.cli("login", "save", base_url, USER, daemon.secret("pw.txt", PASSWORD))
+
+        def run(label):
+            target = daemon.base / f"{label}.mp4"
+            task = daemon.cli("media-job", base_url + "vod.m3u8", target, "video", "0")["task_id"]
+            row = daemon.until(task, lambda t: t["status"] in ("failed", "auth_required", "complete"), timeout=90)
+            assert row["status"] == "complete", (label, row)
+
+        daemon.cli("proxy", "direct")
+        run("direct")
+        assert log.read_text() == "", "Direct mode used the environment proxy: " + log.read_text()[:600]
+        daemon.cli("proxy", "manual", proxy_url)
+        run("manual")
+        urls = [json.loads(line)["url"] for line in log.read_text().splitlines()]
+        assert any(u.endswith("/vod.m3u8") for u in urls), urls
+        assert any(u.endswith(".ts") for u in urls), urls
+        return ["manual proxy carries manifest and segments", "Direct ignores http_proxy env"]
+    finally:
+        daemon.close()
+        fixture.terminate()
+
+
 def main():
     for tool in ("ffmpeg", "ffprobe"):
         assert subprocess.run(["which", tool], capture_output=True).returncode == 0, tool
     work = Path(tempfile.mkdtemp(prefix="xdm-relay-"))
     make_segments(work)
+    target = serve("T")
     b = serve("B")
     a = serve("A", other=b.server_port)
     samples, stop = [], threading.Event()
@@ -158,6 +218,11 @@ def main():
                     probes["port"], probes["token"] = port, m.group(2)
                     probes["no_token"] = status_of(f"http://127.0.0.1:{port}/0/master.m3u8")
                     probes["root"] = status_of(f"http://127.0.0.1:{port}/")
+                    t = probes["token"]
+                    probes["attacks"] = [raw_status(port, f"/{t}/0/{x}") for x in (
+                        f"http://127.0.0.1:{target.server_port}/x", f"//127.0.0.1:{target.server_port}/x",
+                        "../x", "master.m3u8/../../x", "%2e%2e/x")]
+                    probes["unknown_id"] = raw_status(port, f"/{t}/9999/x")
                     probes["wrong"] = status_of(f"http://127.0.0.1:{port}/{'0' * len(m.group(2))}/0/master.m3u8")
                     return
             time.sleep(0.005)
@@ -189,6 +254,10 @@ def main():
         assert all(e["cookie"] is None and e["auth"] is None for e in on_b), on_b
         # (3) token required
         assert probes.get("no_token") == 404 and probes.get("root") == 404 and probes.get("wrong") == 404, probes
+        # relay serves only registered URLs: no open proxy through client-supplied tails
+        assert probes["attacks"] == [404] * 5 and probes["unknown_id"] == 404, probes
+        with LOCK:
+            assert not [e for e in LOG if e["server"] == "T"], "relay fetched an unregistered URL"
         # (4) closed after the job
         s = socket.socket()
         s.settimeout(3)
@@ -196,6 +265,15 @@ def main():
         s.close()
     finally:
         stop.set()
+
+    # SSRF: a "public" manifest cannot pull loopback/link-local/private segments
+    p_srv = serve("P", other=target.server_port)
+    refused = subprocess.run(
+        [str(CLI), "media", "download", f"http://pub.test:{p_srv.server_port}/evil.m3u8", str(work / "evil.mp4"), "0"],
+        capture_output=True, text=True, timeout=60)
+    assert refused.returncode != 0 and not (work / "evil.mp4").exists(), refused.stdout
+    with LOCK:
+        assert not [e for e in LOG if e["server"] == "T"], "private target was fetched"
 
     # (5) saved logins: Basic and Digest, via daemon jobs
     d_srv, s_srv = serve("D"), serve("S")
@@ -215,9 +293,11 @@ def main():
         daemon.close()
     for argv in samples:
         assert PASSWORD not in argv and "Authorization" not in argv, argv
+    proxy_cases = proxy_routing(s_srv)
+    cases += proxy_cases
     print(json.dumps({"result": "passed", "cases": [
         "argv free of cookie/token", "cross-origin segments get no credentials",
-        "relay 404 without token", "relay closed after job", *[f"{c} login through relay" for c in cases]],
+        "relay 404 without token", "relay closed after job", "no open proxy via tails", "private/loopback segment targets refused", *[f"{c} login through relay" for c in cases]],
         "argv_samples": len(samples)}))
 
 

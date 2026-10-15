@@ -2139,7 +2139,7 @@ impl Service {
                             |done, total| live.report(done, total),
                         ),
                     },
-                    WorkKind::Media { mode, headers } => xdm_media::with_origin_login(media_login, || match &mode {
+                    WorkKind::Media { mode, headers } => xdm_media::with_proxy(work.proxy.clone(), work.proxy_login.clone(), || xdm_media::with_origin_login(media_login, || match &mode {
                         MediaMode::Video {
                             video,
                             audio,
@@ -2220,7 +2220,7 @@ impl Service {
                                 result.map(|summary| live.report(summary.bytes))
                             }
                         },
-                    }),
+                    })),
                 };
                 if let Ok(mut inner) = service.inner.lock() {
                     let interrupted_for_queue = inner.queue_interrupted.remove(&work.id);

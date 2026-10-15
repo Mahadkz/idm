@@ -94,7 +94,7 @@ fn err(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
 }
 
 /// Shared HTTP input options that every ffprobe/ffmpeg call needs.
-const CLEAR_INPUT_ARGS: [&str; 4] = ["-protocol_whitelist", "http,https,tcp,tls", "-rw_timeout", "15000000"];
+const CLEAR_INPUT_ARGS: [&str; 4] = ["-protocol_whitelist", "http,tcp", "-rw_timeout", "15000000"];
 
 /// Rejects header lines that could inject further ffmpeg options over the wire.
 fn validate_headers(headers: &[(String, String)]) -> Result<()> {
@@ -175,6 +175,35 @@ pub fn with_origin_login<R>(login: Option<OriginLogin>, job: impl FnOnce() -> R)
     let result = job();
     ORIGIN_LOGIN.with(|slot| *slot.borrow_mut() = previous);
     result
+}
+
+/// ffmpeg/ffprobe only ever talk to the loopback relay, which applies the job's proxy
+/// itself; the environment proxy must not capture that hop.
+fn tool(name: &str) -> Command {
+    let mut command = Command::new(name);
+    for variable in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        command.env_remove(variable);
+    }
+    command.env("no_proxy", "127.0.0.1,localhost").env("NO_PROXY", "127.0.0.1,localhost");
+    command
+}
+
+thread_local! {
+    static PROXY: std::cell::RefCell<(xdm_http::Proxy, Option<xdm_http::Login>)> =
+        std::cell::RefCell::new((xdm_http::Proxy::System, None));
+}
+
+/// Runs `job` routed through the job's configured proxy (and stored manual-proxy
+/// login); the relay's upstream client and the manifest walk both use it.
+pub fn with_proxy<R>(proxy: xdm_http::Proxy, login: Option<xdm_http::Login>, job: impl FnOnce() -> R) -> R {
+    let previous = PROXY.with(|slot| slot.replace((proxy, login)));
+    let result = job();
+    PROXY.with(|slot| *slot.borrow_mut() = previous);
+    result
+}
+
+fn current_proxy() -> (xdm_http::Proxy, Option<xdm_http::Login>) {
+    PROXY.with(|slot| slot.borrow().clone())
 }
 
 fn current_origin_login() -> Option<OriginLogin> {
@@ -312,7 +341,7 @@ fn probe(url: &str, relay: &Relay) -> Result<Value> {
 
 /// ffprobe stream JSON for an already validated manifest, read through the relay.
 fn ffprobe(relay: &Relay) -> Result<Value> {
-    let mut command = Command::new("ffprobe");
+    let mut command = tool("ffprobe");
     command.args(CLEAR_INPUT_ARGS);
     command.args(["-v", "error", "-show_streams", "-of", "json"]);
     command.arg(relay.manifest_url());
@@ -561,7 +590,7 @@ fn run_live_ffmpeg_job(
 
 /// Media duration of a finished local file, when ffprobe can read one.
 fn probe_duration_secs(path: &Path) -> Option<f64> {
-    let output = Command::new("ffprobe")
+    let output = tool("ffprobe")
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "json"])
         .arg(path)
         .output()
@@ -645,7 +674,7 @@ pub fn record_live(
     if temporary.exists() {
         return Err(err("media temporary output already exists"));
     }
-    let mut command = Command::new("ffmpeg");
+    let mut command = tool("ffmpeg");
     if !live {
         // VOD recordings pause like every other job; no stdin interaction.
         command.arg("-nostdin");
@@ -780,7 +809,7 @@ pub fn download_with_headers(
             return Err(err("media temporary output already exists"));
         }
     }
-    let mut command = Command::new("ffmpeg");
+    let mut command = tool("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
     command.arg("-i").arg(relay.manifest_url());
@@ -837,7 +866,7 @@ pub fn download_audio(
     if temporary.exists() {
         return Err(err("audio temporary output already exists"));
     }
-    let mut command = Command::new("ffmpeg");
+    let mut command = tool("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
     command.args(["-i", &relay.manifest_url(), "-map", &format!("0:{audio_track}")]);
@@ -896,7 +925,7 @@ pub fn save_subtitles(
     if temporary.exists() {
         return Err(err("subtitle temporary output already exists"));
     }
-    let mut command = Command::new("ffmpeg");
+    let mut command = tool("ffmpeg");
     command.args(["-nostdin", "-hide_banner", "-v", "error"]);
     command.args(CLEAR_INPUT_ARGS);
     if renditions.len() > slot {

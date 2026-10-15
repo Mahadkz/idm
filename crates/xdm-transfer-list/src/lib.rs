@@ -102,9 +102,25 @@ pub fn parse(input: &str) -> Result<TransferList, String> {
 /// True for an HLS playlist: its tags make it a media manifest, not a list of
 /// independent downloads.
 pub fn is_hls_playlist(input: &str) -> bool {
-    input
-        .lines()
-        .any(|line| line.trim_start_matches('\u{feff}').trim().starts_with("#EXT-X-"))
+    let mut after_extinf = false;
+    for line in input.lines() {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        if line.contains("#EXT-X-") {
+            return true;
+        }
+        if line.starts_with("#EXTINF") {
+            after_extinf = true;
+        } else if line.is_empty() || line.starts_with('#') {
+            continue;
+        } else if after_extinf {
+            after_extinf = false;
+            let path = line.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+            if [".ts", ".m4s", ".m4a", ".aac"].iter().any(|ext| path.ends_with(ext)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub const HLS_MESSAGE: &str = "this is an HLS playlist (#EXT-X- tags): its segments are not independent downloads; use the media workflow (xdm-cli daemon media-job MANIFEST_URL OUTPUT video ...)";
@@ -472,6 +488,16 @@ pub fn expand_batch(template: &str, limit: usize) -> Result<Vec<String>, String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hls_is_detected_by_segments_and_late_tags() {
+        use super::is_hls_playlist;
+        assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nseg0.ts?x=1\n#EXTINF:4,\nseg1.ts\n"));
+        assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.m4s\n"));
+        assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.mp3\n\n#EXT-X-ENDLIST"));
+        assert!(!is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.mp3\n"));
+        assert!(super::parse("#EXTM3U\n#EXTINF:4,\nseg0.ts\n").is_err());
+    }
+
     use super::*;
     #[test]
     fn text_names_duplicates_and_traversal() {

@@ -319,9 +319,7 @@ impl Service {
                 };
                 let path = Path::new(directory)
                     .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
+                xdm_grabber::create_mirror_dirs(Path::new(directory), relative)?;
                 outputs.push(path.to_string_lossy().into_owned());
             }
             outputs

@@ -132,9 +132,18 @@ fn respond(
         None => (404, "text/plain", b"not found".as_slice()),
     };
     let reason = if status == 200 { "OK" } else { "Not Found" };
+    // Status 302 routes carry their Location target as the body.
+    let (location, body) = if status == 302 {
+        (
+            format!("Location: {}\r\n", String::from_utf8_lossy(body)),
+            b"".as_slice(),
+        )
+    } else {
+        (String::new(), body)
+    };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n\
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{location}\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
@@ -558,4 +567,115 @@ fn saved_pages_mirror_paths_and_rewrite_links_without_overwriting() {
     assert!(page.contains(r#"href="../index-2.html""#), "{page}");
     assert_eq!(result.local_paths.values().next().unwrap(), "files/a.zip");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn redirect(target: &str) -> Route {
+    Route { status: 302, content_type: "text/plain", body: target.as_bytes().to_vec() }
+}
+
+#[test]
+fn redirects_to_other_hosts_or_excluded_paths_are_not_followed() {
+    for auth in [false, true] {
+        let other = TestServer::start(vec![("/x.html", page(r#"<a href="/leak.zip">l</a>"#))]);
+        let server = TestServer::start(vec![
+            ("/", page(r#"<a href="/hop1">1</a><a href="/hop2">2</a><a href="/ok.html">ok</a>"#)),
+            ("/hop1", redirect(&format!("http://localhost:{}/x.html", other.addr.port()))),
+            ("/hop2", redirect("/logout")),
+            ("/logout", page(r#"<a href="/secret.zip">s</a>"#)),
+            ("/ok.html", page("<p>ok</p>")),
+        ]);
+        let dir = std::env::temp_dir().join(format!("xdm-redir-{}-{auth}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let project = Project {
+            exclude_patterns: vec!["*logout*".into()],
+            obey_robots: false,
+            save_pages: true,
+            auth_headers: if auth {
+                xdm_grabber::AuthHeaders(vec![("Cookie".into(), "sid=1".into())])
+            } else {
+                Default::default()
+            },
+            ..project(&server)
+        };
+        let result =
+            xdm_grabber::crawl_to(&project, Arc::new(AtomicBool::new(false)), Some(&dir)).unwrap();
+        assert_eq!(other.request_count(), 0, "auth={auth}");
+        assert!(!server.hits.lock().unwrap().iter().any(|p| p == "/logout"), "auth={auth}");
+        assert!(result.files.iter().all(|f| !f.url.contains("secret") && !f.url.contains("leak")));
+        assert_eq!(result.pages.len(), 2, "{:?}", result.pages);
+        assert_eq!(result.saved_pages.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn allowed_redirects_are_followed_and_checked_against_robots() {
+    let server = TestServer::start(vec![
+        ("/", page(r#"<a href="/go">go</a><a href="/to-private">p</a>"#)),
+        ("/go", redirect("/landed.html")),
+        ("/landed.html", page(r#"<a href="/a.zip">a</a>"#)),
+        ("/to-private", redirect("/private/x.html")),
+        ("/private/x.html", page(r#"<a href="/b.zip">b</a>"#)),
+        ("/robots.txt", body("text/plain", "User-agent: *\nDisallow: /private/\n")),
+    ]);
+    let result = run(&server, &project(&server));
+    assert!(result.pages.iter().any(|p| p.ends_with("/landed.html")), "{:?}", result.pages);
+    assert_eq!(file_urls(&result), vec![server.url("/a.zip")]);
+    assert!(!server.hits.lock().unwrap().iter().any(|p| p == "/private/x.html"));
+}
+
+#[test]
+fn percent_encoded_urls_cannot_bypass_exclusions() {
+    let server = TestServer::start(vec![
+        ("/", page(r#"<a href="/log%6Fut">out</a><a href="/s%2Fa.zip">z</a>"#)),
+        ("/logout", page("<p>bye</p>")),
+        ("/log%6Fut", page("<p>bye</p>")),
+    ]);
+    let project = Project {
+        exclude_patterns: vec!["*logout*".into(), "*/s/a.zip".into()],
+        obey_robots: false,
+        ..project(&server)
+    };
+    let result = run(&server, &project);
+    assert_eq!(server.request_count(), 1, "{:?}", server.hits.lock().unwrap());
+    assert!(result.files.is_empty());
+}
+
+#[test]
+fn robots_is_not_fetched_for_excluded_or_out_of_scope_hosts() {
+    let other = TestServer::start(vec![("/logout", page("<p>x</p>"))]);
+    let port = other.addr.port();
+    let server = TestServer::start(vec![(
+        "/",
+        page(&format!(r#"<a href="http://localhost:{port}/logout">x</a><a href="http://localhost:{port}/deep.zip">z</a>"#)),
+    )]);
+    let project = Project {
+        same_host_only: false,
+        exclude_patterns: vec!["*logout*".into(), "*deep.zip".into()],
+        obey_robots: true,
+        ..project(&server)
+    };
+    run(&server, &project);
+    assert_eq!(other.request_count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_never_follows_symlinked_directories_out_of_the_destination() {
+    let server = TestServer::start(vec![
+        ("/", page(r#"<a href="/files/p.html">p</a>"#)),
+        ("/files/p.html", page("<p>p</p>")),
+    ]);
+    let base = std::env::temp_dir().join(format!("xdm-symlink-crawl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (root, outside) = (base.join("root"), base.join("outside"));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("files")).unwrap();
+    let project = Project { save_pages: true, obey_robots: false, ..project(&server) };
+    let result =
+        xdm_grabber::crawl_to(&project, Arc::new(AtomicBool::new(false)), Some(&root)).unwrap();
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(result.errors.iter().any(|(_, why)| why.contains("cannot save page")), "{result:?}");
+    std::fs::remove_dir_all(&base).unwrap();
 }

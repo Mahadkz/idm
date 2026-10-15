@@ -10,6 +10,8 @@ mod offline;
 mod pattern;
 mod robots;
 
+pub use offline::create_mirror_dirs;
+
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 /// Largest HTML page body ever parsed. Anything longer becomes an error entry.
 pub const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_REDIRECTS: usize = 10;
 const DEFAULT_USER_AGENT: &str = "XDM-Grabber/0.1";
 
 /// Path extensions that identify known non-HTML resources: images, audio,
@@ -130,7 +133,10 @@ pub struct Project {
     #[serde(default = "default_obey_robots")]
     pub obey_robots: bool,
     /// Manual-login headers (for example `Cookie`), used for every request
-    /// on the start host and `allowed_hosts` only.
+    /// on the start host and `allowed_hosts` only. Known limitation: the
+    /// daemon stores them in `grab_projects` like the rest of the project
+    /// (redacted in every listing and Debug output) rather than in the sealed
+    /// site-login store, which only holds username/password pairs.
     #[serde(default)]
     pub auth_headers: AuthHeaders,
     /// Save fetched HTML pages under the destination, mirroring URL paths,
@@ -340,7 +346,7 @@ impl<'a> Crawler<'a> {
             value.set_sensitive(true);
             auth.append(HeaderName::from_bytes(name.as_bytes())?, value);
         }
-        let client = build_client(project, auth_hosts.clone())?;
+        let client = build_client(project, auth_hosts.clone(), true)?;
         let agent = project
             .headers
             .iter()
@@ -431,6 +437,9 @@ impl<'a> Crawler<'a> {
         local.extend(self.result.local_paths.clone());
         for (url, rel) in self.result.saved_pages.clone() {
             let path = dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if offline::check_mirror_file(&dir, &rel).is_err() {
+                continue;
+            }
             let (Ok(page_url), Ok(text)) = (Url::parse(&url), fs::read_to_string(&path)) else {
                 continue;
             };
@@ -449,10 +458,7 @@ impl<'a> Crawler<'a> {
         };
         let rel = mapper.assign(url, true);
         let path = dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let written = path
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| {
+        let written = offline::create_mirror_dirs(&dir, &rel).and_then(|()| {
                 use std::io::Write;
                 fs::OpenOptions::new()
                     .write(true)
@@ -487,13 +493,51 @@ impl<'a> Crawler<'a> {
         self.file_types.contains(&extension).then_some(extension)
     }
 
+    /// Include/exclude filtering of a file URL, also against its decoded form.
+    fn file_wanted(&self, url: &str) -> bool {
+        let included = self.project.include_patterns.is_empty()
+            || glob::matches_any_url(&self.project.include_patterns, url);
+        included && !glob::matches_any_url(&self.project.exclude_patterns, url)
+    }
+
+    /// Page-level admission shared by discovered links and redirect hops:
+    /// scope, exclusions and robots.txt (fetched only for in-scope,
+    /// non-excluded URLs).
+    fn page_admitted(&mut self, url: &Url) -> bool {
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return false;
+        }
+        if self.project.same_host_only {
+            let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+            if !self.hosts.contains(&host) {
+                return false;
+            }
+        }
+        let text = url.as_str();
+        if glob::matches_any_url(&self.project.exclude_patterns, text)
+            || glob::matches_any_url(&self.project.crawl_exclude_patterns, text)
+        {
+            return false;
+        }
+        self.robots_permits(url)
+    }
+
+    fn robots_permits(&mut self, url: &Url) -> bool {
+        if !self.project.obey_robots {
+            return true;
+        }
+        let path = url.path().to_string()
+            + url
+                .query()
+                .map_or_else(String::new, |query| format!("?{query}"))
+                .as_str();
+        self.robots_allows(url, &path)
+    }
+
     /// Records a candidate as a file after applying include/exclude patterns
     /// against the full URL. The crawl is halted once the file budget is hit.
     fn record_file(&mut self, url: &str, referer: &str, depth: u32, extension: String) {
-        let included = self.project.include_patterns.is_empty()
-            || glob::matches_any(&self.project.include_patterns, url);
-        let excluded = glob::matches_any(&self.project.exclude_patterns, url);
-        if !included || excluded {
+        if !self.file_wanted(url) {
             return;
         }
         if self.result.files.len() >= self.project.max_file_count {
@@ -540,21 +584,13 @@ impl<'a> Crawler<'a> {
                 return;
             }
         }
-        if self.project.obey_robots {
-            let path = candidate.path().to_string()
-                + candidate
-                    .query()
-                    .map_or_else(String::new, |query| format!("?{query}"))
-                    .as_str();
-            if !self.robots_allows(&candidate, &path) {
-                return;
-            }
-        }
         if depth > self.project.max_depth {
             return;
         }
         if let Some(extension) = self.classifies_as_file(&candidate) {
-            self.record_file(&url_text, referer, depth, extension);
+            if self.file_wanted(&url_text) && self.robots_permits(&candidate) {
+                self.record_file(&url_text, referer, depth, extension);
+            }
             return;
         }
         if depth > 0 && skips_resource(&candidate) {
@@ -562,13 +598,11 @@ impl<'a> Crawler<'a> {
             // not collect is dropped instead of being requested as a page.
             return;
         }
-        if glob::matches_any(&self.project.exclude_patterns, &url_text)
-            || glob::matches_any(&self.project.crawl_exclude_patterns, &url_text)
-        {
-            // Excluded pages are never fetched, so their links are not followed.
+        if self.page_budget_reached() {
             return;
         }
-        if self.page_budget_reached() {
+        // Excluded pages are never fetched, so their links are not followed.
+        if !self.page_admitted(&candidate) {
             return;
         }
         self.queue.push_back(Queued {
@@ -605,21 +639,53 @@ impl<'a> Crawler<'a> {
         }
         self.requests += 1;
         let page = entry.url.to_string();
-        let mut request = self.client.get(&page);
-        if entry
-            .url
-            .host_str()
-            .is_some_and(|host| self.auth_hosts.contains(&host.to_ascii_lowercase()))
-        {
-            request = request.headers(self.auth.clone());
-        }
-        let response = match request.send() {
-            Ok(response) => response,
-            Err(request_error) => {
-                self.record_error(&page, describe(&request_error));
+        let mut current = entry.url.clone();
+        let mut hops = 0;
+        let response = loop {
+            let mut request = self.client.get(current.as_str());
+            if current
+                .host_str()
+                .is_some_and(|host| self.auth_hosts.contains(&host.to_ascii_lowercase()))
+            {
+                request = request.headers(self.auth.clone());
+            }
+            let response = match request.send() {
+                Ok(response) => response,
+                Err(request_error) => {
+                    self.record_error(&page, describe(&request_error));
+                    return;
+                }
+            };
+            if !response.status().is_redirection() {
+                break response;
+            }
+            let Some(location) = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| current.join(value.trim()).ok())
+            else {
+                break response;
+            };
+            hops += 1;
+            let mut next = location;
+            next.set_fragment(None);
+            if hops > MAX_REDIRECTS {
+                self.record_error(&page, "too many redirects");
                 return;
             }
+            // A hop to another host, an excluded URL or a robots-disallowed
+            // path is neither fetched nor followed.
+            if !self.page_admitted(&next) || !self.seen.insert(next.to_string()) {
+                return;
+            }
+            current = next;
         };
+        let entry = Queued {
+            url: current,
+            depth: entry.depth,
+        };
+        let page = entry.url.to_string();
         if !response.status().is_success() {
             self.record_error(&page, format!("HTTP {}", response.status()));
             return;
@@ -678,7 +744,11 @@ impl<'a> Crawler<'a> {
 
 /// Builds a blocking client with the project's headers; a default User-Agent
 /// is installed unless the project supplies one.
-fn build_client(project: &Project, auth_hosts: HashSet<String>) -> Result<Client> {
+fn build_client(
+    project: &Project,
+    auth_hosts: HashSet<String>,
+    manual_redirects: bool,
+) -> Result<Client> {
     let mut headers = HeaderMap::new();
     if !project
         .headers
@@ -706,6 +776,13 @@ fn build_client(project: &Project, auth_hosts: HashSet<String>) -> Result<Client
             attempt.follow()
         }
     });
+    // The crawler follows redirects itself so every hop passes the same
+    // scope, robots and exclusion checks as a discovered link.
+    let policy = if manual_redirects {
+        reqwest::redirect::Policy::none()
+    } else {
+        policy
+    };
     Ok(Client::builder()
         .redirect(policy)
         .timeout(REQUEST_TIMEOUT)
@@ -720,7 +797,7 @@ pub fn fetch_text(url: &str) -> Result<String> {
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(err("only http and https URLs can be fetched"));
     }
-    let client = build_client(&Project::default(), HashSet::new())?;
+    let client = build_client(&Project::default(), HashSet::new(), false)?;
     let response = client.get(parsed).send()?;
     if !response.status().is_success() {
         return Err(err(format!("HTTP {}", response.status())));

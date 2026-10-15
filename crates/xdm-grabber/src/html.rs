@@ -64,11 +64,14 @@ pub fn extract(html: &str) -> Extracted {
                 .any(|(element, attribute)| *element == tag && *attribute == name)
             {
                 let decoded = decode_entities(&value);
-                extracted.refs.push(UrlRef {
-                    start: span.0,
-                    end: span.1,
-                    value: decoded.clone(),
-                });
+                // Valueless or empty attributes have no real span to rewrite.
+                if span.1 > span.0 {
+                    extracted.refs.push(UrlRef {
+                        start: span.0,
+                        end: span.1,
+                        value: decoded.clone(),
+                    });
+                }
                 extracted.urls.push(decoded);
             }
         }

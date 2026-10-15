@@ -8,6 +8,8 @@ use url::Url;
 
 const MAX_SEGMENT_BYTES: usize = 100;
 const MAX_SEGMENTS: usize = 32;
+/// Longest relative path produced; deeper paths get a hashed directory.
+const MAX_REL_BYTES: usize = 240;
 const RESERVED: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -30,7 +32,20 @@ fn sanitize(raw: &str) -> String {
     }
     let trimmed = out.trim_end_matches(['.', ' ']).to_string();
     let mut out = if trimmed.is_empty() { "_".to_string() } else { trimmed };
-    let stem = out.split('.').next().unwrap_or("").to_ascii_lowercase();
+    // Windows also reserves COM and LPT followed by superscript digits.
+    let stem: String = out
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' '])
+        .chars()
+        .map(|c| match c {
+            '\u{b9}' => '1',
+            '\u{b2}' => '2',
+            '\u{b3}' => '3',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect();
     if RESERVED.contains(&stem.as_str()) {
         out.insert(0, '_');
     }
@@ -147,6 +162,11 @@ impl Mapper {
         let directory = segments.join("/");
         let make = |suffix: &str| {
             let name = format!("{stem}{suffix}{extension}");
+            let directory = if directory.len() + name.len() + 1 > MAX_REL_BYTES {
+                format!("d{}", fnv_hex(&directory))
+            } else {
+                directory.clone()
+            };
             if directory.is_empty() {
                 name
             } else {
@@ -199,6 +219,60 @@ pub fn relative_link(from: &str, to: &str) -> String {
     parts.join("/")
 }
 
+/// Escapes a value spliced into an HTML attribute of any quoting style.
+fn escape_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '\'' => out.push_str("&#39;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '`' => out.push_str("&#96;"),
+            c if c.is_whitespace() => out.push_str(&format!("&#{};", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Creates the parent directories of `relative` (forward slashes) under
+/// `root`, refusing any existing component that is a symlink or not a
+/// directory so a pre-planted link cannot redirect writes out of `root`.
+pub fn create_mirror_dirs(root: &Path, relative: &str) -> std::io::Result<()> {
+    let denied = |what: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, what.to_string());
+    std::fs::create_dir_all(root)?;
+    let mut current = root.to_path_buf();
+    let parts: Vec<&str> = relative.split('/').collect();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        current.push(part);
+        match current.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(denied("destination contains a symlinked directory"));
+            }
+            Ok(meta) if !meta.is_dir() => return Err(denied("destination component is a file")),
+            Ok(_) => {}
+            Err(_) => std::fs::create_dir(&current)?,
+        }
+    }
+    Ok(())
+}
+
+/// Like `create_mirror_dirs` for an existing file: also refuses a symlink as
+/// the final component.
+pub fn check_mirror_file(root: &Path, relative: &str) -> std::io::Result<()> {
+    create_mirror_dirs(root, relative)?;
+    let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if path.symlink_metadata()?.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "saved file is a symlink",
+        ));
+    }
+    Ok(())
+}
+
 /// Rewrites links in `text` (saved at `page_rel`) that point at saved
 /// pages or files; other links stay absolute. Returns `None` when nothing
 /// changed. Pages with a `<base href>` are left alone because relative
@@ -213,9 +287,13 @@ pub fn rewrite(
     if extracted.base.is_some() {
         return None;
     }
-    let mut out = text.to_string();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
     let mut changed = false;
-    for reference in extracted.refs.iter().rev() {
+    for reference in &extracted.refs {
+        if reference.start < cursor || reference.end > text.len() {
+            continue;
+        }
         let Ok(mut target) = page_url.join(reference.value.trim()) else {
             continue;
         };
@@ -229,9 +307,12 @@ pub fn rewrite(
             link.push('#');
             link.push_str(&fragment);
         }
-        out.replace_range(reference.start..reference.end, &link);
+        out.push_str(&text[cursor..reference.start]);
+        out.push_str(&escape_attribute(&link));
+        cursor = reference.end;
         changed = true;
     }
+    out.push_str(&text[cursor..]);
     changed.then_some(out)
 }
 
@@ -270,5 +351,72 @@ mod tests {
         let out = rewrite(text, &page, "p/q.html", &local).unwrap();
         assert!(out.contains(r#"href="../files/a.zip#f""#), "{out}");
         assert!(out.contains("http://x.test/o.zip"), "{out}");
+    }
+
+    fn one_local() -> (Url, HashMap<String, String>) {
+        let mut local = HashMap::new();
+        local.insert("http://site.test/p.html".to_string(), "p.html".to_string());
+        (Url::parse("http://site.test/").unwrap(), local)
+    }
+
+    #[test]
+    fn fragments_cannot_break_out_of_attributes() {
+        let (page, local) = one_local();
+        for quote in ['\'', '"'] {
+            let text = format!("<a href={quote}/p.html#x&apos;&quot;onmouseover=alert(1)//{quote}>x</a>");
+            let out = rewrite(&text, &page, "index.html", &local).unwrap();
+            let value = &out[out.find('=').unwrap() + 2..out.rfind(quote).unwrap()];
+            assert!(!value.contains('\'') && !value.contains('"'), "{out}");
+            assert!(value.starts_with("p.html#x&#39;%22onmouseover"), "{out}");
+        }
+        let out = rewrite("<a href=/p.html#a&apos;b>x</a>", &page, "index.html", &local).unwrap();
+        assert!(!out.contains("#a'"), "{out}");
+    }
+
+    #[test]
+    fn valueless_attributes_leave_the_page_untouched() {
+        let (page, local) = one_local();
+        let text = "<a href>x</a><img src><a href=''>e</a><a href=\"/p.html\">p</a>";
+        let out = rewrite(text, &page, "index.html", &local).unwrap();
+        assert_eq!(out, "<a href>x</a><img src><a href=''>e</a><a href=\"p.html\">p</a>");
+        assert!(rewrite("<a href>x</a>", &page, "index.html", &local).is_none());
+    }
+
+    #[test]
+    fn rewriting_many_links_is_linear() {
+        let (page, local) = one_local();
+        let text = "<a href=\"/p.html\">x</a>".repeat(100_000);
+        let started = std::time::Instant::now();
+        let out = rewrite(&text, &page, "index.html", &local).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(out.matches("p.html").count(), 100_000);
+    }
+
+    #[test]
+    fn superscript_reserved_names_and_deep_paths_are_handled() {
+        for name in ["COM\u{b9}", "lpt\u{b2}.txt", "COM\u{b3}.html"] {
+            assert!(sanitize(name).starts_with('_'), "{name}");
+        }
+        let mut m = mapper();
+        let deep: String = (0..30).map(|i| format!("{}{i}/", "d".repeat(90))).collect();
+        let url = Url::parse(&format!("http://site.test/{deep}file.zip")).unwrap();
+        let mapped = m.assign(&url, false);
+        assert!(mapped.len() <= MAX_REL_BYTES, "{}", mapped.len());
+        assert!(mapped.ends_with("file.zip"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_ancestors_are_refused() {
+        let base = std::env::temp_dir().join(format!("xdm-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        assert!(create_mirror_dirs(&root, "link/sub/x.html").is_err());
+        assert!(!outside.join("sub").exists());
+        assert!(create_mirror_dirs(&root, "ok/sub/x.html").is_ok());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

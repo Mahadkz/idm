@@ -56,8 +56,6 @@ EXPECTED_FAIL = {
     "category-retroactive": "retroactive category rule reassignment for existing completed tasks without moving files is not implemented",
     "remove-versus-delete": "bulk task removal with optional on-disk completed file deletion policy is not supported in the daemon",
     "proxy-selection": "PAC script fetching and execution, WPAD discovery, and protocol-selective proxy routing are not implemented",
-    "grabber-auth-and-offline": "exclude_patterns filter collected files only so logout pages are still crawled, and saved HTML is stored verbatim without local link rewriting",
-    "playlist-link-expansion": "list import treats every non-comment line as a task so HLS media playlists expand into segment tasks (no HLS tag detection)",
 }
 
 
@@ -1156,15 +1154,14 @@ def test_grabber_auth_and_offline():
             out = Path(temp)
             project = out / "p.json"
             project.write_text(json.dumps({
-                "start_url": server.url("/"), "file_types": ["zip", "html"],
+                "start_url": server.url("/"), "file_types": ["zip"], "save_pages": True,
                 "exclude_patterns": ["*logout*"], "obey_robots": False}))
             crawl = json.loads(run(CLI, "grab", project).stdout)
             files = [f["url"] for f in crawl["files"]]
             assert server.url("/files/logout.zip") not in files, files
             assert server.url("/files/a.zip") in files, files
-            gaps = []
-            if any(entry["path"] == "/logout" for entry in server.log):
-                gaps.append("exclude_patterns only filters the collected file list: the crawler still fetched the /logout page matching '*logout*' and collected files linked from it (secret.zip)")
+            assert not any(entry["path"] == "/logout" for entry in server.log), "excluded logout page was fetched"
+            assert server.url("/files/secret.zip") not in files, files
             dest = out / "dl"
             dest.mkdir()
             server.set("/files/a.zip", size=100)
@@ -1177,18 +1174,17 @@ def test_grabber_auth_and_offline():
                 assert json.loads(grabbed.stdout)["ok"], grabbed.stdout
                 page = dest / "page2.html"
                 deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and not (page.exists() and (dest / "a.zip").exists()):
+                while time.monotonic() < deadline and not (page.exists() and (dest / "files" / "a.zip").exists()):
                     time.sleep(0.1)
                 time.sleep(0.5)
-                if page.exists():
-                    text = page.read_text(errors="replace")
-                    if 'href="/files/a.zip"' in text:
-                        gaps.append("saved page2.html still contains its original server link '/files/a.zip' (grabber stores HTML verbatim; grep finds no link rewriting in xdm-grabber), so it does not resolve to the local copy")
-                else:
-                    gaps.append("grabbed HTML page was not saved to the destination folder")
+                assert page.exists(), "grabbed HTML page was not saved to the destination folder"
+                text = page.read_text(errors="replace")
+                assert 'href="/files/a.zip"' not in text and 'href="files/a.zip"' in text, text
+                assert (dest / "files" / "a.zip").exists(), "collected file not at the mirrored path the saved page links to"
+                index = (dest / "index.html").read_text(errors="replace")
+                assert 'href="page2.html"' in index and 'href="/files/logout.zip"' in index and 'href="files/a.zip"' in index, index
             finally:
                 daemon.terminate()
-            gaps_assert(gaps)
     finally:
         server.close()
 

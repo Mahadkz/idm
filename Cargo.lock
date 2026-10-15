@@ -5760,6 +5760,7 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "serde_json",
+ "url",
  "xdm-ftp",
  "xdm-grabber",
  "xdm-http",
@@ -5806,6 +5807,7 @@ dependencies = [
 name = "xdm-grabber"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

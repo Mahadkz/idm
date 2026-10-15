@@ -14,12 +14,12 @@
       "partial": 10
     },
     "idm_behavior_review.md": {
-      "partial": 34,
-      "missing": 5
+      "partial": 36,
+      "missing": 3
     }
   },
   "source_sha256": {
-    "tests/integration/contracts_behavior.py": "1600f5195e8f693c0c99fe4243b23e1b7ebbc1b26b5605f7263b41f55bca2ede"
+    "tests/integration/contracts_behavior.py": "ec7123fe0001fd2eabf1b6572703226a50dd452d2d047237d64aefe22690bcbf"
   },
   "contracts": [
     {
@@ -1582,14 +1582,14 @@
       "title": "Crawler supports manual login, excludes logout patterns, uses relative folders a",
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "grabber.crawl: pending; grabber.destination: pending; grabber.project: pending",
-      "status": "missing",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_behavior.py"
       ],
       "behavior_suite": {
         "test_function": "test_grabber_auth_and_offline",
-        "result": "xfail",
-        "reason": "exclude_patterns filter collected files only so logout pages are still crawled, and saved HTML is stored verbatim without local link rewriting"
+        "result": "pass",
+        "reason": null
       }
     },
     {
@@ -1690,14 +1690,14 @@
       "title": "Downloaded M3U can offer its MP3 links as one download or a batch, separate from",
       "source_doc": "idm_behavior_review.md",
       "current_behavior": "media.overlay: pending; browser.all_links: pending",
-      "status": "missing",
+      "status": "partial",
       "test_refs": [
         "tests/integration/contracts_behavior.py"
       ],
       "behavior_suite": {
         "test_function": "test_playlist_link_expansion",
-        "result": "xfail",
-        "reason": "list import treats every non-comment line as a task so HLS media playlists expand into segment tasks (no HLS tag detection)"
+        "result": "pass",
+        "reason": null
       }
     },
     {

@@ -24,6 +24,16 @@ pub struct Extracted {
     pub urls: Vec<String>,
     /// Value of the first `<base href>` seen in the document, if any.
     pub base: Option<String>,
+    /// Byte ranges of the raw attribute values behind `urls`, with the
+    /// decoded value, for link rewriting.
+    pub refs: Vec<UrlRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UrlRef {
+    pub start: usize,
+    pub end: usize,
+    pub value: String,
 }
 
 /// Scans an HTML document for URL-bearing attributes.
@@ -45,7 +55,7 @@ pub fn extract(html: &str) -> Extracted {
             continue;
         };
         let tag = tag.to_ascii_lowercase();
-        for (name, value) in after_tag.attributes {
+        for ((name, value), span) in after_tag.attributes.into_iter().zip(after_tag.spans) {
             if tag == "base" && name == "href" && extracted.base.is_none() {
                 extracted.base = Some(decode_entities(&value));
             }
@@ -53,7 +63,16 @@ pub fn extract(html: &str) -> Extracted {
                 .iter()
                 .any(|(element, attribute)| *element == tag && *attribute == name)
             {
-                extracted.urls.push(decode_entities(&value));
+                let decoded = decode_entities(&value);
+                // Valueless or empty attributes have no real span to rewrite.
+                if span.1 > span.0 {
+                    extracted.refs.push(UrlRef {
+                        start: span.0,
+                        end: span.1,
+                        value: decoded.clone(),
+                    });
+                }
+                extracted.urls.push(decoded);
             }
         }
         if RAW_TEXT_ELEMENTS.contains(&tag.as_str()) {
@@ -70,6 +89,8 @@ pub fn extract(html: &str) -> Extracted {
 /// closing `>`.
 struct Tag {
     attributes: Vec<(String, String)>,
+    /// Byte range of each attribute's raw value, parallel to `attributes`.
+    spans: Vec<(usize, usize)>,
     end: usize,
 }
 
@@ -89,6 +110,7 @@ fn parse_start_tag(bytes: &[u8], at: usize) -> Option<(String, Tag)> {
     }
     let name = String::from_utf8_lossy(&bytes[start..i]).into_owned();
     let mut attributes = Vec::new();
+    let mut spans = Vec::new();
     let mut end = bytes.len();
     loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
@@ -119,6 +141,7 @@ fn parse_start_tag(bytes: &[u8], at: usize) -> Option<(String, Tag)> {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
+        let mut span = (0, 0);
         let value = if i < bytes.len() && bytes[i] == b'=' {
             i += 1;
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
@@ -132,6 +155,7 @@ fn parse_start_tag(bytes: &[u8], at: usize) -> Option<(String, Tag)> {
                     i += 1;
                 }
                 let value = String::from_utf8_lossy(&bytes[value_start..i]).into_owned();
+                span = (value_start, i);
                 if i < bytes.len() && bytes[i] == quote {
                     i += 1;
                 }
@@ -141,6 +165,7 @@ fn parse_start_tag(bytes: &[u8], at: usize) -> Option<(String, Tag)> {
                 while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
                     i += 1;
                 }
+                span = (value_start, i);
                 String::from_utf8_lossy(&bytes[value_start..i]).into_owned()
             }
         } else {
@@ -148,9 +173,10 @@ fn parse_start_tag(bytes: &[u8], at: usize) -> Option<(String, Tag)> {
         };
         if !attribute.is_empty() {
             attributes.push((attribute.to_ascii_lowercase(), value));
+            spans.push(span);
         }
     }
-    Some((name.clone(), Tag { attributes, end }))
+    Some((name.clone(), Tag { attributes, spans, end }))
 }
 
 /// First offset past `needle` at or after `from`, or `bytes.len()`.

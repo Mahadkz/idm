@@ -117,6 +117,7 @@ pub fn build_grabber_project(
         request_delay_ms: 0,
         max_file_count: 1000,
         obey_robots,
+        ..Project::default()
     })
 }
 

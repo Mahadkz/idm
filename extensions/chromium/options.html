@@ -41,6 +41,25 @@
     <button id="saveOptions">Save</button> <span id="saveStatus" class="note"></span>
   </div>
   <div class="card">
+    <h3>Media Panel &amp; Player Overlay</h3>
+    <p>Minimum size applies only when the total size is known (Content-Length or Content-Range). Media of unknown size, and streams, are never hidden. 0 means no minimum.</p>
+    <label>Minimum audio size (KB) <input id="minAudioKb" type="number" min="0" value="0"></label>
+    <label>Minimum video size (KB) <input id="minVideoKb" type="number" min="0" value="0"></label>
+    <label>Hide media panel and overlay on sites <input id="panelExcludedSites" placeholder="example.com, *.cdn.example"></label>
+    <label>Overlay mode <select id="overlayMode"><option value="full">Full</option><option value="mini">Mini</option></select></label>
+    <label>Disable overlay on sites <input id="overlayDisabledSites" placeholder="video.example"></label>
+    <p class="note">The overlay is never shown for DRM-protected (EME) media.</p>
+  </div>
+  <div class="card">
+    <h3>Mistaken Captures</h3>
+    <p>When you cancel captured downloads from one site repeatedly, XDM offers (never forces) to exclude that site.</p>
+    <label><input type="checkbox" id="miscaptureEnabled" checked> Offer to exclude sites</label>
+    <label>Cancellations needed <input id="miscaptureThreshold" type="number" min="2" max="10" value="2"></label>
+    <label>Within (seconds) <input id="miscaptureWindow" type="number" min="5" max="3600" value="120"></label>
+    <label>Sites you declined <input id="miscaptureDismissed" placeholder="none"></label>
+    <button id="saveMedia">Save</button> <span id="saveMediaStatus" class="note"></span>
+  </div>
+  <div class="card">
     <h3>Repair &amp; Native Host Status</h3>
     <p>If downloads fail to hand off to the XDM desktop application, ensure the XDM daemon is running and the native messaging manifest <code>org.xdm.browser</code> is registered.</p>
   </div>

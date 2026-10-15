@@ -1254,6 +1254,35 @@ def test_playlist_link_expansion():
             daemon.terminate()
 
 
+def run_browser_contract(test_id):
+    """Runs one mocked-browser-API check from contracts_browser.mjs (Chromium MV3 and Firefox MV2 code)."""
+    result = subprocess.run(
+        ["nice", "-n", "19", "node", str(ROOT / "tests/integration/contracts_browser.mjs"), test_id],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, f"{test_id} failed in contracts_browser.mjs:\n{result.stdout}\n{result.stderr}"
+    assert f"PASS:  {test_id}" in result.stdout, f"{test_id} did not run:\n{result.stdout}"
+
+
+def test_minimum_media_size():
+    """Small known audio/video, unknown content length, short manifest with large segments and duration-only
+    candidate: separate audio/video thresholds apply only to a known whole-file size (mocked browser APIs)."""
+    run_browser_contract("MEDIA_SIZE")
+
+
+def test_miscapture_exceptions():
+    """Second cancellation, window expiry, enable/disable: a site exclusion is offered, never added silently
+    (mocked browser APIs; browser-side completion of the excluded download is not exercised)."""
+    run_browser_contract("MISCAPTURE")
+
+
+def test_player_panel_policy():
+    """Panel-disabled site, mini/full mode, protected (EME) media never offered, overlay isolated in a closed
+    shadow root with Escape handling (mocked browser APIs; real DRM playback and fullscreen are not exercised)."""
+    run_browser_contract("PANEL_POLICY")
+    run_browser_contract("OVERLAY_SHADOW")
+
+
 UNTESTED = {
     "quota-window": "pending bandwidth branch: hourly quota accounting is being built on another branch",
     "limiter-precedence": "pending bandwidth branch: global speed limit and per-task override precedence are being built on another branch",
@@ -1261,10 +1290,7 @@ UNTESTED = {
     "file-actions": "completed-file move/rename exists as IPC TaskMoveFile (tested in daemon_gaps.py); opening files and the GUI actions still need a GUI-automation harness",
     "search-scopes": "search is a GUI-only LineEdit filter (xdm-gui main.rs); needs a GUI-automation harness",
     "force-bypass-capture": "needs a real browser with keyboard-modifier input driving the extension",
-    "miscapture-exceptions": "needs a real browser to cancel downloads and observe browser-side completion",
     "all-links-and-clipboard": "clipboard monitoring lives in xdm-gui clipboard.rs and all-links in the extension; needs a GUI clipboard harness and browser",
-    "player-panel-policy": "floating in-page player panel needs a real browser page with video elements",
-    "minimum-media-size": "media panel size threshold is browser/extension UI with no headless entry point",
     "stream-assembly-fallback": "needs ffmpeg-generated segments with codec pairs that mux-fail to drive the media job; no such fixture generator exists yet",
     "updater-integrity": "no updater code or entry point exists in any binary to exercise; needs a harness once an updater lands",
     "appearance-and-progress": "theme, font scaling and window layout are GUI-only; needs a GUI screenshot harness",
@@ -1301,6 +1327,9 @@ TESTS = [
     test_grabber_auth_and_offline,
     test_grabber_project_recovery,
     test_playlist_link_expansion,
+    test_minimum_media_size,
+    test_miscapture_exceptions,
+    test_player_panel_policy,
 ]
 
 PRINT_LOCK = threading.Lock()

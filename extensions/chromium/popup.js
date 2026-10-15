@@ -1,3 +1,16 @@
+// Offers to exclude a site after repeated cancelled captures; nothing is excluded until the user clicks Exclude.
+chrome.runtime.sendMessage({ type: "miscapture.pending" }).then(reply => {
+  const root = document.querySelector("#offers");
+  for (const offer of reply?.offers || []) {
+    const box = document.createElement("div"); box.className = "offer";
+    const text = document.createElement("div"); text.textContent = `You cancelled captured downloads from ${offer.site} more than once. Let the browser handle this site?`;
+    const yes = document.createElement("button"); yes.textContent = `Exclude ${offer.site}`;
+    const no = document.createElement("button"); no.textContent = "Keep capturing";
+    const answer = type => async () => { await chrome.runtime.sendMessage({ type, site: offer.site }); box.remove(); };
+    yes.addEventListener("click", answer("miscapture.accept")); no.addEventListener("click", answer("miscapture.dismiss"));
+    box.append(text, yes, no); root.append(box);
+  }
+}).catch(() => {});
 const toggle = document.querySelector("#intercept");
 chrome.storage.local.get({ interceptDownloads: false }).then(value => toggle.checked = value.interceptDownloads);
 toggle.addEventListener("change", () => chrome.storage.local.set({ interceptDownloads: toggle.checked }));

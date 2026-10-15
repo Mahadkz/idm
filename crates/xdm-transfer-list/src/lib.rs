@@ -96,11 +96,48 @@ fn unique_name(proposed: &str, names: &mut HashSet<String>) -> String {
 }
 
 pub fn parse(input: &str) -> Result<TransferList, String> {
+    parse_with_base(input, None)
+}
+
+/// True for an HLS playlist: its tags make it a media manifest, not a list of
+/// independent downloads.
+pub fn is_hls_playlist(input: &str) -> bool {
+    let mut after_extinf = false;
+    for line in input.lines() {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        if line.contains("#EXT-X-") {
+            return true;
+        }
+        if line.starts_with("#EXTINF") {
+            after_extinf = true;
+        } else if line.is_empty() || line.starts_with('#') {
+            continue;
+        } else if after_extinf {
+            after_extinf = false;
+            let path = line.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+            // Transport-stream and fragmented-MP4 segments only occur in HLS; .m4a/.aac
+            // are ordinary audio tracks in plain M3U playlists.
+            if [".ts", ".m4s"].iter().any(|ext| path.ends_with(ext)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub const HLS_MESSAGE: &str = "this is an HLS playlist (#EXT-X- tags): its segments are not independent downloads; use the media workflow (xdm-cli daemon media-job MANIFEST_URL OUTPUT video ...)";
+
+/// Like `parse`, resolving relative playlist links against `base` (the
+/// playlist's own URL) when given. M3U/M3U8 and PLS playlists are recognized;
+/// HLS playlists are rejected with a pointer to the media workflow.
+pub fn parse_with_base(input: &str, base: Option<&Url>) -> Result<TransferList, String> {
     if input.len() > MAX_LIST_BYTES {
         return Err("input exceeds 512 KiB".into());
     }
     let input = input.trim_start_matches('\u{feff}').trim();
-    if input.starts_with('{') || input.starts_with('[') {
+    if input.starts_with('{')
+        || (input.starts_with('[') && !input.to_ascii_lowercase().starts_with("[playlist]"))
+    {
         let list: TransferList =
             serde_json::from_str(input).map_err(|e| format!("invalid JSON task list: {e}"))?;
         if list.version != 1 {
@@ -112,15 +149,38 @@ pub fn parse(input: &str) -> Result<TransferList, String> {
         validate(&list.entries)?;
         return Ok(list);
     }
+    if is_hls_playlist(input) {
+        return Err(HLS_MESSAGE.into());
+    }
+    let pls = input
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim().eq_ignore_ascii_case("[playlist]"));
     let mut entries = Vec::new();
     let mut urls = HashSet::new();
     let mut names = HashSet::new();
     for (index, line) in input.lines().enumerate() {
-        let line = line.trim();
+        let mut line = line.trim();
+        if pls {
+            // Only FileN= keys carry locations; titles, lengths and counts do not.
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim().to_ascii_lowercase();
+            if !key.strip_prefix("file").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
+                continue;
+            }
+            line = value.trim();
+        }
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let url = Url::parse(line).map_err(|_| format!("invalid URL on line {}", index + 1))?;
+        let url = Url::parse(line)
+            .or_else(|error| match base {
+                Some(base) if error == url::ParseError::RelativeUrlWithoutBase => base.join(line),
+                _ => Err(error),
+            })
+            .map_err(|_| format!("invalid or unresolvable URL on line {}", index + 1))?;
         if !urls.insert(url.to_string()) {
             continue;
         }
@@ -430,6 +490,18 @@ pub fn expand_batch(template: &str, limit: usize) -> Result<Vec<String>, String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hls_is_detected_by_segments_and_late_tags() {
+        use super::is_hls_playlist;
+        assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nseg0.ts?x=1\n#EXTINF:4,\nseg1.ts\n"));
+        assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.m4s\n"));
+        assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.mp3\n\n#EXT-X-ENDLIST"));
+        assert!(!is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.mp3\n"));
+        // Plain audio playlists of AAC/M4A tracks are not HLS.
+        assert!(!is_hls_playlist("#EXTM3U\n#EXTINF:180,Song\nhttp://h/a.m4a\n#EXTINF:200,Two\nb.aac\n"));
+        assert!(super::parse("#EXTM3U\n#EXTINF:4,\nseg0.ts\n").is_err());
+    }
+
     use super::*;
     #[test]
     fn text_names_duplicates_and_traversal() {
@@ -440,6 +512,22 @@ mod tests {
         assert_eq!(list.entries[3].filename, "download (2).bin");
         assert!(parse("file:///etc/passwd").is_err());
         assert!(parse("https://name:password@a.test/file").is_err());
+    }
+    #[test]
+    fn hls_playlists_are_not_expanded_and_audio_playlists_are() {
+        let hls = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttp://a.test/s0.ts\n#EXTINF:6,\nhttp://a.test/s1.ts\n#EXT-X-ENDLIST\n";
+        assert!(parse(hls).unwrap_err().contains("media workflow"));
+        let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8\n";
+        assert!(parse(master).is_err());
+        let audio = "#EXTM3U\n#EXTINF:1,A\nhttp://a.test/one.mp3\n#EXTINF:1,B\nhttp://a.test/one.mp3\ntwo.ogg\n";
+        assert!(parse(audio).is_err(), "relative link without a base is malformed");
+        let base = Url::parse("http://a.test/dir/list.m3u").unwrap();
+        let list = parse_with_base(audio, Some(&base)).unwrap();
+        let urls: Vec<_> = list.entries.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(urls, ["http://a.test/one.mp3", "http://a.test/dir/two.ogg"]);
+        let pls = "[playlist]\nNumberOfEntries=2\nFile1=http://a.test/x.mp3\nTitle1=X\nLength1=5\nFile2=http://a.test/y.aac\nVersion=2\n";
+        assert_eq!(parse(pls).unwrap().entries.len(), 2);
+        assert!(parse("#EXTM3U\nnot a url\n").unwrap_err().contains("line 2"));
     }
     #[test]
     fn json_round_trip_and_no_header_fields() {

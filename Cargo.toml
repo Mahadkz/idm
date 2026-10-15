@@ -2,6 +2,9 @@
 members = ["crates/xdm-http", "crates/xdm-cli", "crates/xdm-ipc", "crates/xdm-daemon", "crates/xdm-native-host", "crates/xdm-media", "crates/xdm-gui", "crates/xdm-categories", "crates/xdm-transfer-list", "crates/xdm-ftp", "crates/xdm-grabber"]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

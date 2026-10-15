@@ -162,13 +162,15 @@ def main():
             assert digest(base / "one.bin") == EXPECTED_HASH
 
             # The saved origin login is applied automatically to a fresh task;
-            # every request then carries exactly the right Basic header.
+            # the first request meets the challenge (the password is only sent in the
+            # scheme the server asks for), then every request carries the Basic header.
             before = len(requests())
             second = cli("submit", url, base / "two.bin")["task_id"]
             until(second, lambda task: task["status"] == "complete")
             assert digest(base / "two.bin") == EXPECTED_HASH
             applied = requests()[before:]
-            assert applied and all(entry["authorization"] == AUTH for entry in applied), applied
+            assert applied[0]["authorization"] is None, applied
+            assert len(applied) > 1 and all(entry["authorization"] == AUTH for entry in applied[1:]), applied
 
             # A wrong password on a more specific path is applied, rejected and
             # recorded as auth_required again; removing it and providing the

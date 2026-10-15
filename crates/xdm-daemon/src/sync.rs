@@ -59,25 +59,11 @@ pub(crate) fn changed(saved: &Validators, local_len: Option<u64>, remote: &Valid
     matches!((saved.length, remote.length), (Some(a), Some(b)) if a != b)
 }
 
-fn client(proxy: &Proxy) -> Result<Client> {
-    let mut builder = Client::builder()
+fn client(proxy: &Proxy, login: Option<&xdm_http::Login>) -> Result<Client> {
+    let builder = Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(15));
-    match proxy {
-        Proxy::System => {}
-        Proxy::Direct => builder = builder.no_proxy(),
-        Proxy::Manual { http, https, bypass } => {
-            builder = builder.no_proxy();
-            let no_proxy = reqwest::NoProxy::from_string(&bypass.join(","));
-            if let Some(url) = http {
-                builder = builder.proxy(reqwest::Proxy::http(url)?.no_proxy(no_proxy.clone()));
-            }
-            if let Some(url) = https {
-                builder = builder.proxy(reqwest::Proxy::https(url)?.no_proxy(no_proxy));
-            }
-        }
-    }
-    Ok(builder.build()?)
+    Ok(xdm_http::apply_proxy(builder, proxy, login)?.build()?)
 }
 
 fn header(response: &Response, name: reqwest::header::HeaderName) -> Option<String> {
@@ -100,9 +86,10 @@ pub(crate) fn probe(
     url: &str,
     headers: &[(String, String)],
     proxy: &Proxy,
+    proxy_login: Option<&xdm_http::Login>,
     saved: &Validators,
 ) -> Result<Probed> {
-    let client = client(proxy)?;
+    let client = client(proxy, proxy_login)?;
     let build = |method: reqwest::Method| {
         let mut request = client.request(method, url);
         for (name, value) in headers {
@@ -366,7 +353,18 @@ impl Service {
         }
         let output = Path::new(&member.output);
         let local_len = std::fs::metadata(output).ok().map(|meta| meta.len());
-        let remote = match probe(&member.url, &member.headers, proxy, &member.saved)? {
+        let proxy_login = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("task lock poisoned"))?
+            .credentials
+            .proxy_login()
+            .map(|stored| xdm_http::Login {
+                username: stored.username.clone(),
+                password: stored.password.clone(),
+                allow_insecure: false,
+            });
+        let remote = match probe(&member.url, &member.headers, proxy, proxy_login.as_ref(), &member.saved)? {
             Probed::NotModified => return Ok(false),
             Probed::Remote(remote) => remote,
         };
@@ -387,6 +385,8 @@ impl Service {
         let temp = temp_path(output, member.id);
         cleanup(&temp);
         let options = Options {
+            login: None,
+            proxy_login,
             url: member.url.clone(),
             output: temp.clone(),
             connections: member.connections,

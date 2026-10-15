@@ -10,6 +10,7 @@ xdm-ipc = { path = "../xdm-ipc" }
 xdm-media = { path = "../xdm-media" }
 xdm-categories = { path = "../xdm-categories" }
 xdm-ftp = { path = "../xdm-ftp" }
+sha2 = "0.10"
 xdm-grabber = { path = "../xdm-grabber" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
 url = "2"

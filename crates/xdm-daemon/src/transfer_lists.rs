@@ -2,6 +2,7 @@ use crate::categories::{load_rules, url_host};
 use crate::media::stored_media_mode;
 use crate::{Result, Service, next_task_id};
 use rusqlite::params;
+use sha2::Digest;
 use rusqlite::OptionalExtension;
 use std::io;
 use std::path::Path;
@@ -20,6 +21,20 @@ pub(crate) fn destination_free(output: &Path) -> bool {
     ["", ".part", ".part.meta", ".xdm-part", ".part.ftp"]
         .into_iter()
         .all(|suffix| std::fs::symlink_metadata(format!("{}{suffix}", output.display())).is_err())
+}
+
+/// Headers that carry credentials; never kept in replay payloads or after completion.
+pub(crate) fn secret_header(name: &str) -> bool {
+    ["cookie", "authorization", "proxy-authorization", "set-cookie", "set-cookie2"]
+        .iter()
+        .any(|secret| name.eq_ignore_ascii_case(secret))
+}
+
+/// Headers a submitter may never set: they would break framing or the engine's own range logic.
+pub(crate) fn forbidden_header(name: &str) -> bool {
+    ["host", "range", "if-range", "accept-encoding", "content-length", "transfer-encoding"]
+        .iter()
+        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
 }
 
 impl Service {
@@ -52,6 +67,7 @@ impl Service {
                 || entry.headers.iter().any(|(name, value)| {
                     name.is_empty()
                         || name.len() > 128
+                        || forbidden_header(name)
                         || value.len() > 8192
                         || name.bytes().any(|b| b.is_ascii_control() || b == b':')
                         || value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
@@ -59,7 +75,22 @@ impl Service {
         }) {
             return Ok(Reply::error("invalid request headers"));
         }
-        let payload_json = serde_json::to_string(&(&directory, &entries, enqueue))?;
+        // The idempotency payload never holds credentials: secret headers are replaced by
+        // a digest so a replay with different secrets still compares unequal.
+        let mut stored = entries.clone();
+        let mut secret_digests = Vec::new();
+        for entry in &mut stored {
+            let mut digest = sha2::Sha256::new();
+            for (name, value) in entry.headers.iter().filter(|(name, _)| secret_header(name)) {
+                digest.update(name.to_ascii_lowercase().as_bytes());
+                digest.update([0]);
+                digest.update(value.as_bytes());
+                digest.update([0]);
+            }
+            secret_digests.push(format!("{:x}", digest.finalize()));
+            entry.headers.retain(|(name, _)| !secret_header(name));
+        }
+        let payload_json = serde_json::to_string(&(&directory, &stored, enqueue, &secret_digests))?;
         let mut inner = self
             .inner
             .lock()

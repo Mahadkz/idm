@@ -63,7 +63,7 @@ def main():
             def item(i, name, mime=None):
                 value = {"requestId": f"b-{i}", "url": f"http://127.0.0.1:{port}/{name}", "mime": mime or "",
                          "requestContext": {"referrer": "https://page.test/list",
-                                            "cookies": [{"header": "session=abc123"}]}}
+                                            "cookies": [{"url": f"http://127.0.0.1:{port}/", "header": "session=abc123"}]}}
                 return value
 
             items = [item(0, "a.zip"), item(1, "b.mp4"), item(2, "a.zip"), item(3, "c.pdf")]
@@ -96,6 +96,30 @@ def main():
             dup = second["skippedDuplicates"]
             assert len(dup) == 1 and dup[0]["index"] == 0 and dup[0]["duplicateOf"] == reply["taskIds"][0], second
 
+            # A cookie read for another origin is dropped by the host; forbidden headers and
+            # fragments in URLs are handled.
+            foreign = item(0, "e.bin")
+            foreign["requestContext"]["cookies"][0]["url"] = "http://evil.invalid/"
+            frag = {"requestId": "b-1", "url": f"http://127.0.0.1:{port}/g.bin#a/b.zip"}
+            third = send({"version": 1, "requestId": "batch-3", "type": "batch.submit",
+                          "payload": {"batchId": "batch-3", "count": 2, "items": [foreign, frag]}})
+            assert third["accepted"] and third["acceptedCount"] == 2, third
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not (downloads / "g.bin").exists():
+                time.sleep(0.1)
+            assert (downloads / "g.bin").exists() and not (downloads / "Compressed/b.zip").exists()
+            assert seen["/e.bin"]["cookie"] is None, seen
+            forbidden = item(0, "h.bin")
+            forbidden["requestContext"]["headers"] = [{"name": "Range", "value": "bytes=0-1"}]
+            rejected = send({"version": 1, "requestId": "batch-f", "type": "batch.submit",
+                             "payload": {"count": 1, "items": [forbidden]}})
+            assert rejected["type"] == "error" and "forbidden" in rejected["reason"], rejected
+            # Receipts never hold credentials.
+            import sqlite3
+            with sqlite3.connect(base / "state/tasks.sqlite3") as database:
+                payloads = " ".join(row[0] for row in database.execute("SELECT payload_json FROM imports"))
+            assert "abc123" not in payloads, "cookie leaked into the import receipt"
+
             # Rejections are error replies (the extension then falls back to per-link submission) and add nothing.
             for bad in [
                 [item(0, "x.bin"), {"requestId": "b-1", "url": "file:///etc/passwd"}],
@@ -116,7 +140,7 @@ def main():
                 token = (base / "state/ipc-token").read_text().strip()
                 listed = exchange(raw.makefile("rwb"), {"version": 1, "token": token, "command": {"type": "list"}})
             names = sorted(Path(t["output"]).name for t in listed["tasks"])
-            assert names == ["a.zip", "b.mp4", "c.pdf", "d.bin"], names
+            assert names == ["a.zip", "b.mp4", "c.pdf", "d.bin", "e.bin", "g.bin"], names
             host.stdin.close()
             assert host.wait(timeout=5) == 0
             print(json.dumps({"result": "passed", "cases": ["batch accepted", "in-batch duplicates", "idempotent replay",

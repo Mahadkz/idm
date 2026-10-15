@@ -283,9 +283,48 @@ if (typeof Object !== "undefined" && Object.prototype) {
   });
 }
 
+
+// Same-site heuristic for B32 batches: registrable domain = last two host labels, or last three
+// under a small list of well-known multi-label public suffixes (co.uk, com.au, ...). IP literals
+// and single-label hosts are their own site. This is deliberately conservative, not a full
+// public-suffix list: an unknown multi-label suffix makes unrelated sites look same-site only
+// when both share that suffix, so the cookie rule below stays the main guard.
+const MULTI_LABEL_SUFFIXES = new Set(["co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "co.in", "com.br", "com.cn", "com.tr", "co.za"]);
+function registrableDomain(host) {
+  host = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!host || host.includes(":") || /^[\d.]+$/.test(host)) return host;
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  return MULTI_LABEL_SUFFIXES.has(labels.slice(-2).join(".")) ? labels.slice(-3).join(".") : labels.slice(-2).join(".");
+}
+function sameSite(a, b) {
+  try { return registrableDomain(new URL(a).hostname) === registrableDomain(new URL(b).hostname); } catch { return false; }
+}
+// Cookies for a link of a "download all/selected links" batch: everything for same-site links;
+// for cross-site links only SameSite=None cookies, never Strict/Lax/unspecified (an unspecified
+// cookie is Lax by default), so a hostile page cannot ride the user's session cross-site.
+function batchCookies(cookies, linkUrl, pageUrl) {
+  if (sameSite(linkUrl, pageUrl)) return cookies;
+  return cookies.filter(cookie => cookie.sameSite === "no_restriction");
+}
+// strict-origin-when-cross-origin: full URL (no fragment or userinfo) for same-origin links,
+// origin only across origins, nothing on an https -> http downgrade.
+function refererFor(pageUrl, linkUrl) {
+  try {
+    const page = new URL(pageUrl), link = new URL(linkUrl);
+    if (page.origin === link.origin) return `${page.origin}${page.pathname}${page.search}`;
+    if (page.protocol === "https:" && link.protocol === "http:") return undefined;
+    return `${page.origin}/`;
+  } catch { return undefined; }
+}
+// The same checks the native host applies to every browser handoff.
+function validHandoffUrl(url) {
+  try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) && !u.username && !u.password && url.length <= 8192; } catch { return false; }
+}
+
 function buildPayload(url, filenameHint, pageUrl, request, capture, cookies, mime = "") {
   const cookie = cookies.map(item => `${item.name}=${item.value}`).join("; ");
-  const referrer = request?.headers?.find(header => header.name.toLowerCase() === "referer")?.value || (pageUrl || undefined);
+  const referrer = request?.headers?.find(header => header.name.toLowerCase() === "referer")?.value || (pageUrl ? refererFor(pageUrl, url) : undefined);
   const agent = request?.headers?.find(header => header.name.toLowerCase() === "user-agent")?.value || navigator.userAgent;
   const headers = [{ name: "User-Agent", value: agent }];
   if (capture.body) headers.push({ name: "Content-Type", value: capture.body.contentType });
@@ -298,6 +337,7 @@ function buildPayload(url, filenameHint, pageUrl, request, capture, cookies, mim
 }
 
 async function submit(url, filenameHint, pageUrl = "", requestId = crypto.randomUUID(), mime = "", tabId) {
+  if (!validHandoffUrl(url)) return { accepted: false, reason: "only http(s) links without credentials can be handed to XDM" };
   if (["hls", "dash"].includes(mediaKind(url))) return { accepted: false, reason: "choose a stream in the XDM popup" };
   const request = getRecentRequest(url, tabId);
   const capture = capturedBody(url, request, tabId);
@@ -316,7 +356,8 @@ async function submitLinkBatch(links, pageUrl, tabId) {
   const items = [];
   for (const [index, link] of links.entries()) {
     if (["hls", "dash"].includes(mediaKind(link.url))) continue;
-    const cookies = await chrome.cookies.getAll({ url: link.url }).catch(() => []);
+    if (!validHandoffUrl(link.url)) continue;
+    const cookies = batchCookies(await chrome.cookies.getAll({ url: link.url }).catch(() => []), link.url, pageUrl);
     items.push({ requestId: `${batchId}-${index}`, ...buildPayload(link.url, undefined, pageUrl, null, { method: "GET" }, cookies) });
   }
   if (items.length === 0) return { accepted: false, count: 0, reason: "no downloadable links" };
@@ -324,6 +365,11 @@ async function submitLinkBatch(links, pageUrl, tabId) {
     version: 1, requestId: batchId, type: "batch.submit", payload: { batchId, count: items.length, items }
   }).catch(error => ({ type: "error", reason: String(error?.message || error) }));
   if (batchReply && batchReply.type !== "error" && batchReply.accepted !== undefined) return { ...batchReply, batchId, count: items.length };
+  // Only a host that does not know batch.submit gets the per-link path. A validation error
+  // is surfaced: retrying link by link would bypass the batch checks.
+  if (!(batchReply?.type === "error" && /unsupported message type/i.test(String(batchReply.reason || "")))) {
+    return { accepted: false, batchId, count: items.length, reason: batchReply?.reason || "batch rejected" };
+  }
   let accepted = 0;
   for (const item of items) {
     const { requestId, ...payload } = item;
@@ -587,11 +633,15 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     return true;
   }
   if (message?.type === "batch.submit") {
-    const items = Array.isArray(message.items) ? message.items : [];
-    chrome.runtime.sendNativeMessage(HOST, {
-      version: 1, requestId: crypto.randomUUID(), type: "batch.submit",
-      payload: { items }
-    }).then(reply, () => reply({ accepted: true, count: items.length }));
+    // Items are never forwarded as given: only their URLs are taken, validated, and the whole
+    // payload (cookies, referrer) is rebuilt by submitLinkBatch.
+    if (sender?.id !== undefined && sender.id !== chrome.runtime.id) { reply({ accepted: false, reason: "not allowed" }); return false; }
+    const links = (Array.isArray(message.items) ? message.items : []).slice(0, MAX_BATCH_LINKS)
+      .map(item => ({ url: typeof item === "string" ? item : item?.url }))
+      .filter(link => typeof link.url === "string" && validHandoffUrl(link.url));
+    if (links.length === 0) { reply({ accepted: false, count: 0, reason: "no downloadable links" }); return false; }
+    submitLinkBatch(links, String(message.pageUrl || sender?.tab?.url || ""), sender?.tab?.id)
+      .then(reply, error => reply({ accepted: false, reason: String(error) }));
     return true;
   }
   if (message?.type === "tab.toggleIntegration") {

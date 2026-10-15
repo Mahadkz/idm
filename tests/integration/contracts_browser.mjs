@@ -878,7 +878,7 @@ tests.B25 = async function test_B25() {
     assert.equal(forced.ok, true);
     assert.equal(filtered.calls.messages[0]?.type, 'download.submit', `${name}: force submits even when excluded and interception is off`);
     assert.equal(filtered.calls.messages[0]?.payload.url, excluded);
-    assert.equal(filtered.calls.messages[0]?.payload.requestContext.referrer, page);
+    assert.equal(filtered.calls.messages[0]?.payload.requestContext.referrer, new URL(page).origin + '/', 'cross-origin page referrer is origin-only');
 
     const priv = make({ intercept: false });
     const denied = await sendRuntime(priv, { type: 'capture.override', mode: 'force', url: excluded, pageUrl: page }, { tab: { id: 9, url: page, incognito: true } });
@@ -962,8 +962,8 @@ tests.B30 = async function test_B30() {
 tests.B31 = async function test_B31() {
   const ch = makeChromiumHarness();
   let batchReply;
-  ch.handlers.message({ type: 'batch.submit', items: [] }, {}, res => { batchReply = res; });
-  await tick();
+  ch.handlers.message({ type: 'batch.submit', items: [{ url: 'http://example.test/a.zip' }] }, {}, res => { batchReply = res; });
+  await tick(); await tick(); await tick();
   assert.ok(batchReply?.accepted, 'must implement batch.submit message handler');
 };
 
@@ -1079,6 +1079,57 @@ tests.B32 = async function test_B32() {
     const types = fallback.calls.messages.map(m => m.type);
     assert.deepEqual(types, ['batch.submit', 'download.submit', 'download.submit'], `${name}: falls back per item`);
     assert.deepEqual(fallback.calls.messages.slice(1).map(m => m.payload.url), ['http://example.test/a.zip', 'http://example.test/b.zip']);
+
+    // Cookies: everything for same-site links, only SameSite=None for cross-site links.
+    const jar = async () => [{ name: 's', value: '1', sameSite: 'lax' }, { name: 'st', value: '2', sameSite: 'strict' }, { name: 'u', value: '3', sameSite: 'unspecified' }, { name: 'n', value: '4', sameSite: 'no_restriction' }];
+    const sites = mk({
+      cookies: jar,
+      tabSend: async () => ({ links: [
+        { url: 'http://dl.example.test/same.zip', type: 'anchor' },
+        { url: 'http://cdn.other.test/cross.zip', type: 'anchor' },
+        { url: 'http://shop.example.co.uk/uk.zip', type: 'anchor' },
+      ] }),
+    });
+    await clickMenu(sites, { menuItemId: 'xdm-downloads' }, { id: 3, url: 'http://example.test/page?q=1#frag' });
+    const byUrl = Object.fromEntries(sites.calls.messages[0].payload.items.map(i => [i.url, i.requestContext]));
+    assert.equal(byUrl['http://dl.example.test/same.zip'].cookies[0].header, 's=1; st=2; u=3; n=4', `${name}: same-site links keep the session`);
+    assert.equal(byUrl['http://cdn.other.test/cross.zip'].cookies[0].header, 'n=4', `${name}: cross-site links get only SameSite=None cookies`);
+    assert.deepEqual(plain(byUrl['http://shop.example.co.uk/uk.zip'].cookies.map(c => c.header)), ['n=4'], `${name}: example.co.uk is not same-site with example.test`);
+    // Referer: origin only across origins, full (without fragment) for the same origin.
+    assert.equal(byUrl['http://cdn.other.test/cross.zip'].referrer, 'http://example.test/', `${name}: cross-origin referrer is origin-only`);
+    assert.equal(byUrl['http://dl.example.test/same.zip'].referrer, 'http://example.test/', `${name}: sibling origin is cross-origin`);
+    const same = mk({ tabSend: async () => ({ links: [{ url: 'http://example.test/o.zip', type: 'anchor' }] }) });
+    await clickMenu(same, { menuItemId: 'xdm-downloads' }, { id: 3, url: 'http://example.test/page?q=1#frag' });
+    assert.equal(same.calls.messages[0].payload.items[0].requestContext.referrer, 'http://example.test/page?q=1', `${name}: same-origin referrer keeps path and query, drops fragment`);
+
+    // A host validation error is surfaced; it must not trigger per-link submission.
+    const rejecting = mk({ nativeReply: async m => m.type === 'batch.submit' ? { version: 1, type: 'error', reason: 'item 0: invalid URL' } : { accepted: true } });
+    await clickMenu(rejecting, { menuItemId: 'xdm-downloads' }, { id: 3, url: page });
+    assert.deepEqual(rejecting.calls.messages.map(m => m.type), ['batch.submit'], `${name}: validation errors are not retried per link`);
+
+    // The runtime passthrough rebuilds items: only validated URLs survive, foreign context is discarded.
+    const pass = mk();
+    const passReply = await sendRuntime(pass, { type: 'batch.submit', pageUrl: page, items: [
+      { url: 'http://example.test/a.zip', requestContext: { headers: [{ name: 'Host', value: 'evil' }], cookies: [{ url: 'http://example.test/', header: 'forged=1' }] } },
+      { url: 'ftp://example.test/y.zip' }, { url: 'http://u:p@example.test/z.zip' }, { url: 'file:///etc/passwd' }, 'javascript:1',
+    ] });
+    assert.ok(passReply?.accepted, `${name}: passthrough accepted`);
+    assert.equal(pass.calls.messages.length, 1);
+    const forwarded = pass.calls.messages[0].payload.items;
+    assert.deepEqual(plain(forwarded.map(i => i.url)), ['http://example.test/a.zip'], `${name}: only valid web links are forwarded`);
+    assert.ok(!JSON.stringify(forwarded).includes('forged') && !JSON.stringify(forwarded).includes('evil'), `${name}: caller-supplied context is discarded`);
+    const foreign = mk();
+    const foreignReply = await sendRuntime(foreign, { type: 'batch.submit', items: [{ url: 'http://example.test/a.zip' }] }, { id: 'someone-else' });
+    assert.equal(foreignReply?.accepted, false);
+    assert.equal(foreign.calls.native, 0, `${name}: messages from other extensions are ignored`);
+
+    // Single handoffs enforce the host's URL rule too.
+    const single = mk();
+    for (const bad of ['http://user:pw@example.test/a.zip', 'ftp://example.test/a.zip', 'file:///etc/passwd']) {
+      const r = await single.context.submit(bad, 'a.zip');
+      assert.equal(r.accepted, false, `${name}: ${bad} refused`);
+    }
+    assert.equal(single.calls.native, 0);
 
     // Nothing matching: nothing is sent.
     const none = mk({ tabSend: async () => ({ links: [{ url: 'http://example.test/x.html', type: 'anchor' }] }) });

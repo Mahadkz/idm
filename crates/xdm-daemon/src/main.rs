@@ -2165,6 +2165,21 @@ impl Inner {
         }
         if status == "complete" {
             self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=CASE WHEN COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0) THEN queue_id ELSE 0 END,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+            // Replay secrets are not kept once a task is done, except where a sync
+            // queue still revalidates it with them.
+            let row: Option<(String, i64)> = self
+                .db
+                .query_row("SELECT headers_json,queue_id FROM tasks WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()?;
+            if let Some((json, 0)) = row {
+                if let Ok(mut headers) = serde_json::from_str::<Vec<(String, String)>>(&json) {
+                    let before = headers.len();
+                    headers.retain(|(name, _)| !transfer_lists::secret_header(name));
+                    if headers.len() != before {
+                        self.db.execute("UPDATE tasks SET headers_json=?1 WHERE id=?2", params![serde_json::to_string(&headers)?, id])?;
+                    }
+                }
+            }
             return Ok(());
         }
         if status == "auth_required" {
@@ -2897,6 +2912,87 @@ mod tests {
         assert!(!reply.ok && reply.error.unwrap().contains("moved"));
         service.inner.lock().unwrap().moving.clear();
         assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
+    }
+
+    fn secret_entry(name: &str, cookie: &str) -> xdm_ipc::ImportEntry {
+        xdm_ipc::ImportEntry {
+            url: format!("http://h.test/{name}"),
+            filename: name.into(),
+            kind: "http".into(),
+            priority: 1,
+            connections: 1,
+            rate_limit: None,
+            video: None,
+            audio: None,
+            category: "Other".into(),
+            headers: vec![("Cookie".into(), cookie.into()), ("Authorization".into(), "Bearer tok".into()), ("User-Agent".into(), "ua".into())],
+        }
+    }
+
+    #[test]
+    fn import_receipts_never_store_credentials_and_still_detect_changed_secrets() {
+        let (service, _, _) = service(1000);
+        let import = |cookie: &str| {
+            service
+                .command(Command::ImportListEx {
+                    request_id: "secret-1".into(),
+                    directory: "/nonexistent-xdm-test/dir".into(),
+                    entries: vec![secret_entry("s.bin", cookie)],
+                    enqueue: false,
+                    allow_duplicate: false,
+                })
+                .unwrap()
+        };
+        let first = import("session=TOPSECRET");
+        assert!(first.ok, "{:?}", first.error);
+        let inner = service.inner.lock().unwrap();
+        let payload: String = inner.db.query_row("SELECT payload_json FROM imports WHERE request_id='secret-1'", [], |r| r.get(0)).unwrap();
+        assert!(!payload.contains("TOPSECRET") && !payload.contains("Bearer") && payload.contains("User-Agent"), "{payload}");
+        let headers: String = inner.db.query_row("SELECT headers_json FROM tasks", [], |r| r.get(0)).unwrap();
+        assert!(headers.contains("TOPSECRET"), "the task itself keeps its replay headers");
+        drop(inner);
+        let replay = import("session=TOPSECRET");
+        assert!(replay.ok && replay.task_ids == first.task_ids);
+        let changed = import("session=OTHER");
+        assert!(!changed.ok && changed.error.unwrap().contains("different batch"));
+    }
+
+    #[test]
+    fn completed_tasks_drop_credentials_from_their_stored_headers() {
+        let (service, _, _) = service(1000);
+        let reply = service
+            .command(Command::ImportListEx {
+                request_id: "secret-2".into(),
+                directory: "/nonexistent-xdm-test/dir".into(),
+                entries: vec![secret_entry("done.bin", "session=TOPSECRET")],
+                enqueue: false,
+                allow_duplicate: false,
+            })
+            .unwrap();
+        let id = reply.task_ids[0];
+        finish(&service, id, "complete", None);
+        let headers: String = service.inner.lock().unwrap().db
+            .query_row("SELECT headers_json FROM tasks WHERE id=?1", [id], |r| r.get(0)).unwrap();
+        assert!(!headers.contains("TOPSECRET") && !headers.contains("Bearer") && headers.contains("User-Agent"), "{headers}");
+    }
+
+    #[test]
+    fn imports_reject_forbidden_request_headers() {
+        let (service, _, _) = service(1000);
+        for name in ["Host", "Range", "if-range", "Accept-Encoding", "Content-Length", "Transfer-Encoding"] {
+            let mut entry = secret_entry("f.bin", "a=b");
+            entry.headers.push((name.into(), "x".into()));
+            let reply = service
+                .command(Command::ImportListEx {
+                    request_id: format!("forbid-{name}"),
+                    directory: "/nonexistent-xdm-test/dir".into(),
+                    entries: vec![entry],
+                    enqueue: false,
+                    allow_duplicate: false,
+                })
+                .unwrap();
+            assert!(!reply.ok, "{name}");
+        }
     }
 
     #[test]

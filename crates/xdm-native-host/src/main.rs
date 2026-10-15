@@ -8,15 +8,40 @@ use xdm_ipc::{
     Command, ImportEntry, MediaAudioFormat, MediaMode, Paths, Reply, read_native, write_native,
 };
 
+/// Header bounds shared by every browser submission.
+const MAX_HEADERS: usize = 32;
+/// Header bytes one item may carry in total.
+const MAX_ITEM_HEADER_BYTES: usize = 16 * 1024;
+/// Headers a browser may never set: they would break framing or the engine's range logic.
+const FORBIDDEN_HEADERS: [&str; 6] =
+    ["host", "range", "if-range", "accept-encoding", "content-length", "transfer-encoding"];
+
+/// A browser handoff URL: http(s) with a host and no embedded credentials.
+fn handoff_url(url: &str) -> Result<url::Url, &'static str> {
+    let parsed = url::Url::parse(url).map_err(|_| "invalid URL")?;
+    if url.len() > 8192 || !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("invalid URL");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("embedded credentials are not accepted");
+    }
+    Ok(parsed)
+}
+
+fn header_text_ok(text: &str) -> bool {
+    !text.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+}
+
 /// Browser request headers for a submission from the shared requestContext
-/// shape (headers, referrer, first cookie).
+/// shape (headers, referrer, first cookie). The cookie is kept only when the
+/// extension says it was read for this item's own origin.
 fn request_headers(payload: &Value) -> Result<Vec<(String, String)>, String> {
     let mut headers = Vec::new();
     if let Some(values) = payload
         .pointer("/requestContext/headers")
         .and_then(Value::as_array)
     {
-        if values.len() > 32 {
+        if values.len() > MAX_HEADERS {
             return Err("too many headers".into());
         }
         for value in values {
@@ -26,8 +51,14 @@ fn request_headers(payload: &Value) -> Result<Vec<(String, String)>, String> {
             ) else {
                 return Err("invalid header".into());
             };
-            if name.len() > 128 || text.len() > 8192 {
+            if name.is_empty() || name.len() > 128 || text.len() > 8192 {
                 return Err("header too large".into());
+            }
+            if !header_text_ok(name) || !header_text_ok(text) || name.contains(':') {
+                return Err("invalid header".into());
+            }
+            if FORBIDDEN_HEADERS.iter().any(|bad| name.eq_ignore_ascii_case(bad)) {
+                return Err("forbidden header".into());
             }
             headers.push((name.to_owned(), text.to_owned()));
         }
@@ -36,13 +67,37 @@ fn request_headers(payload: &Value) -> Result<Vec<(String, String)>, String> {
         .pointer("/requestContext/referrer")
         .and_then(Value::as_str)
     {
+        if referer.len() > 8192 || !header_text_ok(referer) {
+            return Err("invalid referrer".into());
+        }
         headers.push(("Referer".into(), referer.into()));
     }
-    if let Some(cookie) = payload
-        .pointer("/requestContext/cookies/0/header")
+    let item_origin = payload
+        .get("url")
         .and_then(Value::as_str)
-    {
-        headers.push(("Cookie".into(), cookie.into()));
+        .and_then(|url| url::Url::parse(url).ok())
+        .map(|url| url.origin());
+    if let Some(cookie) = payload.pointer("/requestContext/cookies/0") {
+        let cookie_origin = cookie
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(|url| url::Url::parse(url).ok())
+            .map(|url| url.origin());
+        if let Some(header) = cookie.get("header").and_then(Value::as_str) {
+            if !header_text_ok(header) || header.len() > 8192 {
+                return Err("invalid cookie".into());
+            }
+            // A cookie read for another origin never rides along.
+            if item_origin.is_some() && item_origin == cookie_origin {
+                headers.push(("Cookie".into(), header.into()));
+            }
+        }
+    }
+    if headers.len() > MAX_HEADERS {
+        return Err("too many headers".into());
+    }
+    if headers.iter().map(|(n, v)| n.len() + v.len()).sum::<usize>() > MAX_ITEM_HEADER_BYTES {
+        return Err("headers too large".into());
     }
     Ok(headers)
 }
@@ -121,18 +176,22 @@ fn method_body(payload: &Value) -> Result<(String, Option<Vec<u8>>), &'static st
 }
 
 fn filename(payload: &Value) -> Option<String> {
-    let proposed = payload
-        .get("filenameHint")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            payload
-                .get("url")
-                .and_then(Value::as_str)
-                .and_then(|url| url.split('?').next())
-                .and_then(|url| url.rsplit('/').next())
-        })
-        .unwrap_or("download.bin");
-    xdm_categories::valid_filename(proposed).then(|| proposed.to_owned())
+    let proposed = match payload.get("filenameHint").and_then(Value::as_str) {
+        Some(hint) => hint.to_owned(),
+        None => match payload.get("url").and_then(Value::as_str) {
+            // The name comes from the parsed path: query and fragment never become part of it.
+            Some(url) => {
+                let parsed = url::Url::parse(url).ok()?;
+                let segment = parsed.path_segments()?.next_back().unwrap_or("");
+                percent_encoding::percent_decode_str(segment)
+                    .decode_utf8()
+                    .ok()?
+                    .into_owned()
+            }
+            None => "download.bin".to_owned(),
+        },
+    };
+    xdm_categories::valid_filename(&proposed).then_some(proposed)
 }
 
 #[cfg(test)]
@@ -160,7 +219,7 @@ mod tests {
     }
 
     fn link(url: &str) -> Value {
-        json!({"requestId": "b1-0", "url": url, "requestContext": {"referrer": "https://page.test/", "cookies": [{"header": "a=b"}]}})
+        json!({"requestId": "b1-0", "url": url, "requestContext": {"referrer": "https://page.test/", "cookies": [{"url": url, "header": "a=b"}]}})
     }
 
     #[test]
@@ -249,7 +308,7 @@ mod tests {
         let reply = run_batch("b2", &planned, &repeats, &mut |command| {
             calls += 1;
             match command {
-                Command::Remove { task_id } => {
+                Command::TaskRemoveEx { task_id, delete_partial: true } => {
                     removed.push(task_id);
                     Ok(ok_reply(vec![], vec![]))
                 }
@@ -269,6 +328,112 @@ mod tests {
         assert!(chunks.len() >= 3);
         assert!(chunks.iter().all(|c| c.len() <= CHUNK_ENTRIES));
         assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), 1000);
+    }
+
+    #[test]
+    fn cookies_ride_along_only_for_their_own_origin() {
+        let item = |cookie_url: &str| json!({
+            "url": "https://a.test/f.bin",
+            "requestContext": {"cookies": [{"url": cookie_url, "header": "s=1"}]}
+        });
+        let has_cookie = |value: &Value| request_headers(value).unwrap().iter().any(|(n, _)| n == "Cookie");
+        assert!(has_cookie(&item("https://a.test/other")));
+        assert!(!has_cookie(&item("https://evil.test/")));
+        assert!(!has_cookie(&item("http://a.test/")), "scheme is part of the origin");
+        assert!(!has_cookie(&item("https://a.test:8443/")), "port is part of the origin");
+        assert!(!has_cookie(&json!({"url": "https://a.test/f", "requestContext": {"cookies": [{"header": "s=1"}]}})));
+    }
+
+    #[test]
+    fn forbidden_and_excess_headers_are_rejected_after_context_is_added() {
+        for name in ["Host", "range", "If-Range", "Accept-Encoding", "Content-Length", "Transfer-Encoding"] {
+            let item = json!({"url": "https://a.test/f", "requestContext": {"headers": [{"name": name, "value": "x"}]}});
+            assert_eq!(request_headers(&item).unwrap_err(), "forbidden header", "{name}");
+        }
+        // 31 headers plus Referer plus Cookie exceeds the cap even though the list itself is within it.
+        let headers: Vec<Value> = (0..31).map(|i| json!({"name": format!("h{i}"), "value": "v"})).collect();
+        let item = json!({"url": "https://a.test/f", "requestContext": {"headers": headers, "referrer": "https://a.test/", "cookies": [{"url": "https://a.test/", "header": "a=b"}]}});
+        assert_eq!(request_headers(&item).unwrap_err(), "too many headers");
+        let crlf = json!({"url": "https://a.test/f", "requestContext": {"headers": [{"name": "X", "value": "a\r\nHost: evil"}]}});
+        assert!(request_headers(&crlf).is_err());
+    }
+
+    #[test]
+    fn handoff_urls_are_web_urls_without_credentials() {
+        assert!(handoff_url("https://a.test/f").is_ok());
+        for bad in ["ftp://a.test/f", "file:///etc/passwd", "https://u:p@a.test/f", "https://u@a.test/f", "javascript:1", ""] {
+            assert!(handoff_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn names_come_from_the_parsed_path() {
+        let name = |url: &str| filename(&json!({"url": url}));
+        assert_eq!(name("https://a.test/dir/f.zip?x=a/b#frag/ment").as_deref(), Some("f.zip"));
+        assert_eq!(name("https://a.test/f.zip#section").as_deref(), Some("f.zip"));
+        assert_eq!(name("https://a.test/a%20b.zip").as_deref(), Some("a b.zip"));
+        assert_eq!(name("https://a.test/%E2%80%AEfdp.exe"), None);
+        assert_eq!(name("https://a.test/%2e%2e"), None);
+        assert_eq!(name("https://a.test/"), None);
+    }
+
+    #[test]
+    fn suffixed_names_stay_valid_and_within_the_byte_limit() {
+        let long = format!("{}.zip", "a".repeat(236));
+        let varied = suffixed(&long, 2).unwrap();
+        assert!(varied.len() <= 240 && varied.ends_with(" (2).zip") && xdm_categories::valid_filename(&varied));
+        assert_eq!(suffixed("a.zip", 2).as_deref(), Some("a (2).zip"));
+        assert_eq!(suffixed("COM1", 1).as_deref(), Some("COM1 (1)"));
+    }
+
+    #[test]
+    fn batch_items_enforce_the_same_checks_as_single_submissions() {
+        let dir = std::path::Path::new("/dl");
+        for item in [
+            json!({"url": "https://u:p@a.test/f.bin"}),
+            json!({"url": "https://a.test/f.bin", "requestContext": {"headers": [{"name": "Range", "value": "bytes=0-1"}]}}),
+        ] {
+            assert!(plan_batch(&batch_payload(vec![item]), dir).is_err());
+        }
+        // A cookie read for another origin is dropped from the planned entry.
+        let (planned, _) = plan_batch(&batch_payload(vec![json!({"url": "https://a.test/f.bin",
+            "requestContext": {"cookies": [{"url": "https://evil.test/", "header": "s=1"}]}})]), dir).unwrap();
+        assert!(planned[0].entry.headers.is_empty());
+    }
+
+    #[test]
+    fn a_transport_error_after_a_committed_chunk_is_resolved_by_replay_and_rollback_failures_are_reported() {
+        let dir = std::path::Path::new("/dl");
+        let (planned, repeats) = plan_batch(&batch_payload(vec![link("https://a.test/a.bin")]), dir).unwrap();
+        // First send errors (but the daemon committed), the identical retry returns the receipt.
+        let mut imports = 0;
+        let reply = run_batch("b3", &planned, &repeats, &mut |command| {
+            assert!(matches!(command, Command::ImportListEx { .. }));
+            imports += 1;
+            if imports == 1 { Err(io::Error::other("broken pipe")) } else { Ok(ok_reply(vec![21], vec![])) }
+        });
+        assert_eq!(reply["type"], "batch.result");
+        assert_eq!(reply["taskIds"], json!([21]));
+        // Both attempts fail: the outcome is reported as unknown, not as a clean rejection.
+        let reply = run_batch("b4", &planned, &repeats, &mut |_| Err(io::Error::other("gone")));
+        assert_eq!(reply["type"], "error");
+        assert!(reply["reason"].as_str().unwrap().contains("unknown"));
+        // A rollback that cannot remove a task says so.
+        let (planned, repeats) = plan_batch(&batch_payload(vec![link("https://a.test/a.zip"), link("https://a.test/b.mp4")]), dir).unwrap();
+        let mut calls = 0;
+        let reply = run_batch("b5", &planned, &repeats, &mut |command| {
+            calls += 1;
+            match command {
+                Command::TaskRemoveEx { delete_partial, .. } => {
+                    assert!(delete_partial);
+                    Ok(Reply::error("busy"))
+                }
+                _ if calls == 1 => Ok(ok_reply(vec![31], vec![])),
+                _ => Ok(Reply::error("destination already has a file")),
+            }
+        });
+        assert_eq!(reply["type"], "error");
+        assert!(reply["reason"].as_str().unwrap().contains("could not remove tasks [31]"), "{reply}");
     }
 
     #[test]
@@ -369,9 +534,16 @@ fn submit(message: &Value, paths: &Paths) -> Value {
         }
     };
     let payload = &message["payload"];
-    let url = match payload.get("url").and_then(Value::as_str) {
-        Some(url) if url.starts_with("http://") || url.starts_with("https://") => url.to_owned(),
-        _ => {
+    let url = match payload
+        .get("url")
+        .and_then(Value::as_str)
+        .map(|url| handoff_url(url).map(|_| url.to_owned()))
+    {
+        Some(Ok(url)) => url,
+        Some(Err(reason)) => {
+            return json!({"version":1,"requestId":request_id,"type":"download.result","accepted":false,"reason":reason});
+        }
+        None => {
             return json!({"version":1,"requestId":request_id,"type":"download.result","accepted":false,"reason":"invalid URL"});
         }
     };
@@ -446,9 +618,6 @@ const MAX_BATCH_ITEMS: usize = 2000;
 /// Serialized size of one import command; the daemon caps a list at 512 KiB.
 const CHUNK_BYTES: usize = 384 * 1024;
 const CHUNK_ENTRIES: usize = 400;
-/// Header bytes one item may carry in total.
-const MAX_ITEM_HEADER_BYTES: usize = 16 * 1024;
-
 /// One validated link of a batch, ready to become an import entry.
 #[derive(Debug, Clone)]
 struct BatchItem {
@@ -457,12 +626,20 @@ struct BatchItem {
     directory: PathBuf,
 }
 
-/// Name with a numeric suffix before the extension: `a.zip` -> `a (2).zip`.
-fn suffixed(name: &str, n: usize) -> String {
-    match name.rfind('.').filter(|&at| at > 0) {
-        Some(at) => format!("{} ({n}){}", &name[..at], &name[at..]),
-        None => format!("{name} ({n})"),
+/// Name with a numeric suffix before the extension: `a.zip` -> `a (2).zip`. The stem is
+/// shortened to keep the 240-byte limit and the result is checked again.
+fn suffixed(name: &str, n: usize) -> Option<String> {
+    let (stem, extension) = match name.rfind('.').filter(|&at| at > 0) {
+        Some(at) => (&name[..at], &name[at..]),
+        None => (name, ""),
+    };
+    let tail = format!(" ({n}){extension}");
+    let mut stem = stem.to_owned();
+    while stem.len() + tail.len() > 240 {
+        stem.pop()?;
     }
+    let candidate = format!("{stem}{tail}");
+    xdm_categories::valid_filename(&candidate).then_some(candidate)
 }
 
 /// Validates every item of a batch payload. Any bad item rejects the whole
@@ -493,26 +670,12 @@ fn plan_batch(
         let url = item
             .get("url")
             .and_then(Value::as_str)
-            .filter(|url| url.len() <= 8192)
             .ok_or_else(|| fail("invalid URL"))?;
-        let parsed = url::Url::parse(url).map_err(|_| fail("invalid URL"))?;
-        match parsed.scheme() {
-            "http" | "https" if parsed.host_str().is_some() => {}
-            "ftp" if parsed.host_str().is_some() => {
-                return Err(fail("FTP links are submitted one by one"));
-            }
-            _ => return Err(fail("invalid URL")),
-        }
-        if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(fail("embedded credentials are not accepted"));
-        }
+        handoff_url(url).map_err(|reason| fail(reason))?;
         method_body(item).and_then(|(method, body)| {
             (method == "GET" && body.is_none()).then_some(()).ok_or("only GET links can be batched")
         }).map_err(|reason| fail(reason))?;
         let headers = request_headers(item).map_err(|reason| fail(&reason))?;
-        if headers.iter().map(|(n, v)| n.len() + v.len()).sum::<usize>() > MAX_ITEM_HEADER_BYTES {
-            return Err(fail("headers too large"));
-        }
         if let Some(&first) = first_by_url.get(url) {
             repeats.push((index, first));
             continue;
@@ -526,7 +689,7 @@ fn plan_batch(
         let mut n = 1;
         while !names.insert((folder.clone(), unique.to_lowercase())) {
             n += 1;
-            unique = suffixed(&name, n);
+            unique = suffixed(&name, n).ok_or_else(|| fail("cannot derive a unique filename"))?;
         }
         planned.push(BatchItem {
             index,
@@ -601,7 +764,14 @@ fn run_batch(
             enqueue: true,
             allow_duplicate: false,
         };
-        let failure = match send(command) {
+        // A transport error may follow a committed import. Re-sending the identical command
+        // is idempotent on the daemon (its receipt returns the created task IDs), so one
+        // retry learns the outcome before anything is rolled back.
+        let outcome = match send(command.clone()) {
+            Err(_) => send(command),
+            other => other,
+        };
+        let failure = match outcome {
             Ok(reply) if reply.ok => {
                 task_ids.extend(&reply.task_ids);
                 skipped.extend(reply.skipped_duplicates.iter().map(|dup| {
@@ -615,11 +785,20 @@ fn run_batch(
                 continue;
             }
             Ok(reply) => reply.error.unwrap_or_else(|| "daemon rejected the batch".into()),
-            Err(error) => format!("daemon unavailable: {error}"),
+            Err(error) => format!("daemon unavailable: {error}; the batch outcome is unknown"),
         };
+        let mut stuck = Vec::new();
         for id in task_ids {
-            let _ = send(Command::Remove { task_id: id });
+            match send(Command::TaskRemoveEx { task_id: id, delete_partial: true }) {
+                Ok(reply) if reply.ok => {}
+                _ => stuck.push(id),
+            }
         }
+        let failure = if stuck.is_empty() {
+            failure
+        } else {
+            format!("{failure}; rollback could not remove tasks {stuck:?}")
+        };
         return batch_error(Some(request_id), failure);
     }
     let count = planned.len() + repeats.len();
@@ -723,8 +902,8 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
     let Some(url) = payload.get("url").and_then(Value::as_str) else {
         return json!({"version":1,"requestId":request_id,"type":"media.result","accepted":false,"reason":"invalid URL"});
     };
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return json!({"version":1,"requestId":request_id,"type":"media.result","accepted":false,"reason":"invalid URL"});
+    if let Err(reason) = handoff_url(url) {
+        return json!({"version":1,"requestId":request_id,"type":"media.result","accepted":false,"reason":reason});
     }
     let headers = match request_headers(payload) {
         Ok(headers) => headers,

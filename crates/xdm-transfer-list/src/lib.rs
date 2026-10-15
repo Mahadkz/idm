@@ -115,7 +115,9 @@ pub fn is_hls_playlist(input: &str) -> bool {
         } else if after_extinf {
             after_extinf = false;
             let path = line.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
-            if [".ts", ".m4s", ".m4a", ".aac"].iter().any(|ext| path.ends_with(ext)) {
+            // Transport-stream and fragmented-MP4 segments only occur in HLS; .m4a/.aac
+            // are ordinary audio tracks in plain M3U playlists.
+            if [".ts", ".m4s"].iter().any(|ext| path.ends_with(ext)) {
                 return true;
             }
         }
@@ -495,6 +497,8 @@ mod tests {
         assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.m4s\n"));
         assert!(is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.mp3\n\n#EXT-X-ENDLIST"));
         assert!(!is_hls_playlist("#EXTM3U\n#EXTINF:4,\nhttp://h/a.mp3\n"));
+        // Plain audio playlists of AAC/M4A tracks are not HLS.
+        assert!(!is_hls_playlist("#EXTM3U\n#EXTINF:180,Song\nhttp://h/a.m4a\n#EXTINF:200,Two\nb.aac\n"));
         assert!(super::parse("#EXTM3U\n#EXTINF:4,\nseg0.ts\n").is_err());
     }
 

@@ -53,6 +53,73 @@ function isSiteExcluded(url, exclusions = DEFAULT_EXCLUSIONS) {
   } catch { return false; }
 }
 
+// Versioned media-panel policy (minimum-media-size, player-panel-policy). Sizes are bytes; 0 disables a threshold.
+const MEDIA_SETTINGS_VERSION = 1;
+const DEFAULT_MEDIA_SETTINGS = { version: MEDIA_SETTINGS_VERSION, minAudioBytes: 0, minVideoBytes: 0, panelExcludedSites: [], overlayMode: "full", overlayDisabledSites: [] };
+const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "flac"]);
+
+function normalizeSiteList(value) {
+  const list = Array.isArray(value) ? value : (typeof value === "string" ? value.split(/[\s,;]+/) : []);
+  return [...new Set(list.map(item => String(item || "").trim().toLowerCase()).filter(Boolean))].slice(0, 200);
+}
+
+function normalizeMediaSettings(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const bytes = value => { const n = Number(value); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0; };
+  return {
+    version: MEDIA_SETTINGS_VERSION,
+    minAudioBytes: bytes(r.minAudioBytes),
+    minVideoBytes: bytes(r.minVideoBytes),
+    panelExcludedSites: normalizeSiteList(r.panelExcludedSites),
+    overlayMode: r.overlayMode === "mini" ? "mini" : "full",
+    overlayDisabledSites: normalizeSiteList(r.overlayDisabledSites)
+  };
+}
+
+// Whole-file size only: Content-Range total, or Content-Length of a full, unencoded 200 response.
+// A 206 without Content-Range or a compressed body says nothing about the media length, so it stays unknown (null).
+function totalSizeFromHeaders(headers, statusCode) {
+  const get = name => (headers || []).find(header => header.name.toLowerCase() === name)?.value;
+  const range = /^\s*bytes\s+(?:\d+-\d+|\*)\/(\d+)\s*$/i.exec(String(get("content-range") || ""));
+  if (range) { const total = Number(range[1]); return total > 0 ? total : null; }
+  if (statusCode === 206) return null;
+  const encoding = String(get("content-encoding") || "").trim().toLowerCase();
+  if (encoding && encoding !== "identity") return null;
+  const raw = get("content-length");
+  if (raw == null || !/^\s*\d+\s*$/.test(String(raw))) return null;
+  const length = Number(raw);
+  return length > 0 ? length : null;
+}
+
+function mediaClass(url, mime = "") {
+  if (/^audio\//i.test(mime)) return "audio";
+  if (/^video\//i.test(mime)) return "video";
+  try { return AUDIO_EXTENSIONS.has(XdmCore.linkExtension(url)) ? "audio" : "video"; } catch { return "video"; }
+}
+
+// Panel visibility: site exclusion first, then the size threshold, which only applies to direct media with a known total size.
+function mediaVisible(item, settings) {
+  const s = normalizeMediaSettings(settings);
+  if (item.pageUrl && isSiteExcluded(item.pageUrl, s.panelExcludedSites)) return false;
+  if (item.kind !== "direct" || !Number.isFinite(item.size)) return true;
+  return item.size >= (mediaClass(item.url, item.mime) === "audio" ? s.minAudioBytes : s.minVideoBytes);
+}
+
+// Versioned miscapture settings: offer a site exclusion after `threshold` mistaken captures of one site within `windowSeconds`.
+const MISCAPTURE_VERSION = 1;
+const DEFAULT_MISCAPTURE = { version: MISCAPTURE_VERSION, enabled: true, threshold: 2, windowSeconds: 120, dismissedSites: [] };
+function normalizeMiscapture(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const int = (value, min, max, fallback) => { const n = Math.floor(Number(value)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback; };
+  return {
+    version: MISCAPTURE_VERSION,
+    enabled: r.enabled !== false,
+    threshold: int(r.threshold, 2, 10, 2),
+    windowSeconds: int(r.windowSeconds, 5, 3600, 120),
+    dismissedSites: normalizeSiteList(r.dismissedSites)
+  };
+}
+
 function deriveTitle(url, title = "") {
   if (title && typeof title === "string" && title.trim()) return title.trim();
   try {
@@ -165,36 +232,59 @@ function capturedBody(url, request, tabId) {
   return body ? { method, body } : null;
 }
 
+const protectedUrls = new Map();
+
 function addMedia(tabId, url, mime = "", pageUrl = "", title = "", extra = {}) {
   if (tabId < 0 || !validHttp(url) || isAdUrl(url)) return;
+  if (protectedUrls.get(tabId)?.has(url)) return;
   const kind = mediaKind(url, mime);
   if (!kind) return;
   const entries = media.get(tabId) || [];
-  if (!entries.some(entry => entry.url === url)) {
-    const item = { url, mime, kind, pageUrl, title: deriveTitle(url, title), seenAt: Date.now() };
+  const size = Number.isFinite(extra.size) && extra.size > 0 ? extra.size : null;
+  const existing = entries.find(entry => entry.url === url);
+  if (existing) {
+    if (existing.size == null && size != null) existing.size = size;
+  } else {
+    const item = { url, mime, kind, pageUrl, title: deriveTitle(url, title), seenAt: Date.now(), size };
     if (extra.adapterId) { item.adapterId = extra.adapterId; item.adapterVersion = extra.adapterVersion; }
     if (extra.expiresAt) { item.expiresAt = extra.expiresAt; item.expired = Boolean(extra.expired); }
     entries.push(item);
   }
   if (entries.length > 100) entries.shift();
   media.set(tabId, entries);
-  browser.browserAction.setBadgeText({ tabId, text: String(entries.length) });
+  refreshBadge(tabId);
+}
+
+async function mediaSettings() {
+  const { mediaSettings: raw } = await browser.storage.local.get({ mediaSettings: DEFAULT_MEDIA_SETTINGS }).catch(() => ({}));
+  return normalizeMediaSettings(raw);
+}
+
+async function visibleMedia(tabId) {
+  const settings = await mediaSettings();
+  return (media.get(tabId) || []).filter(item => mediaVisible(item, settings));
+}
+
+async function refreshBadge(tabId) {
+  const count = (await visibleMedia(tabId)).length;
+  browser.browserAction.setBadgeText({ tabId, text: count ? String(count) : "" });
 }
 
 browser.webRequest.onHeadersReceived.addListener(details => {
   const mime = (details.responseHeaders || []).find(header => header.name.toLowerCase() === "content-type")?.value || "";
-  addMedia(details.tabId, details.url, mime, details.originUrl || details.documentUrl || "");
+  addMedia(details.tabId, details.url, mime, details.originUrl || details.documentUrl || "", "", { size: totalSizeFromHeaders(details.responseHeaders, details.statusCode) });
 }, { urls: ["http://*/*", "https://*/*"] }, ["responseHeaders"]);
 
 browser.tabs.onRemoved.addListener(tabId => {
   media.delete(tabId);
+  protectedUrls.delete(tabId);
   disabledTabs.delete(tabId);
   for (const [key, entry] of bodies) if (entry.tabId === tabId) bodies.delete(key);
   for (const [key, entry] of recent) if (entry.tabId === tabId) recent.delete(key);
 });
 
 browser.tabs.onUpdated?.addListener((tabId, change) => {
-  if (change.status === "loading" && change.url) { media.delete(tabId); browser.browserAction.setBadgeText({ tabId, text: "" }); }
+  if (change.status === "loading" && change.url) { media.delete(tabId); protectedUrls.delete(tabId); browser.browserAction.setBadgeText({ tabId, text: "" }); }
 });
 
 async function cookiesFor(url, storeId) {
@@ -375,6 +465,85 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     });
 });
 
+// miscapture-exceptions: two mistaken captures of one site inside the window (the user cancels our paused
+// download, or the browser downloads again a URL we already handed off) offer a site exclusion.
+// The exclusion is only ever added by an explicit user action on the offer, never silently.
+const capturedDownloads = new Map(); // download id -> { url, ownCancel }
+const handedOffUrls = new Map();     // url -> time
+const pendingOffers = new Map();     // site -> { site, pattern, time }
+
+function missSite(url) {
+  try { return XdmCore.registrableDomain(new URL(url).hostname); } catch { return ""; }
+}
+
+async function recordMiscapture(url, reason) {
+  const site = missSite(url);
+  if (!site) return null;
+  const store = await browser.storage.local.get({ miscaptureSettings: DEFAULT_MISCAPTURE, miscaptureHistory: {}, siteExclusions: DEFAULT_EXCLUSIONS });
+  const settings = normalizeMiscapture(store.miscaptureSettings);
+  if (!settings.enabled || settings.dismissedSites.includes(site)) return null;
+  if (isSiteExcluded(url, store.siteExclusions)) return null;
+  const now = Date.now();
+  const history = { ...(store.miscaptureHistory || {}) };
+  const recentHits = (history[site] || []).filter(hit => now - hit.time <= settings.windowSeconds * 1000);
+  recentHits.push({ time: now, reason });
+  if (recentHits.length < settings.threshold) {
+    history[site] = recentHits.slice(-10);
+    await browser.storage.local.set({ miscaptureHistory: history });
+    return null;
+  }
+  delete history[site];
+  await browser.storage.local.set({ miscaptureHistory: history });
+  const offer = { site, pattern: `*.${site}`, time: now };
+  pendingOffers.set(site, offer);
+  browser.notifications?.create?.(`xdm-miscapture:${site}`, {
+    type: "basic", iconUrl: "icon.png",
+    title: "Exclude this site from XDM?",
+    message: `You stopped ${recentHits.length} captured downloads from ${site}. Click to let the browser handle downloads from this site.`,
+    // Firefox notifications have no buttons: clicking this one accepts, closing it keeps capturing.
+  });
+  return offer;
+}
+
+async function acceptMiscaptureOffer(site) {
+  const offer = pendingOffers.get(site);
+  if (!offer) return { ok: false, reason: "no pending offer for this site" };
+  pendingOffers.delete(site);
+  const { siteExclusions } = await browser.storage.local.get({ siteExclusions: DEFAULT_EXCLUSIONS });
+  if (!isSiteExcluded(`https://${site}/`, siteExclusions)) await browser.storage.local.set({ siteExclusions: [...siteExclusions, offer.pattern] });
+  return { ok: true, pattern: offer.pattern };
+}
+
+async function dismissMiscaptureOffer(site) {
+  if (!pendingOffers.delete(site)) return { ok: false, reason: "no pending offer for this site" };
+  const { miscaptureSettings } = await browser.storage.local.get({ miscaptureSettings: DEFAULT_MISCAPTURE });
+  const settings = normalizeMiscapture(miscaptureSettings);
+  await browser.storage.local.set({ miscaptureSettings: { ...settings, dismissedSites: [...new Set([...settings.dismissedSites, site])] } });
+  return { ok: true };
+}
+
+browser.notifications?.onClicked?.addListener(notificationId => {
+  const site = String(notificationId).startsWith("xdm-miscapture:") ? String(notificationId).slice("xdm-miscapture:".length) : null;
+  if (!site) return;
+  acceptMiscaptureOffer(site).catch(() => {});
+  browser.notifications.clear?.(notificationId);
+});
+browser.notifications?.onClosed?.addListener((notificationId, byUser) => {
+  const site = String(notificationId).startsWith("xdm-miscapture:") ? String(notificationId).slice("xdm-miscapture:".length) : null;
+  if (site && byUser) dismissMiscaptureOffer(site).catch(() => {});
+});
+
+browser.downloads.onChanged?.addListener(delta => {
+  const captured = capturedDownloads.get(delta?.id);
+  if (!captured) return;
+  if (delta.error?.current === "USER_CANCELED" && !captured.ownCancel) {
+    capturedDownloads.delete(delta.id);
+    recordMiscapture(captured.url, "cancelled").catch(() => {});
+  } else if (delta.state?.current === "complete" || delta.state?.current === "interrupted") {
+    capturedDownloads.delete(delta.id);
+  }
+});
+
 browser.downloads.onCreated.addListener(item => {
   if (!validHttp(item.url) || item.incognito || item.byExtensionId) return;
   if (item.tabId != null && disabledTabs.has(item.tabId)) return;
@@ -390,6 +559,11 @@ browser.downloads.onCreated.addListener(item => {
     const finalUrl = validHttp(item.finalUrl) ? item.finalUrl : item.url;
     // B25: the user bypassed XDM for this click, so the browser keeps the download.
     if (takeOverride([item.url, finalUrl], item.tabId)?.mode === "bypass") return;
+    const handedAt = handedOffUrls.get(finalUrl);
+    if (handedAt != null) {
+      handedOffUrls.delete(finalUrl);
+      if (Date.now() - handedAt <= 120000) recordMiscapture(finalUrl, "redownload").catch(() => {});
+    }
     const { interceptDownloads, siteExclusions } = await browser.storage.local.get({ interceptDownloads: false, siteExclusions: DEFAULT_EXCLUSIONS });
     if (!interceptDownloads) return;
     if (isSiteExcluded(finalUrl, siteExclusions) || isSiteExcluded(item.url, siteExclusions)) return;
@@ -397,6 +571,8 @@ browser.downloads.onCreated.addListener(item => {
     if (finalUrl !== item.url && getRecentRequest(item.url, item.tabId)?.method === "POST" && !getRecentRequest(finalUrl, item.tabId)) return;
     const request = getRecentRequest(finalUrl, item.tabId);
     if (!capturedBody(finalUrl, request, item.tabId) || request?.incognito) return;
+    capturedDownloads.set(item.id, { url: finalUrl, ownCancel: false });
+    while (capturedDownloads.size > 100) capturedDownloads.delete(capturedDownloads.keys().next().value);
     try {
       await browser.downloads.pause(item.id);
       if (timedOut) { await resume(); return; }
@@ -409,6 +585,10 @@ browser.downloads.onCreated.addListener(item => {
       if (reply?.accepted) {
         handedOff = true;
         clearTimeout(timer);
+        handedOffUrls.set(finalUrl, Date.now());
+        while (handedOffUrls.size > 100) handedOffUrls.delete(handedOffUrls.keys().next().value);
+        const own = capturedDownloads.get(item.id);
+        if (own) own.ownCancel = true;
         await browser.downloads.cancel(item.id);
         await browser.downloads.erase({ id: item.id }).catch(() => {});
       } else await resume();
@@ -434,10 +614,24 @@ browser.runtime.onMessage.addListener((message, sender) => {
     return submit(message.url, undefined, message.pageUrl || sender.tab?.url || "", undefined, "", sender.tab?.cookieStoreId, sender.tab?.id)
       .then(result => ({ ok: true, mode: "force", ...result }), error => ({ ok: false, reason: String(error) }));
   }
+  if (message?.type === "miscapture.pending") return Promise.resolve({ ok: true, offers: [...pendingOffers.values()] });
+  if (message?.type === "miscapture.accept" || message?.type === "miscapture.dismiss") {
+    if (sender?.id !== undefined && sender.id !== browser.runtime.id) return Promise.resolve({ ok: false, reason: "not allowed" });
+    return (message.type === "miscapture.accept" ? acceptMiscaptureOffer : dismissMiscaptureOffer)(String(message.site || "")).catch(error => ({ ok: false, reason: String(error) }));
+  }
+  if (message?.type === "page.protected") {
+    const tabId = sender.tab?.id ?? -1;
+    if (tabId >= 0 && validHttp(message.url)) {
+      if (!protectedUrls.has(tabId)) protectedUrls.set(tabId, new Set());
+      protectedUrls.get(tabId).add(message.url);
+      if (media.has(tabId)) { media.set(tabId, media.get(tabId).filter(entry => entry.url !== message.url)); refreshBadge(tabId); }
+    }
+    return Promise.resolve({ ok: true });
+  }
   if (message?.type === "page.mediaGone") {
     const tabId = sender.tab?.id ?? -1;
     const kept = (media.get(tabId) || []).filter(entry => entry.url !== message.url);
-    if (media.has(tabId)) { media.set(tabId, kept); browser.browserAction.setBadgeText({ tabId, text: kept.length ? String(kept.length) : "" }); }
+    if (media.has(tabId)) { media.set(tabId, kept); refreshBadge(tabId); }
     return Promise.resolve({ ok: true });
   }
   if (message?.type === "media.refresh") {
@@ -450,7 +644,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
       return { ok: true, ...result };
     }, error => ({ ok: false, reason: String(error) }));
   }
-  if (message?.type === "media.list") return Promise.resolve({ items: media.get(message.tabId) || [] });
+  if (message?.type === "media.list") return visibleMedia(message.tabId).then(items => ({ items }), () => ({ items: [] }));
   if (message?.type === "media.download") {
     if (!validHttp(message.url)) return Promise.resolve({ accepted: false, reason: "invalid URL" });
     return submit(message.url, undefined, message.pageUrl || "", undefined, "", undefined, sender.tab?.id)

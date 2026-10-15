@@ -40,7 +40,5 @@ export LD_LIBRARY_PATH=$lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
 # Windows cross builds: cargo build --target x86_64-pc-windows-gnu
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$root/cross/usr/bin/x86_64-w64-mingw32-gcc
 export XDM_CROSS_BIN=$root/cross/usr/bin
-# Keep the desktop responsive while several worktrees build in parallel.
-export CARGO_BUILD_JOBS=4
 EOF
 echo "toolchain ready: source $root/env.sh"

@@ -77,6 +77,20 @@ pub(crate) fn grab_filename(url: &str) -> String {
         .unwrap_or_else(|| "download.bin".into())
 }
 
+const REDACTED: &str = "<redacted>";
+
+/// Replaces manual-login header values so listings never expose them.
+fn redact_auth(mut project: serde_json::Value) -> serde_json::Value {
+    if let Some(headers) = project.get_mut("auth_headers").and_then(|v| v.as_array_mut()) {
+        for pair in headers {
+            if let Some(value) = pair.get_mut(1) {
+                *value = serde_json::Value::String(REDACTED.into());
+            }
+        }
+    }
+    project
+}
+
 /// Saved grabber projects as a reply payload.
 pub(crate) fn grab_project_reply(inner: &Inner) -> Result<Reply> {
     let records = inner
@@ -85,8 +99,10 @@ pub(crate) fn grab_project_reply(inner: &Inner) -> Result<Reply> {
         .query_map([], |row| {
             Ok(GrabProjectRecord {
                 name: row.get(0)?,
-                project: serde_json::from_str(&row.get::<_, String>(1)?)
-                    .unwrap_or(serde_json::Value::Null),
+                project: redact_auth(
+                    serde_json::from_str(&row.get::<_, String>(1)?)
+                        .unwrap_or(serde_json::Value::Null),
+                ),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -193,7 +209,8 @@ impl Service {
         stop: Arc<AtomicBool>,
         state: Arc<Mutex<GrabState>>,
     ) {
-        let outcome = xdm_grabber::crawl(&project, stop);
+        let save_dir = project.save_pages.then(|| Path::new(&directory));
+        let outcome = xdm_grabber::crawl_to(&project, stop, save_dir);
         // Counters first, so a long task submission is visible as done.
         match &outcome {
             Ok(result) => {
@@ -276,21 +293,39 @@ impl Service {
                 headers: Vec::new(),
             });
         }
-        // Reuses the transfer-list name helpers so duplicates and unsafe
-        // filenames get the same treatment as imports.
-        xdm_transfer_list::export_names(&mut entries);
         if entries.is_empty() {
             return Ok((Vec::new(), skipped));
         }
-        let outputs = entries
-            .iter()
-            .map(|entry| {
-                Path::new(directory)
-                    .join(&entry.filename)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>();
+        let outputs = if result.local_paths.is_empty() {
+            // Reuses the transfer-list name helpers so duplicates and unsafe
+            // filenames get the same treatment as imports.
+            xdm_transfer_list::export_names(&mut entries);
+            entries
+                .iter()
+                .map(|entry| {
+                    Path::new(directory)
+                        .join(&entry.filename)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            // Offline mode: files land at the mirrored paths the saved
+            // pages' links were rewritten to.
+            let mut outputs = Vec::new();
+            for entry in &entries {
+                let Some(relative) = result.local_paths.get(&entry.url) else {
+                    return Err(format!("no mirrored path for {}", entry.url).into());
+                };
+                let path = Path::new(directory)
+                    .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                outputs.push(path.to_string_lossy().into_owned());
+            }
+            outputs
+        };
         for output in &outputs {
             if !destination_free(Path::new(output)) {
                 return Err(
@@ -361,11 +396,30 @@ impl Service {
         }
         let parsed: xdm_grabber::Project = serde_json::from_value(project)
             .map_err(|e| format!("invalid grabber project: {e}"))?;
-        let canonical = serde_json::to_value(&parsed)?;
+        parsed.validate().map_err(|e| e.to_string())?;
+        let mut parsed = parsed;
         let inner = self
             .inner
             .lock()
             .map_err(|_| io::Error::other("task lock poisoned"))?;
+        // A listing shows redacted values; saving those back keeps the stored secret.
+        if parsed.auth_headers.0.iter().any(|(_, value)| value == REDACTED) {
+            let stored: Option<String> = inner
+                .db
+                .query_row("SELECT project_json FROM grab_projects WHERE name=?1", [name], |row| row.get(0))
+                .ok();
+            let old: Option<xdm_grabber::Project> = stored.and_then(|text| serde_json::from_str(&text).ok());
+            for (header, value) in &mut parsed.auth_headers.0 {
+                if value == REDACTED {
+                    *value = old
+                        .as_ref()
+                        .and_then(|p| p.auth_headers.0.iter().find(|(n, _)| n == header))
+                        .map(|(_, v)| v.clone())
+                        .ok_or("auth header value is redacted and no stored value exists")?;
+                }
+            }
+        }
+        let canonical = serde_json::to_value(&parsed)?;
         inner.db.execute(
             "INSERT INTO grab_projects(name,project_json) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET project_json=excluded.project_json",
             params![name, serde_json::to_string(&canonical)?],

@@ -37,6 +37,7 @@ struct TestServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     hits: Arc<Mutex<Vec<String>>>,
+    cookies: Arc<Mutex<Vec<String>>>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -52,15 +53,16 @@ impl TestServer {
         );
         let stop = Arc::new(AtomicBool::new(false));
         let hits = Arc::new(Mutex::new(Vec::new()));
-        let (thread_stop, thread_routes, thread_hits) =
-            (stop.clone(), routes.clone(), hits.clone());
+        let cookies = Arc::new(Mutex::new(Vec::new()));
+        let (thread_stop, thread_routes, thread_hits, thread_cookies) =
+            (stop.clone(), routes.clone(), hits.clone(), cookies.clone());
         let handle = thread::spawn(move || {
             for stream in listener.incoming() {
                 if thread_stop.load(Ordering::Relaxed) {
                     break;
                 }
                 if let Ok(mut stream) = stream {
-                    let _ = respond(&mut stream, &thread_routes, &thread_hits);
+                    let _ = respond(&mut stream, &thread_routes, &thread_hits, &thread_cookies);
                 }
             }
         });
@@ -68,6 +70,7 @@ impl TestServer {
             addr,
             stop,
             hits,
+            cookies,
             handle: Some(handle),
         }
     }
@@ -100,6 +103,7 @@ fn respond(
     stream: &mut TcpStream,
     routes: &HashMap<String, Route>,
     hits: &Mutex<Vec<String>>,
+    cookies: &Mutex<Vec<String>>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -111,6 +115,9 @@ fn respond(
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 || line == "\r\n" || line == "\n" {
             break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("cookie:") {
+            cookies.lock().unwrap().push(value.trim().to_string());
         }
     }
     let path = request_line
@@ -472,4 +479,83 @@ fn known_resource_links_are_never_requested() {
         "unexpected errors: {:?}",
         result.errors
     );
+}
+
+#[test]
+fn excluded_pages_are_never_fetched_or_followed() {
+    let server = TestServer::start(vec![
+        ("/", page(r#"<a href="/logout">out</a><a href="/ok.html">ok</a><a href="/a.zip">a</a>"#)),
+        ("/logout", page(r#"<a href="/secret.zip">s</a>"#)),
+        ("/ok.html", page("<p>ok</p>")),
+    ]);
+    let project = Project {
+        exclude_patterns: vec!["*logout*".into()],
+        obey_robots: false,
+        ..project(&server)
+    };
+    let result = run(&server, &project);
+    assert!(!server.hits.lock().unwrap().iter().any(|p| p == "/logout"));
+    assert!(result.files.iter().all(|f| !f.url.contains("secret")));
+    // The crawl-only list excludes pages without touching file filtering.
+    let project = Project {
+        crawl_exclude_patterns: vec!["*ok.html".into()],
+        obey_robots: false,
+        ..self::project(&server)
+    };
+    let before = server.request_count();
+    let result = run(&server, &project);
+    assert!(result.pages.iter().all(|p| !p.ends_with("ok.html")));
+    assert!(server.request_count() > before);
+}
+
+#[test]
+fn login_cookies_go_only_to_allowed_hosts() {
+    let other = TestServer::start(vec![("/x.html", page("<p>x</p>"))]);
+    let port = other.addr.port();
+    let home = page(&format!(r#"<a href="http://localhost:{port}/x.html">x</a>"#));
+    let server = TestServer::start(vec![("/", home)]);
+    let project = Project {
+        auth_headers: xdm_grabber::AuthHeaders(vec![("Cookie".into(), "sid=secret".into())]),
+        same_host_only: false,
+        obey_robots: false,
+        ..project(&server)
+    };
+    let result = run(&server, &project);
+    assert_eq!(server.cookies.lock().unwrap().as_slice(), ["sid=secret"]);
+    assert_eq!(other.request_count(), 1, "{result:?}");
+    assert!(other.cookies.lock().unwrap().is_empty(), "cookie leaked to another host");
+    assert!(!format!("{project:?}").contains("secret"), "Debug must redact");
+}
+
+#[test]
+fn saved_pages_mirror_paths_and_rewrite_links_without_overwriting() {
+    let server = TestServer::start(vec![
+        ("/", page(r#"<a href="/d/p.html?id=1">1</a><a href="/d/p.html?id=2">2</a><a href="/files/a.zip">a</a><a href="http://elsewhere.invalid/z.zip">z</a>"#)),
+        ("/d/p.html", page(r#"<a href="../files/a.zip">a</a><a href="/">home</a>"#)),
+    ]);
+    let dir = std::env::temp_dir().join(format!("xdm-offline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "mine").unwrap();
+    let project = Project {
+        save_pages: true,
+        obey_robots: false,
+        ..project(&server)
+    };
+    let result =
+        xdm_grabber::crawl_to(&project, Arc::new(AtomicBool::new(false)), Some(&dir)).unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join("index.html")).unwrap(), "mine");
+    let root_rel = &result.saved_pages[0].1;
+    assert_eq!(root_rel, "index-2.html");
+    let root = std::fs::read_to_string(dir.join(root_rel)).unwrap();
+    assert!(root.contains(r#"href="files/a.zip""#), "{root}");
+    assert!(root.contains("http://elsewhere.invalid/z.zip"), "{root}");
+    assert_eq!(result.saved_pages.len(), 3, "{:?}", result.saved_pages);
+    let variants: Vec<_> = result.saved_pages[1..].iter().map(|(_, rel)| rel.clone()).collect();
+    assert_ne!(variants[0], variants[1]);
+    let page = std::fs::read_to_string(dir.join(&variants[0])).unwrap();
+    assert!(page.contains(r#"href="../files/a.zip""#), "{page}");
+    assert!(page.contains(r#"href="../index-2.html""#), "{page}");
+    assert_eq!(result.local_paths.values().next().unwrap(), "files/a.zip");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -6,17 +6,18 @@
 
 mod glob;
 mod html;
+mod offline;
 mod pattern;
 mod robots;
 
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -72,6 +73,22 @@ fn default_obey_robots() -> bool {
     true
 }
 
+/// Request headers/cookies for a manual login. Sent only to the start host
+/// and `allowed_hosts`; never logged (Debug is redacted).
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AuthHeaders(pub Vec<(String, String)>);
+
+impl std::fmt::Debug for AuthHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AuthHeaders(<{} redacted>)", self.0.len())
+    }
+}
+
+const MAX_AUTH_HEADERS: usize = 16;
+const MAX_PATTERNS: usize = 200;
+const MAX_HEADER_VALUE: usize = 8192;
+
 /// A persisted grabber project, analogous to IDM's grabber project files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -91,6 +108,12 @@ pub struct Project {
     pub include_patterns: Vec<String>,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+    /// Patterns matched against page URLs before they are fetched; matching
+    /// pages are neither requested nor followed. `exclude_patterns` also
+    /// apply to pages; this list is for crawl-only exclusions (nothing is
+    /// excluded by default).
+    #[serde(default)]
+    pub crawl_exclude_patterns: Vec<String>,
     /// File extensions to collect (no dot), matched case-insensitively
     /// against the URL path, e.g. `["zip", "pdf", "mp4"]`.
     #[serde(default)]
@@ -106,6 +129,15 @@ pub struct Project {
     /// Respect robots.txt `Disallow` rules of our user-agent group.
     #[serde(default = "default_obey_robots")]
     pub obey_robots: bool,
+    /// Manual-login headers (for example `Cookie`), used for every request
+    /// on the start host and `allowed_hosts` only.
+    #[serde(default)]
+    pub auth_headers: AuthHeaders,
+    /// Save fetched HTML pages under the destination, mirroring URL paths,
+    /// and rewrite links to saved pages and files to relative paths.
+    /// Existing files are never overwritten (collisions get suffixes).
+    #[serde(default)]
+    pub save_pages: bool,
 }
 
 impl Default for Project {
@@ -118,16 +150,50 @@ impl Default for Project {
             allowed_hosts: Vec::new(),
             include_patterns: Vec::new(),
             exclude_patterns: Vec::new(),
+            crawl_exclude_patterns: Vec::new(),
             file_types: Vec::new(),
             headers: Vec::new(),
             request_delay_ms: 0,
             max_file_count: default_max_file_count(),
             obey_robots: true,
+            auth_headers: AuthHeaders::default(),
+            save_pages: false,
         }
     }
 }
 
 impl Project {
+    /// Bounds on user-supplied lists and header values.
+    pub fn validate(&self) -> Result<()> {
+        if self.include_patterns.len() > MAX_PATTERNS
+            || self.exclude_patterns.len() > MAX_PATTERNS
+            || self.crawl_exclude_patterns.len() > MAX_PATTERNS
+            || self.file_types.len() > MAX_PATTERNS
+            || self.allowed_hosts.len() > MAX_PATTERNS
+        {
+            return Err(err("too many patterns, file types or hosts"));
+        }
+        if self.auth_headers.0.len() > MAX_AUTH_HEADERS {
+            return Err(err("too many auth headers"));
+        }
+        for (name, value) in &self.auth_headers.0 {
+            if name.is_empty()
+                || name.len() > 128
+                || value.len() > MAX_HEADER_VALUE
+                || name.bytes().any(|b| b.is_ascii_control() || b == b':')
+                || value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+            {
+                return Err(err("invalid auth header"));
+            }
+            let lower = name.to_ascii_lowercase();
+            if ["host", "content-length", "transfer-encoding", "connection"].contains(&lower.as_str())
+            {
+                return Err(err("auth header name is not allowed"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         fs::write(path, serde_json::to_vec_pretty(self)?)?;
         Ok(())
@@ -159,6 +225,12 @@ pub struct CrawlResult {
     /// `(url, reason)` for failed fetches and malformed links, deduplicated
     /// per URL. Host- and robots-filtered candidates are skipped silently.
     pub errors: Vec<(String, String)>,
+    /// With `save_pages`: `(page URL, relative path)` of each saved page.
+    #[serde(default)]
+    pub saved_pages: Vec<(String, String)>,
+    /// With `save_pages`: relative path planned for each collected file URL.
+    #[serde(default)]
+    pub local_paths: BTreeMap<String, String>,
 }
 
 /// Runs a crawl with a fresh stop flag.
@@ -173,7 +245,17 @@ pub fn run_with_stop(project: &Project, stop: Arc<AtomicBool>) -> Result<CrawlRe
 
 /// Runs the crawl described by `project`, polling `stop` between requests.
 pub fn crawl(project: &Project, stop: Arc<AtomicBool>) -> Result<CrawlResult> {
-    let crawler = Crawler::new(project, stop)?;
+    crawl_to(project, stop, None)
+}
+
+/// Like `crawl`; with `save_dir` and `project.save_pages` the fetched pages
+/// are written under `save_dir` and their links rewritten for offline use.
+pub fn crawl_to(
+    project: &Project,
+    stop: Arc<AtomicBool>,
+    save_dir: Option<&Path>,
+) -> Result<CrawlResult> {
+    let crawler = Crawler::new(project, stop, save_dir)?;
     Ok(crawler.run())
 }
 
@@ -225,12 +307,17 @@ struct Crawler<'a> {
     errored: HashSet<String>,
     queue: VecDeque<Queued>,
     result: CrawlResult,
+    auth: HeaderMap,
+    auth_hosts: HashSet<String>,
+    save_dir: Option<PathBuf>,
+    mapper: Option<offline::Mapper>,
     requests: usize,
     halted: bool,
 }
 
 impl<'a> Crawler<'a> {
-    fn new(project: &'a Project, stop: Arc<AtomicBool>) -> Result<Self> {
+    fn new(project: &'a Project, stop: Arc<AtomicBool>, save_dir: Option<&Path>) -> Result<Self> {
+        project.validate()?;
         if project.max_pages == 0 {
             return Err(err("max_pages must be greater than zero"));
         }
@@ -239,7 +326,21 @@ impl<'a> Crawler<'a> {
         if start.scheme() != "http" && start.scheme() != "https" {
             return Err(err("start_url must use http or https"));
         }
-        let client = build_client(project)?;
+        let mut auth_hosts = project
+            .allowed_hosts
+            .iter()
+            .map(|host| host.trim().to_ascii_lowercase())
+            .collect::<HashSet<String>>();
+        if let Some(host) = start.host_str() {
+            auth_hosts.insert(host.to_ascii_lowercase());
+        }
+        let mut auth = HeaderMap::new();
+        for (name, value) in &project.auth_headers.0 {
+            let mut value = HeaderValue::from_str(value)?;
+            value.set_sensitive(true);
+            auth.append(HeaderName::from_bytes(name.as_bytes())?, value);
+        }
+        let client = build_client(project, auth_hosts.clone())?;
         let agent = project
             .headers
             .iter()
@@ -286,6 +387,12 @@ impl<'a> Crawler<'a> {
             errored: HashSet::new(),
             queue: VecDeque::new(),
             result: CrawlResult::default(),
+            auth,
+            auth_hosts,
+            mapper: save_dir
+                .filter(|_| project.save_pages)
+                .map(|dir| offline::Mapper::new(dir, start.host_str().unwrap_or(""))),
+            save_dir: save_dir.filter(|_| project.save_pages).map(Path::to_path_buf),
             requests: 0,
             halted: false,
         })
@@ -305,7 +412,58 @@ impl<'a> Crawler<'a> {
                 self.halted = true;
             }
         }
+        self.rewrite_saved_pages();
         self.result
+    }
+
+    /// Rewrites links in every saved page to the saved pages and planned
+    /// file paths; everything else stays absolute.
+    fn rewrite_saved_pages(&mut self) {
+        let Some(dir) = self.save_dir.clone() else {
+            return;
+        };
+        let mut local: HashMap<String, String> = self
+            .result
+            .saved_pages
+            .iter()
+            .cloned()
+            .collect();
+        local.extend(self.result.local_paths.clone());
+        for (url, rel) in self.result.saved_pages.clone() {
+            let path = dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let (Ok(page_url), Ok(text)) = (Url::parse(&url), fs::read_to_string(&path)) else {
+                continue;
+            };
+            if let Some(rewritten) = offline::rewrite(&text, &page_url, &rel, &local) {
+                if let Err(error) = fs::write(&path, rewritten) {
+                    self.record_error(&url, format!("cannot rewrite saved page: {error}"));
+                }
+            }
+        }
+    }
+
+    /// Writes a fetched page into the mirror without overwriting anything.
+    fn save_page(&mut self, url: &Url, text: &str) {
+        let (Some(dir), Some(mapper)) = (self.save_dir.clone(), self.mapper.as_mut()) else {
+            return;
+        };
+        let rel = mapper.assign(url, true);
+        let path = dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let written = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| {
+                use std::io::Write;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .and_then(|mut file| file.write_all(text.as_bytes()))
+            });
+        match written {
+            Ok(()) => self.result.saved_pages.push((url.to_string(), rel)),
+            Err(error) => self.record_error(url.as_str(), format!("cannot save page: {error}")),
+        }
     }
 
     fn stopped(&self) -> bool {
@@ -341,6 +499,10 @@ impl<'a> Crawler<'a> {
         if self.result.files.len() >= self.project.max_file_count {
             self.halted = true;
             return;
+        }
+        if let (Some(mapper), Ok(parsed)) = (self.mapper.as_mut(), Url::parse(url)) {
+            let rel = mapper.assign(&parsed, false);
+            self.result.local_paths.insert(url.to_string(), rel);
         }
         self.result.files.push(FoundFile {
             url: url.to_string(),
@@ -400,6 +562,12 @@ impl<'a> Crawler<'a> {
             // not collect is dropped instead of being requested as a page.
             return;
         }
+        if glob::matches_any(&self.project.exclude_patterns, &url_text)
+            || glob::matches_any(&self.project.crawl_exclude_patterns, &url_text)
+        {
+            // Excluded pages are never fetched, so their links are not followed.
+            return;
+        }
         if self.page_budget_reached() {
             return;
         }
@@ -437,7 +605,15 @@ impl<'a> Crawler<'a> {
         }
         self.requests += 1;
         let page = entry.url.to_string();
-        let response = match self.client.get(&page).send() {
+        let mut request = self.client.get(&page);
+        if entry
+            .url
+            .host_str()
+            .is_some_and(|host| self.auth_hosts.contains(&host.to_ascii_lowercase()))
+        {
+            request = request.headers(self.auth.clone());
+        }
+        let response = match request.send() {
             Ok(response) => response,
             Err(request_error) => {
                 self.record_error(&page, describe(&request_error));
@@ -468,6 +644,7 @@ impl<'a> Crawler<'a> {
             }
         };
         self.result.pages.push(page.clone());
+        self.save_page(&entry.url, &text);
         let extracted = html::extract(&text);
         let base = extracted
             .base
@@ -501,7 +678,7 @@ impl<'a> Crawler<'a> {
 
 /// Builds a blocking client with the project's headers; a default User-Agent
 /// is installed unless the project supplies one.
-fn build_client(project: &Project) -> Result<Client> {
+fn build_client(project: &Project, auth_hosts: HashSet<String>) -> Result<Client> {
     let mut headers = HeaderMap::new();
     if !project
         .headers
@@ -514,10 +691,41 @@ fn build_client(project: &Project) -> Result<Client> {
         let key = HeaderName::from_bytes(name.as_bytes())?;
         headers.append(key, HeaderValue::from_str(value)?);
     }
+    let has_auth = !project.auth_headers.0.is_empty();
+    // Auth headers must not follow a redirect to a host outside the allowed set.
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        let host_ok = attempt
+            .url()
+            .host_str()
+            .is_some_and(|host| auth_hosts.contains(&host.to_ascii_lowercase()));
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if has_auth && !host_ok {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    });
     Ok(Client::builder()
+        .redirect(policy)
         .timeout(REQUEST_TIMEOUT)
         .default_headers(headers)
         .build()?)
+}
+
+/// Fetches a small text document (such as a playlist) over HTTP(S), bounded
+/// by `MAX_PAGE_BYTES`.
+pub fn fetch_text(url: &str) -> Result<String> {
+    let parsed = Url::parse(url.trim()).map_err(|e| err(format!("invalid URL: {e}")))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(err("only http and https URLs can be fetched"));
+    }
+    let client = build_client(&Project::default(), HashSet::new())?;
+    let response = client.get(parsed).send()?;
+    if !response.status().is_success() {
+        return Err(err(format!("HTTP {}", response.status())));
+    }
+    read_capped(response)
 }
 
 /// Reads a whole body as a lossy UTF-8 string, bounded by MAX_PAGE_BYTES.
@@ -580,6 +788,9 @@ mod tests {
             request_delay_ms: 250,
             max_file_count: 77,
             obey_robots: false,
+            crawl_exclude_patterns: vec!["*/logout*".into()],
+            auth_headers: AuthHeaders(vec![("Cookie".into(), "s=1".into())]),
+            save_pages: true,
         };
         let path = std::env::temp_dir().join(format!("xdm-grabber-project-{}", std::process::id()));
         project.save(&path).unwrap();
@@ -619,7 +830,7 @@ mod tests {
             file_types: vec!["  .Zip ".into()],
             ..Project::default()
         };
-        let crawler = Crawler::new(&project, Arc::new(AtomicBool::new(true))).unwrap();
+        let crawler = Crawler::new(&project, Arc::new(AtomicBool::new(true)), None).unwrap();
         assert_eq!(crawler.classifies_as_file(&url).as_deref(), Some("zip"));
     }
 

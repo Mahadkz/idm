@@ -1104,6 +1104,11 @@ fn explain_storage(error: Box<dyn Error + Send + Sync>, output: &Path) -> Box<dy
         std::io::ErrorKind::FileTooLarge => {
             "the file exceeds the filesystem or process file-size limit"
         }
+        // Windows reports an impossible SetEndOfFile size as ERROR_INVALID_PARAMETER (87) or
+        // ERROR_FILE_TOO_LARGE (223) instead of a storage kind.
+        _ if cfg!(windows) && matches!(io.raw_os_error(), Some(87 | 223)) => {
+            "the file exceeds the filesystem or process file-size limit"
+        }
         _ => return error,
     };
     err(format!(

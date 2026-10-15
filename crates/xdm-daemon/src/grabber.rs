@@ -273,6 +273,7 @@ impl Service {
                 video: None,
                 audio: None,
                 category,
+                headers: Vec::new(),
             });
         }
         // Reuses the transfer-list name helpers so duplicates and unsafe

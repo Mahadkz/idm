@@ -4,7 +4,9 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use xdm_http::MAX_BODY;
-use xdm_ipc::{Command, MediaAudioFormat, MediaMode, Paths, read_native, write_native};
+use xdm_ipc::{
+    Command, ImportEntry, MediaAudioFormat, MediaMode, Paths, Reply, read_native, write_native,
+};
 
 /// Browser request headers for a submission from the shared requestContext
 /// shape (headers, referrer, first cookie).
@@ -150,6 +152,123 @@ mod tests {
             filename(&json!({"filenameHint":"film.mp4"})).as_deref(),
             Some("film.mp4")
         );
+    }
+
+
+    fn batch_payload(items: Vec<Value>) -> Value {
+        json!({"batchId": "b1", "count": items.len(), "items": items})
+    }
+
+    fn link(url: &str) -> Value {
+        json!({"requestId": "b1-0", "url": url, "requestContext": {"referrer": "https://page.test/", "cookies": [{"header": "a=b"}]}})
+    }
+
+    #[test]
+    fn batches_are_validated_item_by_item() {
+        let dir = std::path::Path::new("/dl");
+        let (planned, repeats) = plan_batch(
+            &batch_payload(vec![
+                link("https://a.test/one.zip"),
+                link("https://a.test/two.mp4"),
+                link("https://a.test/one.zip"),
+                link("https://b.test/x/one.zip"),
+            ]),
+            dir,
+        )
+        .unwrap();
+        assert_eq!(repeats, vec![(2, 0)]);
+        assert_eq!(planned.len(), 3);
+        // Same name in the same folder is varied, headers travel along.
+        assert_eq!(planned[0].entry.filename, "one.zip");
+        assert_eq!(planned[2].entry.filename, "one (2).zip");
+        assert!(planned[0].entry.headers.iter().any(|(n, v)| n == "Cookie" && v == "a=b"));
+        assert_eq!(planned[1].directory, dir.join("Video"));
+        let long = "x".repeat(9000);
+        let mut many: Vec<Value> = (0..MAX_BATCH_ITEMS + 1).map(|i| link(&format!("https://a.test/{i}.bin"))).collect();
+        for bad in [
+            batch_payload(vec![]),
+            batch_payload(vec![link("file:///etc/passwd")]),
+            batch_payload(vec![link("javascript:alert(1)")]),
+            batch_payload(vec![link("ftp://h.test/f.bin")]),
+            batch_payload(vec![link("https://u:p@a.test/f.bin")]),
+            batch_payload(vec![link("https://a.test/")]),
+            batch_payload(vec![json!({"url": "https://a.test/f.bin", "method": "POST", "body": "x"})]),
+            batch_payload(vec![json!({"url": "https://a.test/f.bin", "requestContext": {"headers": [{"name": "X", "value": long}]}})]),
+            batch_payload(vec![json!({"url": "https://a.test/f.bin", "requestContext": {"headers": (0..33).map(|i| json!({"name": format!("h{i}"), "value": "v"})).collect::<Vec<_>>()}})]),
+            json!({"items": [link("https://a.test/f.bin")], "count": 2}),
+            json!({"count": 1}),
+            batch_payload(std::mem::take(&mut many)),
+        ] {
+            assert!(plan_batch(&bad, dir).is_err(), "{bad:.80}");
+        }
+    }
+
+    fn ok_reply(ids: Vec<i64>, skipped: Vec<xdm_ipc::SkippedDuplicate>) -> Reply {
+        let mut reply = Reply::list(Vec::new());
+        reply.task_ids = ids;
+        reply.skipped_duplicates = skipped;
+        reply
+    }
+
+    #[test]
+    fn batch_results_report_duplicates_with_batch_indexes() {
+        let dir = std::path::Path::new("/dl");
+        let (planned, repeats) = plan_batch(
+            &batch_payload(vec![link("https://a.test/a.bin"), link("https://a.test/b.bin"), link("https://a.test/a.bin")]),
+            dir,
+        )
+        .unwrap();
+        let mut sent = Vec::new();
+        let reply = run_batch("b1", &planned, &repeats, &mut |command| {
+            sent.push(command);
+            Ok(ok_reply(vec![7], vec![xdm_ipc::SkippedDuplicate {
+                index: 1, url: "https://a.test/b.bin".into(), duplicate_of: Some(3), duplicate_of_index: None,
+            }]))
+        });
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(&sent[0], Command::ImportListEx { enqueue: true, allow_duplicate: false, entries, .. } if entries.len() == 2));
+        assert_eq!(reply["type"], "batch.result");
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(reply["count"], 3);
+        assert_eq!(reply["acceptedCount"], 1);
+        let skipped = reply["skippedDuplicates"].as_array().unwrap();
+        assert!(skipped.iter().any(|d| d["index"] == 2 && d["duplicateOfIndex"] == 0));
+        assert!(skipped.iter().any(|d| d["index"] == 1 && d["duplicateOf"] == 3));
+    }
+
+    #[test]
+    fn a_failed_chunk_rolls_the_batch_back_as_an_error_reply() {
+        let dir = std::path::Path::new("/dl");
+        let (planned, repeats) = plan_batch(
+            &batch_payload(vec![link("https://a.test/a.zip"), link("https://a.test/b.mp4")]),
+            dir,
+        )
+        .unwrap();
+        let mut calls = 0;
+        let mut removed = Vec::new();
+        let reply = run_batch("b2", &planned, &repeats, &mut |command| {
+            calls += 1;
+            match command {
+                Command::Remove { task_id } => {
+                    removed.push(task_id);
+                    Ok(ok_reply(vec![], vec![]))
+                }
+                _ if calls == 1 => Ok(ok_reply(vec![11], vec![])),
+                _ => Ok(Reply::error("destination already has a file or checkpoint")),
+            }
+        });
+        assert_eq!(reply["type"], "error");
+        assert_eq!(removed, vec![11]);
+    }
+
+    #[test]
+    fn large_batches_are_chunked_within_daemon_limits() {
+        let items: Vec<Value> = (0..1000).map(|i| link(&format!("https://a.test/f{i}.bin"))).collect();
+        let (planned, _) = plan_batch(&batch_payload(items), std::path::Path::new("/dl")).unwrap();
+        let chunks = chunk_batch(&planned);
+        assert!(chunks.len() >= 3);
+        assert!(chunks.iter().all(|c| c.len() <= CHUNK_ENTRIES));
+        assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), 1000);
     }
 
     #[test]
@@ -319,6 +438,216 @@ fn submit(message: &Value, paths: &Paths) -> Value {
         Err(e) => {
             json!({"version":1,"requestId":request_id,"type":"download.result","accepted":false,"reason":format!("daemon unavailable: {e}")})
         }
+    }
+}
+
+/// Largest number of links one `batch.submit` may carry.
+const MAX_BATCH_ITEMS: usize = 2000;
+/// Serialized size of one import command; the daemon caps a list at 512 KiB.
+const CHUNK_BYTES: usize = 384 * 1024;
+const CHUNK_ENTRIES: usize = 400;
+/// Header bytes one item may carry in total.
+const MAX_ITEM_HEADER_BYTES: usize = 16 * 1024;
+
+/// One validated link of a batch, ready to become an import entry.
+#[derive(Debug, Clone)]
+struct BatchItem {
+    index: usize,
+    entry: ImportEntry,
+    directory: PathBuf,
+}
+
+/// Name with a numeric suffix before the extension: `a.zip` -> `a (2).zip`.
+fn suffixed(name: &str, n: usize) -> String {
+    match name.rfind('.').filter(|&at| at > 0) {
+        Some(at) => format!("{} ({n}){}", &name[..at], &name[at..]),
+        None => format!("{name} ({n})"),
+    }
+}
+
+/// Validates every item of a batch payload. Any bad item rejects the whole
+/// batch (the extension then submits the links one by one). Repeated URLs are
+/// returned separately so the reply can report them as duplicates.
+fn plan_batch(
+    payload: &Value,
+    directory: &std::path::Path,
+) -> Result<(Vec<BatchItem>, Vec<(usize, usize)>), String> {
+    let items = payload
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or("batch needs an items array")?;
+    if items.is_empty() || items.len() > MAX_BATCH_ITEMS {
+        return Err(format!("a batch must contain 1-{MAX_BATCH_ITEMS} links"));
+    }
+    if let Some(count) = payload.get("count") {
+        if count.as_u64() != Some(items.len() as u64) {
+            return Err("batch count does not match its items".into());
+        }
+    }
+    let mut planned: Vec<BatchItem> = Vec::new();
+    let mut repeats = Vec::new();
+    let mut first_by_url = std::collections::HashMap::new();
+    let mut names = std::collections::HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let fail = |reason: &str| format!("item {index}: {reason}");
+        let url = item
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| url.len() <= 8192)
+            .ok_or_else(|| fail("invalid URL"))?;
+        let parsed = url::Url::parse(url).map_err(|_| fail("invalid URL"))?;
+        match parsed.scheme() {
+            "http" | "https" if parsed.host_str().is_some() => {}
+            "ftp" if parsed.host_str().is_some() => {
+                return Err(fail("FTP links are submitted one by one"));
+            }
+            _ => return Err(fail("invalid URL")),
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(fail("embedded credentials are not accepted"));
+        }
+        method_body(item).and_then(|(method, body)| {
+            (method == "GET" && body.is_none()).then_some(()).ok_or("only GET links can be batched")
+        }).map_err(|reason| fail(reason))?;
+        let headers = request_headers(item).map_err(|reason| fail(&reason))?;
+        if headers.iter().map(|(n, v)| n.len() + v.len()).sum::<usize>() > MAX_ITEM_HEADER_BYTES {
+            return Err(fail("headers too large"));
+        }
+        if let Some(&first) = first_by_url.get(url) {
+            repeats.push((index, first));
+            continue;
+        }
+        first_by_url.insert(url.to_owned(), index);
+        let name = filename(item).ok_or_else(|| fail("invalid filename"))?;
+        let mime = item.get("mime").and_then(Value::as_str);
+        let destination = xdm_categories::browser_destination(directory, &name, mime);
+        let folder = destination.parent().unwrap_or(directory).to_path_buf();
+        let mut unique = name.clone();
+        let mut n = 1;
+        while !names.insert((folder.clone(), unique.to_lowercase())) {
+            n += 1;
+            unique = suffixed(&name, n);
+        }
+        planned.push(BatchItem {
+            index,
+            entry: ImportEntry {
+                url: url.to_owned(),
+                category: xdm_categories::classify(&name, mime).into(),
+                filename: unique,
+                kind: "http".into(),
+                priority: 1,
+                connections: 8,
+                rate_limit: None,
+                video: None,
+                audio: None,
+                headers,
+            },
+            directory: folder,
+        });
+    }
+    Ok((planned, repeats))
+}
+
+/// Splits planned items into import commands: one destination folder each and
+/// bounded in entries and serialized size.
+fn chunk_batch(planned: &[BatchItem]) -> Vec<Vec<&BatchItem>> {
+    let mut chunks: Vec<(Vec<&BatchItem>, usize)> = Vec::new();
+    for item in planned {
+        let size = serde_json::to_vec(&item.entry).map_or(0, |bytes| bytes.len());
+        match chunks.iter_mut().find(|(chunk, bytes)| {
+            chunk[0].directory == item.directory
+                && chunk.len() < CHUNK_ENTRIES
+                && *bytes + size <= CHUNK_BYTES
+        }) {
+            Some((chunk, bytes)) => {
+                chunk.push(item);
+                *bytes += size;
+            }
+            None => chunks.push((vec![item], size)),
+        }
+    }
+    chunks.into_iter().map(|(chunk, _)| chunk).collect()
+}
+
+fn batch_error(request_id: Option<&str>, reason: impl Into<String>) -> Value {
+    let mut reply = json!({"version":1,"type":"error","reason":reason.into()});
+    if let Some(id) = request_id {
+        reply["requestId"] = json!(id);
+    }
+    reply
+}
+
+/// Runs the import commands of a planned batch through `send`. Everything is
+/// accepted or nothing is: tasks created by earlier chunks are removed when a
+/// later chunk fails. Rejections are `type:"error"` replies, which the
+/// extensions read as "fall back to per-link submission".
+fn run_batch(
+    request_id: &str,
+    planned: &[BatchItem],
+    repeats: &[(usize, usize)],
+    send: &mut dyn FnMut(Command) -> io::Result<Reply>,
+) -> Value {
+    let digest = format!("{:x}", Sha256::digest(request_id.as_bytes()));
+    let mut task_ids: Vec<i64> = Vec::new();
+    let mut skipped: Vec<Value> = repeats
+        .iter()
+        .map(|(index, first)| json!({"index": index, "duplicateOfIndex": first}))
+        .collect();
+    for (number, chunk) in chunk_batch(planned).into_iter().enumerate() {
+        let command = Command::ImportListEx {
+            request_id: format!("batch-{}-{number}", &digest[..16]),
+            directory: chunk[0].directory.to_string_lossy().into_owned(),
+            entries: chunk.iter().map(|item| item.entry.clone()).collect(),
+            enqueue: true,
+            allow_duplicate: false,
+        };
+        let failure = match send(command) {
+            Ok(reply) if reply.ok => {
+                task_ids.extend(&reply.task_ids);
+                skipped.extend(reply.skipped_duplicates.iter().map(|dup| {
+                    json!({
+                        "index": chunk[dup.index].index,
+                        "url": dup.url,
+                        "duplicateOf": dup.duplicate_of,
+                        "duplicateOfIndex": dup.duplicate_of_index.map(|i| chunk[i].index),
+                    })
+                }));
+                continue;
+            }
+            Ok(reply) => reply.error.unwrap_or_else(|| "daemon rejected the batch".into()),
+            Err(error) => format!("daemon unavailable: {error}"),
+        };
+        for id in task_ids {
+            let _ = send(Command::Remove { task_id: id });
+        }
+        return batch_error(Some(request_id), failure);
+    }
+    let count = planned.len() + repeats.len();
+    json!({
+        "version": 1,
+        "requestId": request_id,
+        "type": "batch.result",
+        "accepted": true,
+        "count": count,
+        "acceptedCount": task_ids.len(),
+        "taskIds": task_ids,
+        "skippedDuplicates": skipped,
+    })
+}
+
+fn submit_batch(message: &Value, paths: &Paths) -> Value {
+    let request_id = match message.get("requestId").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() && id.len() <= 128 => id.to_owned(),
+        _ => return batch_error(None, "invalid requestId"),
+    };
+    let Some(directory) = default_download_dir() else {
+        return batch_error(Some(&request_id), "Downloads directory unavailable");
+    };
+    match plan_batch(&message["payload"], &directory) {
+        Ok((planned, repeats)) => run_batch(&request_id, &planned, &repeats, &mut |command| {
+            paths.request(command)
+        }),
+        Err(reason) => batch_error(Some(&request_id), reason),
     }
 }
 
@@ -594,10 +923,11 @@ fn process(message: Value, paths: &Paths) -> Value {
     }
     match message.get("type").and_then(Value::as_str) {
         Some("hello") => {
-            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","media.inspect","media.submit"]})
+            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","batch.submit","media.inspect","media.submit"]})
         }
         Some("health") => health(paths),
         Some("download.submit") => submit(&message, paths),
+        Some("batch.submit") => submit_batch(&message, paths),
         Some("media.inspect") => inspect_media(&message),
         Some("media.submit") => submit_media(&message, paths),
         _ => json!({"version":1,"type":"error","reason":"unsupported message type"}),

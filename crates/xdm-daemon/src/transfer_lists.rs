@@ -47,6 +47,18 @@ impl Service {
         {
             return Ok(Reply::error("destination directory is a file"));
         }
+        if entries.iter().any(|entry| {
+            entry.headers.len() > 32
+                || entry.headers.iter().any(|(name, value)| {
+                    name.is_empty()
+                        || name.len() > 128
+                        || value.len() > 8192
+                        || name.bytes().any(|b| b.is_ascii_control() || b == b':')
+                        || value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+                })
+        }) {
+            return Ok(Reply::error("invalid request headers"));
+        }
         let payload_json = serde_json::to_string(&(&directory, &entries, enqueue))?;
         let mut inner = self
             .inner
@@ -150,8 +162,8 @@ impl Service {
                 .checked_add(index as i64)
                 .ok_or("task ID exhausted")?;
             transaction.execute(
-                "INSERT INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,media_video,media_audio,category,rate_limit) VALUES (?1,?2,?3,?4,'[]',?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![id,format!("import:{request_id}:{}", original_indexes[index]),entry.url,output,entry.priority,entry.connections as i64,if enqueue {"queued"} else {"paused"},entry.kind,entry.video.map(|i| i as i64),entry.audio.map(|i| i as i64),&categories[index],entry.rate_limit.map(|rate| rate as i64)],
+                "INSERT INTO tasks(id,request_id,url,output,headers_json,priority,connections,status,kind,media_video,media_audio,category,rate_limit) VALUES (?1,?2,?3,?4,?13,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![id,format!("import:{request_id}:{}", original_indexes[index]),entry.url,output,entry.priority,entry.connections as i64,if enqueue {"queued"} else {"paused"},entry.kind,entry.video.map(|i| i as i64),entry.audio.map(|i| i as i64),&categories[index],entry.rate_limit.map(|rate| rate as i64),serde_json::to_string(&entry.headers)?],
             )?;
             ids.push(id);
         }
@@ -226,6 +238,7 @@ impl Service {
                     video: video.map(|i| i as usize),
                     audio: audio.map(|i| i as usize),
                     category,
+                    headers: Vec::new(),
                 }))
             })?
             .filter_map(|row| row.transpose())

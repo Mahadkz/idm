@@ -3204,14 +3204,22 @@ mod net_tests {
         let server = spawn_server(faults);
         let dir = workspace("range-stall");
         let output = dir.join("f.bin");
+        // Long enough that a starved healthy worker is not mistaken for a stall.
+        let stall_timeout = Duration::from_secs(3);
         let started = Instant::now();
         download_with_stall_timeout(
             options(server.url(), &output, 4),
             Arc::new(TransferControl::new(None).unwrap()),
-            Duration::from_secs(1),
+            stall_timeout,
         )
         .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(10));
+        // The stalled server thread sleeps 30 s; finishing well before that means the
+        // connection was abandoned rather than waited out. The bound is deliberately
+        // loose so CPU starvation cannot trip it; the reopened span below is the
+        // precise proof.
+        let elapsed = started.elapsed();
+        assert!(elapsed >= stall_timeout, "finished before any stall could be detected: {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(25), "stalled connection was waited out: {elapsed:?}");
         assert_pattern(&output, len);
         // The probe, three workers and at least one reopen of the stalled range.
         assert!(server.total() >= 5, "{} requests", server.total());

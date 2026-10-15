@@ -12,7 +12,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -35,6 +36,10 @@ pub struct FtpOptions {
     pub output: PathBuf,
     pub restart: bool,
     pub stop: Arc<AtomicBool>,
+    /// Separate directory for the partial file and checkpoint (N38).
+    pub temp_dir: Option<PathBuf>,
+    /// Stamp the finished file with the server's MDTM time.
+    pub set_file_time: bool,
 }
 
 impl Default for FtpOptions {
@@ -44,6 +49,8 @@ impl Default for FtpOptions {
             output: PathBuf::new(),
             restart: false,
             stop: Arc::new(AtomicBool::new(false)),
+            temp_dir: None,
+            set_file_time: false,
         }
     }
 }
@@ -320,12 +327,74 @@ fn parse_pasv(text: &str) -> Option<(IpAddr, u16)> {
     (port != 0).then_some((ip, port))
 }
 
-fn part_path(output: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.part", output.display()))
+/// Canonical form of a destination for hashing; identical to the HTTP engine's so both
+/// engines name partials in a temporary directory the same way.
+fn normalized_output(output: &Path) -> PathBuf {
+    let clean: PathBuf = output.components().collect();
+    match (clean.parent(), clean.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or(clean),
+        _ => clean,
+    }
 }
 
-fn checkpoint_path(output: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.part.ftp", output.display()))
+fn temp_base(output: &Path, temp: &Path) -> PathBuf {
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(normalized_output(output).to_string_lossy().as_bytes())
+    );
+    let name: String = output
+        .file_name()
+        .map(|n| n.to_string_lossy().chars().take(100).collect())
+        .unwrap_or_default();
+    temp.join(format!("{}-{name}", &digest[..16]))
+}
+
+/// The `.part` and `.part.ftp` paths of `output`, beside it or inside `temp`.
+pub fn partial_paths(output: &Path, temp: Option<&Path>) -> (PathBuf, PathBuf) {
+    let base = temp.map_or_else(|| output.to_path_buf(), |dir| temp_base(output, dir));
+    (
+        PathBuf::from(format!("{}.part", base.display())),
+        PathBuf::from(format!("{}.part.ftp", base.display())),
+    )
+}
+
+/// Parses an MDTM value (`YYYYMMDDHHMMSS[.fff]`, UTC) into a system time.
+pub fn parse_mdtm(value: &str) -> Option<std::time::SystemTime> {
+    let (whole, fraction) = match value.trim().split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (value.trim(), None),
+    };
+    if whole.len() != 14
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || fraction.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let n = |range: std::ops::Range<usize>| whole[range].parse::<i64>().ok();
+    let (y, m, d, h, mi, sec) = (n(0..4)?, n(4..6)?, n(6..8)?, n(8..10)?, n(10..12)?, n(12..14)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1970..=9999).contains(&y)
+        || !(1..=12).contains(&m)
+        || d < 1
+        || d > month_days[(m - 1) as usize]
+        || h > 23
+        || mi > 59
+        || sec > 59
+    {
+        return None;
+    }
+    // Days from civil (Howard Hinnant).
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = yy / 400;
+    let yoe = yy - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let seconds = u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec).ok()?;
+    Some(std::time::UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
 fn store_checkpoint(path: &Path, state: &Checkpoint) -> Result<()> {
@@ -346,22 +415,142 @@ fn load_checkpoint(path: &Path) -> Result<Checkpoint> {
         .map_err(|e| err(format!("invalid FTP checkpoint {}: {e}", path.display())))
 }
 
-/// Installs the completed file without replacing anything created meanwhile.
+/// Flushes the directory entry of a freshly installed file (Unix).
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Removal of the source after a successful install is housekeeping, never a failure.
+fn discard(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("warning: could not remove {}: {error}", path.display());
+        }
+    }
+}
+
+/// Linux `renameat2(RENAME_NOREPLACE)`; other systems refuse rather than risk replacing.
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let (from, to) = (
+            CString::new(from.as_os_str().as_bytes())?,
+            CString::new(to.as_os_str().as_bytes())?,
+        );
+        // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                1u32, // RENAME_NOREPLACE
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no-replace rename is unavailable on this system",
+        ))
+    }
+}
+
+fn appeared(output: &Path, part: &Path) -> Box<dyn Error + Send + Sync> {
+    err(format!(
+        "{} appeared during the download; the completed data was kept at {}",
+        output.display(),
+        part.display()
+    ))
+}
+
+/// Installs the completed file without replacing anything created at the destination
+/// meanwhile; falls back to a staged, fsynced cross-volume copy (N38).
 fn publish(part: &Path, output: &Path) -> Result<()> {
     match fs::hard_link(part, output) {
-        Ok(()) => Ok(fs::remove_file(part)?),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(err(format!(
-            "{} appeared during the download; the completed data was kept at {}",
+        Ok(()) => {
+            sync_parent(output);
+            discard(part);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(appeared(output, part)),
+        Err(_) => match rename_noreplace(part, output) {
+            Ok(()) => {
+                sync_parent(output);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(appeared(output, part)),
+            Err(_) => copy_publish(part, output),
+        },
+    }
+}
+
+/// Copies beside the destination under a unique staging name, syncs, installs without
+/// replacing, syncs the directory, and only then removes the partial. Any failure leaves
+/// the partial and the destination untouched.
+fn copy_publish(part: &Path, output: &Path) -> Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let staging = PathBuf::from(format!(
+        "{}.xdm-copy-{}-{nanos}-{}",
+        output.display(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let copied = (|| -> std::io::Result<()> {
+        let mut source = File::open(part)?;
+        let modified = source.metadata()?.modified().ok();
+        let mut target = OpenOptions::new().write(true).create_new(true).open(&staging)?;
+        std::io::copy(&mut source, &mut target)?;
+        if let Some(modified) = modified {
+            let _ = target.set_modified(modified);
+        }
+        target.sync_all()
+    })();
+    if let Err(error) = copied {
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(&staging);
+        }
+        return Err(err(format!(
+            "copying the finished download to {} failed ({error}); the data was kept at {}",
             output.display(),
             part.display()
-        ))),
-        // Filesystems without hard links fall back to a checked rename.
-        Err(_) if fs::symlink_metadata(output).is_err() => Ok(fs::rename(part, output)?),
-        Err(_) => Err(err(format!(
-            "{} appeared during the download; the completed data was kept at {}",
-            output.display(),
-            part.display()
-        ))),
+        )));
+    }
+    let installed = match fs::hard_link(&staging, output) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(()),
+        Err(_) => rename_noreplace(&staging, output).map_err(|_| ()),
+    };
+    if installed.is_err() {
+        let _ = fs::remove_file(&staging);
+        return Err(appeared(output, part));
+    }
+    let _ = fs::remove_file(&staging);
+    sync_parent(output);
+    discard(part);
+    Ok(())
+}
+
+/// Stamps the open partial with the server time when enabled and valid.
+fn stamp(file: &File, enabled: bool, mdtm: Option<&str>) {
+    if let Some(time) = enabled.then(|| mdtm.and_then(parse_mdtm)).flatten() {
+        let _ = file.set_modified(time);
     }
 }
 
@@ -425,8 +614,11 @@ pub fn download(options: FtpOptions, progress: impl Fn(u64, Option<u64>)) -> Res
             fs::create_dir_all(parent)?;
         }
     }
-    let part = part_path(&options.output);
-    let checkpoint = checkpoint_path(&options.output);
+    let temp = options.temp_dir.as_deref();
+    if let Some(temp) = temp {
+        fs::create_dir_all(temp)?;
+    }
+    let (part, checkpoint) = partial_paths(&options.output, temp);
 
     let mut control = Control::connect(&url.host, url.port)?;
     let greeting = control.read_reply()?;
@@ -479,6 +671,12 @@ pub fn download(options: FtpOptions, progress: impl Fn(u64, Option<u64>)) -> Res
     // A previous run may have written every byte but failed to publish.
     if let Some(total) = size {
         if total > 0 && offset == total && part.exists() {
+            if options.set_file_time {
+                if let Ok(file) = OpenOptions::new().write(true).open(&part) {
+                    stamp(&file, true, mdtm.as_deref());
+                    let _ = file.sync_all();
+                }
+            }
             publish(&part, &options.output)?;
             let _ = fs::remove_file(&checkpoint);
             progress(total, Some(total));
@@ -494,7 +692,7 @@ pub fn download(options: FtpOptions, progress: impl Fn(u64, Option<u64>)) -> Res
         &checkpoint,
         &Checkpoint {
             size,
-            mdtm,
+            mdtm: mdtm.clone(),
         },
     )?;
 
@@ -568,6 +766,8 @@ pub fn download(options: FtpOptions, progress: impl Fn(u64, Option<u64>)) -> Res
         }
     }
 
+    stamp(&file, options.set_file_time, mdtm.as_deref());
+    file.sync_all()?;
     drop(file);
     publish(&part, &options.output)?;
     let _ = fs::remove_file(&checkpoint);
@@ -590,6 +790,18 @@ fn err(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mdtm_values_parse_strictly() {
+        let secs = |v: &str| {
+            parse_mdtm(v).map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())
+        };
+        assert_eq!(secs("19700101000000"), Some(0));
+        assert_eq!(secs("20240229235959.5"), Some(1_709_251_199));
+        for bad in ["", "2024", "20240230000000", "20241301000000", "20240101240000", "2024010100000x", "20240101000000.", "19691231235959"] {
+            assert_eq!(secs(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn parses_default_anonymous_login() {

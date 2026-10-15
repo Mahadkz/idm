@@ -5794,6 +5794,7 @@ dependencies = [
 name = "xdm-ftp"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -5868,6 +5869,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sha2",
+ "url",
  "xdm-categories",
  "xdm-http",
  "xdm-ipc",

@@ -124,6 +124,8 @@ fn main() {
                 output: output.clone(),
                 restart,
                 stop,
+                temp_dir: None,
+                set_file_time: false,
             },
             |_, _| {},
         );

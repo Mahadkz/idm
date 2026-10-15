@@ -129,10 +129,13 @@ fn restart_reason(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Op
 /// assembles in a temporary directory (N38), the pair inside that directory.
 pub(crate) fn owned_partial_paths(output: &Path, temp: Option<&str>) -> Vec<PathBuf> {
     let mut paths = http_part_paths(output).to_vec();
+    paths.push(PathBuf::from(format!("{}.part.ftp", output.display())));
     if let Some(temp) = temp.filter(|temp| !temp.is_empty()) {
         let temp = std::fs::canonicalize(temp).unwrap_or_else(|_| PathBuf::from(temp));
         let (part, meta) = xdm_http::partial_paths(output, Some(&temp));
         paths.extend([part, meta]);
+        // FTP partials share the HTTP part name; the checkpoint differs.
+        paths.push(xdm_ftp::partial_paths(output, Some(&temp)).1);
     }
     paths
 }
@@ -297,12 +300,11 @@ impl FtpLive {
 
 /// Paused or partially downloaded FTP progress derived from the `.part` file
 /// and its `.part.ftp` checkpoint, the FTP analogue of HTTP checkpoints.
-fn ftp_checkpoint_progress(output: &Path) -> Option<(u64, Option<u64>)> {
-    let encoded = format!("{}.part.ftp", output.display());
+fn ftp_checkpoint_progress(output: &Path, temp: Option<&Path>) -> Option<(u64, Option<u64>)> {
+    let (part, encoded) = xdm_ftp::partial_paths(output, temp);
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&encoded).ok()?).ok()?;
     let total = state.get("size").and_then(|value| value.as_u64());
-    let part = format!("{}.part", output.display());
     Some((std::fs::metadata(&part).ok()?.len(), total))
 }
 
@@ -457,7 +459,12 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                     temp_dir.as_deref().filter(|dir| !dir.is_empty()).map(std::path::Path::new),
                 )
                     .map(|(done, total)| (done, Some(total)))
-                    .or_else(|| ftp_checkpoint_progress(std::path::Path::new(&output)))
+                    .or_else(|| {
+                        ftp_checkpoint_progress(
+                            std::path::Path::new(&output),
+                            temp_dir.as_deref().filter(|dir| !dir.is_empty()).map(std::path::Path::new),
+                        )
+                    })
             };
             Ok(TaskSummary {
                 id,
@@ -1823,8 +1830,9 @@ impl Service {
                     let temp_dir = match stored_temp {
                         Some(dir) => (!dir.is_empty()).then(|| PathBuf::from(dir)),
                         None => {
-                            let beside = http_part_paths(Path::new(&output)).iter().any(|path| path.exists());
-                            let chosen = (matches!(kind, WorkKind::Http { .. }) && !beside)
+                            let beside = http_part_paths(Path::new(&output)).iter().any(|path| path.exists())
+                                || Path::new(&format!("{output}.part.ftp")).exists();
+                            let chosen = (matches!(kind, WorkKind::Http { .. } | WorkKind::Ftp) && !beside)
                                 .then(|| inner.temp_dir.clone())
                                 .flatten();
                             inner.db.execute(
@@ -1965,6 +1973,8 @@ impl Service {
                                 output: work.output,
                                 restart: false,
                                 stop: work.stop.clone(),
+                                temp_dir: work.temp_dir.clone(),
+                                set_file_time: work.set_file_time,
                             },
                             |done, total| live.report(done, total),
                         ),
@@ -2887,6 +2897,18 @@ mod tests {
         assert!(!reply.ok && reply.error.unwrap().contains("moved"));
         service.inner.lock().unwrap().moving.clear();
         assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
+    }
+
+    #[test]
+    fn ftp_partials_share_the_http_temp_naming_and_are_owned() {
+        let temp = std::env::temp_dir().join(format!("xdm-ftp-own-{}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let output = Path::new("/nonexistent-xdm-test/dir/file.bin");
+        let (ftp_part, ftp_check) = xdm_ftp::partial_paths(output, Some(&temp));
+        assert_eq!(ftp_part, xdm_http::partial_paths(output, Some(&temp)).0);
+        let owned = owned_partial_paths(output, Some(temp.to_str().unwrap()));
+        assert!(owned.contains(&ftp_part) && owned.contains(&ftp_check));
+        assert!(owned.contains(&PathBuf::from("/nonexistent-xdm-test/dir/file.bin.part.ftp")));
     }
 
     #[test]

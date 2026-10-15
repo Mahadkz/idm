@@ -132,7 +132,7 @@ def main():
 
         # Credentials inside the proxy URL are moved to the store, not kept in settings.
         daemon.cli("proxy-login-clear")
-        reply = daemon.cli("proxy", "manual", f"http://{USER}:{PASSWORD}@127.0.0.1:{proxy.server_port}")
+        reply = daemon.rpc("set_proxy", proxy={"mode": "manual", "http": f"http://{USER}:{PASSWORD}@127.0.0.1:{proxy.server_port}", "https": None, "bypass": []})
         assert PASSWORD not in json.dumps(reply) and reply["proxy"]["http"] == proxy_url, reply
         third = daemon.cli("submit", url, daemon.base / "c.bin", "--allow-duplicate")["task_id"]
         daemon.until(third, lambda t: t["status"] == "complete")

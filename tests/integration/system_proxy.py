@@ -18,6 +18,7 @@ SIZE = 256 * 1024
 BLOCK = bytes(range(256)) * (SIZE // 256)
 HASH = hashlib.sha256(BLOCK).hexdigest()
 HITS = {"origin": 0, "proxy": 0}
+PROXY_AUTH = []
 
 
 class Origin(http.server.BaseHTTPRequestHandler):
@@ -42,6 +43,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         HITS["proxy"] += 1
+        PROXY_AUTH.append(self.headers.get("Proxy-Authorization"))
         target = urlsplit(self.path)
         upstream = http.client.HTTPConnection(target.hostname, target.port, timeout=30)
         upstream.request("GET", target.path or "/")
@@ -85,7 +87,8 @@ def main():
     (home / ".config").mkdir(parents=True)
     daemon = Daemon("xdm-sysproxy-", env_extra={
         "PATH": f"{tools}:{os.environ['PATH']}", "XDM_FAKE_GSETTINGS": str(answer),
-        "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+        "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDM_SYSTEM_PROXY_TTL_MS": "0"})
     try:
         daemon.cli("proxy", "system")
         n = [0]
@@ -114,6 +117,13 @@ def main():
         row = fetch()
         assert row["status"] == "complete" and HITS["proxy"] == hits, (row, HITS)
 
+        # Review 2: stored manual-proxy credentials are never sent to an OS-discovered proxy.
+        daemon.cli("proxy-login", "someone", daemon.secret("pp.txt", "proxy-only-secret"))
+        answer.write_text(gnome("manual", proxy.server_port))
+        row = fetch()
+        assert row["status"] == "complete" and PROXY_AUTH and all(a is None for a in PROXY_AUTH), PROXY_AUTH
+        daemon.cli("proxy-login-clear")
+
         # PAC: reported clearly, never a silent direct connection.
         origin_hits = HITS["origin"]
         answer.write_text(gnome("auto", pac="http://wpad.example/proxy.pac"))
@@ -125,14 +135,39 @@ def main():
         note = daemon.cli("proxy", "get")["proxy_note"]
         assert "PAC not supported" in note, note
 
-        # No GNOME settings: KDE's kioslaverc is read.
-        answer.write_text("")
+        # Review 2: GNOME saying mode=none must not fall through to a stale kioslaverc.
         (home / ".config/kioslaverc").write_text(
             f"[Proxy Settings]\nProxyType=1\nhttpProxy=http://127.0.0.1:{proxy.server_port}\nNoProxyFor=\n")
+        answer.write_text(gnome("none", proxy.server_port))
+        before = HITS["proxy"]
+        row = fetch()
+        assert row["status"] == "complete" and HITS["proxy"] == before, (row, HITS)
+
+        # No GNOME settings at all: KDE's kioslaverc is read.
+        answer.write_text("")
+        hits = HITS["proxy"]
         row = fetch()
         assert row["status"] == "complete" and HITS["proxy"] == hits + 1, (row, HITS)
         assert "kde" in daemon.cli("proxy", "get")["proxy_note"]
 
+        # Review 12: the resolution is cached, so a burst of transfers spawns gsettings once.
+        counter = tools / "count.txt"
+        counting = tools / "bin2"
+        counting.mkdir()
+        fake = counting / "gsettings"
+        fake.write_text(f'#!/bin/sh\necho x >> "{counter}"\ncat "{answer}"\n')
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        answer.write_text(gnome("manual", proxy.server_port))
+        cached = Daemon("xdm-sysproxy2-", env_extra={"PATH": f"{counting}:{os.environ['PATH']}",
+                        "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+        try:
+            cached.cli("proxy", "system")
+            for index in range(3):
+                task = cached.cli("submit", url, cached.base / f"c{index}.bin", "--allow-duplicate")["task_id"]
+                assert cached.until(task, lambda t: t["status"] in ("complete", "failed"))["status"] == "complete"
+            assert len(counter.read_text().split()) == 1, counter.read_text()
+        finally:
+            cached.close()
         print(json.dumps({"result": "passed", "cases": [
             "gnome manual via gsettings", "ignore-hosts bypass", "mode none direct",
             "PAC reported as unsupported without going direct", "kde kioslaverc"]}))

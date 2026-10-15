@@ -447,6 +447,20 @@ impl Request {
         Ok(response)
     }
 
+    /// The typed 401/407 error of a response, with the reason credentials were withheld.
+    fn challenge(&self, response: &Response) -> Option<Box<dyn Error + Send + Sync>> {
+        let error = challenge_error(response)?;
+        let refusal = self.auth.as_ref().and_then(|auth| auth.refusal());
+        match (error.downcast::<AuthRequired>(), refusal) {
+            (Ok(mut required), Some(note)) if required.0.status == 401 => {
+                required.0.note = Some(note);
+                Some(required)
+            }
+            (Ok(required), _) => Some(required),
+            (Err(other), _) => Some(other),
+        }
+    }
+
     fn send_once(
         &self,
         client: &Client,
@@ -494,6 +508,8 @@ pub struct AuthChallenge {
     pub status: u16,
     pub scheme: String,
     pub realm: Option<String>,
+    /// Why the stored credentials were not offered (for example Basic over plain http).
+    pub note: Option<String>,
 }
 
 /// Error type carrying the challenge of a failed probe so callers can
@@ -510,6 +526,9 @@ impl std::fmt::Display for AuthRequired {
         )?;
         if let Some(realm) = &self.0.realm {
             write!(f, " realm \"{realm}\"")?;
+        }
+        if let Some(note) = &self.0.note {
+            write!(f, ": {note}")?;
         }
         Ok(())
     }
@@ -820,6 +839,7 @@ fn challenge_error(response: &Response) -> Option<Box<dyn Error + Send + Sync>> 
         // A proxy that answers 407 without naming a scheme still needs credentials.
         return (status == StatusCode::PROXY_AUTHENTICATION_REQUIRED).then(|| {
             Box::new(AuthRequired(AuthChallenge {
+                note: None,
                 status: 407,
                 scheme: "Basic".into(),
                 realm: None,
@@ -828,6 +848,7 @@ fn challenge_error(response: &Response) -> Option<Box<dyn Error + Send + Sync>> 
     };
     let (scheme, realm) = parse_challenge(value)?;
     Some(Box::new(AuthRequired(AuthChallenge {
+        note: None,
         status: status.as_u16(),
         scheme,
         realm,
@@ -842,6 +863,7 @@ fn proxy_auth_failure(error: &reqwest::Error) -> Option<Box<dyn Error + Send + S
     (text.contains("proxy authentication required") || text.contains("proxy authorization required"))
         .then(|| {
             Box::new(AuthRequired(AuthChallenge {
+                note: None,
                 status: 407,
                 scheme: "Basic".into(),
                 realm: None,
@@ -1142,7 +1164,8 @@ pub fn apply_proxy(
     let manual = |builder: reqwest::blocking::ClientBuilder,
                   http: &Option<String>,
                   https: &Option<String>,
-                  bypass: &[String]| {
+                  bypass: &[String],
+                  login: Option<&Login>| {
         let mut builder = builder.no_proxy();
         let bypass = reqwest::NoProxy::from_string(&bypass.join(","));
         let configure = |url: &str, secure: bool| -> Result<reqwest::Proxy> {
@@ -1179,11 +1202,13 @@ pub fn apply_proxy(
                         ),
                     ));
                 }
-                builder = manual(builder, &found.http, &found.https, &found.bypass)?;
+                // Stored credentials belong to the manual proxy only; an OS-discovered
+                // proxy never receives them.
+                builder = manual(builder, &found.http, &found.https, &found.bypass, None)?;
             }
         },
         Proxy::Direct => builder = builder.no_proxy(),
-        Proxy::Manual { http, https, bypass } => builder = manual(builder, http, https, bypass)?,
+        Proxy::Manual { http, https, bypass } => builder = manual(builder, http, https, bypass, login)?,
     }
     Ok(builder)
 }
@@ -1381,13 +1406,13 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
             drop(response);
             let full = retry_send(client, request, None, stop)?;
             if full.status() != StatusCode::OK {
-                return Err(challenge_error(&full)
+                return Err(request.challenge(&full)
                     .unwrap_or_else(|| err(format!("download returned HTTP {}", full.status()))));
             }
             full
         }
         status => {
-            return Err(challenge_error(&response)
+            return Err(request.challenge(&response)
                 .unwrap_or_else(|| err(format!("probe failed: HTTP {status}"))))
         }
     };
@@ -2106,7 +2131,7 @@ fn single_stream(
             None => {
                 let response = retry_send(client, request, None, &options.stop)?;
                 if response.status() != StatusCode::OK {
-                    return Err(challenge_error(&response).unwrap_or_else(|| {
+                    return Err(request.challenge(&response).unwrap_or_else(|| {
                         err(format!("download returned HTTP {}", response.status()))
                     }));
                 }
@@ -2664,6 +2689,7 @@ mod tests {
     #[test]
     fn auth_challenges_survive_the_error_box() {
         let challenge = AuthChallenge {
+            note: None,
             status: 401,
             scheme: "Basic".into(),
             realm: Some("xdm-test".into()),
@@ -2673,6 +2699,7 @@ mod tests {
         assert_eq!(auth_challenge(err("probe failed: HTTP 403").as_ref()), None);
         assert_eq!(
             AuthRequired(AuthChallenge {
+                note: None,
                 status: 401,
                 scheme: "Basic".into(),
                 realm: Some("xdm-test".into())

@@ -142,7 +142,7 @@ impl Service {
         // The typed credentials serve this task even when they are not remembered.
         inner
             .task_logins
-            .insert(task_id, xdm_http::Login { username, password });
+            .insert(task_id, xdm_http::Login::new(username, password));
         let mut reply = Reply::accepted(task_id);
         reply.logins = inner.credentials.summaries();
         drop(inner);

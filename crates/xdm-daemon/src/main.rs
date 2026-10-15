@@ -996,17 +996,33 @@ impl Service {
         // to the credential store and rewrite the setting without it.
         if let Proxy::Manual { http, https, .. } = &mut proxy {
             let mut moved = None;
-            for url in http.iter_mut().chain(https.iter_mut()) {
-                let (clean, found) = credentials::split_proxy_userinfo(url);
-                if found.is_some() {
-                    *url = clean;
-                    moved = found;
+            let mut changed = false;
+            for slot in [http, https] {
+                let Some(url) = slot.as_mut() else { continue };
+                match credentials::split_proxy_userinfo(url) {
+                    Ok((clean, found)) => {
+                        if found.is_some() {
+                            *url = clean;
+                            moved = found;
+                            changed = true;
+                        }
+                    }
+                    Err(_) => {
+                        // Cannot separate the password safely: drop the URL instead of
+                        // keeping a secret in settings.
+                        eprintln!("warning: removed a stored proxy URL whose credentials could not be parsed; set the proxy again and use `daemon proxy-login`");
+                        *slot = None;
+                        changed = true;
+                    }
                 }
             }
             if let Some((user, password)) = moved {
-                if credentials.set_proxy_login(&user, &password).is_ok() {
-                    set_setting(&db, "proxy", &serde_json::to_string(&proxy)?)?;
+                if credentials.set_proxy_login(&user, &password).is_err() {
+                    changed = false;
                 }
+            }
+            if changed {
+                set_setting(&db, "proxy", &serde_json::to_string(&proxy)?)?;
             }
         }
         db.execute(
@@ -1185,10 +1201,15 @@ impl Service {
                 let mut extracted = None;
                 if let Proxy::Manual { http, https, .. } = &mut parsed {
                     for url in http.iter_mut().chain(https.iter_mut()) {
-                        let (clean, found) = credentials::split_proxy_userinfo(url);
-                        if found.is_some() {
-                            *url = clean;
-                            extracted = found;
+                        match credentials::split_proxy_userinfo(url) {
+                            Ok((clean, found)) => {
+                                if found.is_some() {
+                                    *url = clean;
+                                    extracted = found;
+                                }
+                            }
+                            // Never echo the URL: it holds a password.
+                            Err(message) => return Ok(Reply::error(message)),
                         }
                     }
                 }
@@ -1224,7 +1245,15 @@ impl Service {
                     .lock()
                     .map_err(|_| io::Error::other("task lock poisoned"))?;
                 let mut reply = Reply::accepted(0);
-                reply.proxy = serde_json::from_str(&inner.proxy).ok();
+                reply.proxy = serde_json::from_str::<Proxy>(&inner.proxy).ok().map(|mut mode| {
+                    // Defense in depth: a URL never leaves the daemon with user info.
+                    if let Proxy::Manual { http, https, .. } = &mut mode {
+                        for url in http.iter_mut().chain(https.iter_mut()) {
+                            *url = credentials::redact_proxy_url(url);
+                        }
+                    }
+                    serde_json::to_value(&mode).unwrap_or_default()
+                });
                 let mode: Proxy = serde_json::from_str(&inner.proxy).unwrap_or_default();
                 reply.proxy_note = Some(match mode {
                     Proxy::System => format!("system: {}", xdm_http::system_proxy_status()),
@@ -1237,6 +1266,18 @@ impl Service {
                 Ok(reply)
             }
             Command::ProxyLogin { username, password } => self.proxy_login(username, password),
+            Command::LoginSetInsecure { id, allow } => {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::other("task lock poisoned"))?;
+                if !inner.credentials.set_allow_insecure(id, allow)? {
+                    return Ok(Reply::error("login not found"));
+                }
+                let mut reply = Reply::accepted(id);
+                reply.logins = inner.credentials.summaries();
+                Ok(reply)
+            }
             Command::ProxyLoginClear => {
                 let mut inner = self
                     .inner
@@ -1858,12 +1899,13 @@ impl Service {
                     } else {
                         (None, None)
                     };
-                    let mut headers: Vec<(String, String)> =
+                    let headers: Vec<(String, String)> =
                         serde_json::from_str(&headers_json)?;
-                    // A matching site login supplies Basic credentials for its
-                    // own origin only, unless the submitter set a header
-                    // already. Media manifests replay them the same way so
-                    // ffmpeg opens every chain document authenticated.
+                    // A matching site login is handed to the engine (never baked into a
+                    // header): HTTP tasks answer the server's own challenge, media
+                    // manifests attach it to requests for the login's origin only, and
+                    // nothing reaches ffmpeg's argv. A submitter-supplied Authorization
+                    // header always wins.
                     let mut found: Option<xdm_http::Login> = None;
                     if (kind == "http" || kind == "media")
                         && !headers
@@ -1872,20 +1914,11 @@ impl Service {
                         && let Ok(parsed) = Url::parse(&url)
                         && let Some(login) = inner.credentials.find(&parsed)
                     {
-                        if kind == "http" {
-                            // The engine answers the server's actual challenge
-                            // (Basic or Digest) so a password is never sent in a
-                            // scheme the server did not ask for.
-                            found = Some(xdm_http::Login {
-                                username: login.username.clone(),
-                                password: login.password.clone(),
-                            });
-                        } else {
-                            headers.push((
-                                "Authorization".into(),
-                                format!("Basic {}", credentials::basic_token(&login.username, &login.password)),
-                            ));
-                        }
+                        found = Some(xdm_http::Login {
+                            username: login.username.clone(),
+                            password: login.password.clone(),
+                            allow_insecure: login.allow_insecure,
+                        });
                     }
                     if kind == "http"
                         && let Some(typed) = inner.task_logins.get(&id)
@@ -1964,6 +1997,7 @@ impl Service {
                         proxy_login: inner.credentials.proxy_login().map(|stored| xdm_http::Login {
                             username: stored.username.clone(),
                             password: stored.password.clone(),
+                            allow_insecure: false,
                         }),
                         stall_timeout: Duration::from_secs(inner.stall_timeout),
                         stop,
@@ -2020,6 +2054,12 @@ impl Service {
             };
             let service = self.clone();
             thread::spawn(move || {
+                let media_login = work.login.as_ref().map(|login| xdm_media::OriginLogin {
+                    url: work.url.clone(),
+                    username: login.username.clone(),
+                    password: login.password.clone(),
+                    allow_insecure: login.allow_insecure,
+                });
                 let result: Result<()> = match work.kind {
                     WorkKind::Http {
                         headers,
@@ -2083,7 +2123,7 @@ impl Service {
                             |done, total| live.report(done, total),
                         ),
                     },
-                    WorkKind::Media { mode, headers } => match &mode {
+                    WorkKind::Media { mode, headers } => xdm_media::with_origin_login(media_login, || match &mode {
                         MediaMode::Video {
                             video,
                             audio,
@@ -2164,7 +2204,7 @@ impl Service {
                                 result.map(|summary| live.report(summary.bytes))
                             }
                         },
-                    },
+                    }),
                 };
                 if let Ok(mut inner) = service.inner.lock() {
                     let interrupted_for_queue = inner.queue_interrupted.remove(&work.id);
@@ -2300,6 +2340,8 @@ impl Inner {
             return Ok(());
         }
         if status == "auth_required" {
+            // The typed login was rejected (or never fit); it is not kept.
+            self.task_logins.remove(&id);
             self.db.execute(
                 "UPDATE tasks SET status='auth_required',error=?1,auth_realm=?2,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?3",
                 params![error, auth_realm, id],
@@ -2307,6 +2349,7 @@ impl Inner {
             return Ok(());
         }
         if status == "restart_required" {
+            self.task_logins.remove(&id);
             self.db.execute(
                 "UPDATE tasks SET status='restart_required',error=?1,restart_reason=?2,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?3",
                 params![error, restart_reason, id],
@@ -2332,6 +2375,10 @@ impl Inner {
                 )?;
                 return Ok(());
             }
+        }
+        // A task that failed for good no longer needs its typed credentials.
+        if status == "failed" {
+            self.task_logins.remove(&id);
         }
         self.db.execute(
             "UPDATE tasks SET status=?1,error=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?3",
@@ -3326,6 +3373,7 @@ mod tests {
 
     fn auth_error(status: u16, realm: Option<&str>) -> Error {
         Box::new(xdm_http::AuthRequired(xdm_http::AuthChallenge {
+            note: None,
             status,
             scheme: "Basic".into(),
             realm: realm.map(str::to_owned),
@@ -3351,7 +3399,7 @@ mod tests {
         // challenge (Basic or Digest); no scheme is preselected as a header.
         assert_eq!(
             work.login,
-            Some(xdm_http::Login { username: "alice".into(), password: "s3cret".into() })
+            Some(xdm_http::Login::new("alice", "s3cret"))
         );
         let WorkKind::Http { headers, .. } = work.kind else { unreachable!() };
         assert!(headers.is_empty());
@@ -3427,10 +3475,10 @@ mod tests {
         let WorkKind::Media { mode, headers } = work.kind else { unreachable!() };
         assert!(matches!(mode, MediaMode::Live { .. }));
         assert!(work.media.is_some());
-        assert_eq!(
-            headers,
-            vec![("Authorization".into(), format!("Basic {}", credentials::basic_token("alice", "s3cret")))]
-        );
+        // The login travels beside the headers (origin-scoped inside the manifest
+        // walk), never as an Authorization header that ffmpeg would receive.
+        assert!(headers.is_empty(), "{headers:?}");
+        assert_eq!(work.login, Some(xdm_http::Login::new("alice", "s3cret")));
         // A submitter-provided Authorization header is never overridden.
         let explicit = job(
             "media-login-explicit",
@@ -3454,6 +3502,56 @@ mod tests {
         assert_eq!(work.id, plain);
         let WorkKind::Media { headers, .. } = work.kind else { unreachable!() };
         assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn typed_task_logins_are_dropped_on_every_terminal_state() {
+        let (service, _, _) = service(1000);
+        for (status, name) in [
+            ("complete", "t-complete"),
+            ("failed", "t-failed"),
+            ("restart_required", "t-restart"),
+            ("auth_required", "t-auth"),
+        ] {
+            let id = submit(&service, name);
+            let mut inner = service.inner.lock().unwrap();
+            inner.task_logins.insert(id, xdm_http::Login::new("u", "p"));
+            inner.db.execute("UPDATE tasks SET status='running' WHERE id=?1", [id]).unwrap();
+            inner.finish_task(id, status, Some("e".into()), None, Some("reason")).unwrap();
+            assert!(!inner.task_logins.contains_key(&id), "{status} kept the typed login");
+        }
+        // Paused tasks keep it for the resume; removal drops it.
+        let id = submit(&service, "t-pause");
+        service.inner.lock().unwrap().task_logins.insert(id, xdm_http::Login::new("u", "p"));
+        {
+            let mut inner = service.inner.lock().unwrap();
+            inner.db.execute("UPDATE tasks SET status='running' WHERE id=?1", [id]).unwrap();
+            inner.finish_task(id, "paused", Some("paused".into()), None, None).unwrap();
+            assert!(inner.task_logins.contains_key(&id));
+        }
+        assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
+        assert!(!service.inner.lock().unwrap().task_logins.contains_key(&id));
+    }
+
+    #[test]
+    fn proxy_urls_with_unparsable_credentials_are_rejected_and_never_returned() {
+        let (service, _, _) = service(1000);
+        let set = |url: &str| {
+            service
+                .command(Command::SetProxy {
+                    proxy: ProxyChoice::Manual { http: Some(url.into()), https: None, bypass: Vec::new() },
+                })
+                .unwrap()
+        };
+        let rejected = set("http://u:pw/secret-part@h:1/extra/path");
+        assert!(!rejected.ok);
+        assert!(!format!("{rejected:?}").contains("secret-part"));
+        let accepted = set("http://u:p/w?x#y@h:3128");
+        assert!(accepted.ok, "{accepted:?}");
+        let text = serde_json::to_string(&service.command(Command::GetProxy).unwrap()).unwrap();
+        assert!(!text.contains("p/w") && text.contains("http://h:3128"), "{text}");
+        let stored = service.inner.lock().unwrap().credentials.proxy_login().map(|c| c.password.clone());
+        assert_eq!(stored.as_deref(), Some("p/w?x#y"));
     }
 
     #[test]

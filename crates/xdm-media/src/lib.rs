@@ -166,6 +166,69 @@ fn hls_playlist_liveness(text: &str) -> Option<bool> {
     segments.then_some(!ended)
 }
 
+/// A saved site login for the manifest walk. It is attached only to requests whose
+/// origin equals the origin of `url`; ffmpeg and ffprobe never receive it (not in argv,
+/// not in `-headers`), so segment, key and sub-playlist hosts never see it.
+#[derive(Clone)]
+pub struct OriginLogin {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    /// Allow Basic over cleartext http:// to a non-loopback host.
+    pub allow_insecure: bool,
+}
+
+impl std::fmt::Debug for OriginLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OriginLogin").field("url", &self.url).field("password", &"<hidden>").finish()
+    }
+}
+
+thread_local! {
+    static ORIGIN_LOGIN: std::cell::RefCell<Option<OriginLogin>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `job` with `login` available to manifest requests made on this thread.
+pub fn with_origin_login<R>(login: Option<OriginLogin>, job: impl FnOnce() -> R) -> R {
+    let previous = ORIGIN_LOGIN.with(|slot| slot.replace(login));
+    let result = job();
+    ORIGIN_LOGIN.with(|slot| *slot.borrow_mut() = previous);
+    result
+}
+
+/// `Authorization` value for a manifest request, only for the login's own origin.
+fn origin_authorization(target: &reqwest::Url) -> Option<String> {
+    ORIGIN_LOGIN.with(|slot| {
+        let slot = slot.borrow();
+        let login = slot.as_ref()?;
+        let home = reqwest::Url::parse(&login.url).ok()?;
+        if home.origin() != target.origin() || login.username.contains(':') {
+            return None;
+        }
+        let host = target.host_str().unwrap_or("").trim_matches(['[', ']']);
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        if target.scheme() != "https" && !loopback && !login.allow_insecure {
+            return None;
+        }
+        Some(format!("Basic {}", base64(format!("{}:{}", login.username, login.password).as_bytes())))
+    })
+}
+
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { TABLE[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
 /// Client that forwards the given web headers; used for the local manifest checks
 /// so protected manifests fail before ffmpeg ever runs.
 fn clear_client(headers: &[(String, String)]) -> Result<Client> {
@@ -209,7 +272,11 @@ fn walk_manifest_report(url: &str, headers: &[(String, String)]) -> Result<Manif
         if visited.len() > 32 {
             return Err(err("too many nested playlists"));
         }
-        let response = client.get(current.clone()).send()?.error_for_status()?;
+        let mut request = client.get(current.clone());
+        if let Some(value) = origin_authorization(&current) {
+            request = request.header(reqwest::header::AUTHORIZATION, value);
+        }
+        let response = request.send()?.error_for_status()?;
         if response
             .content_length()
             .is_some_and(|n| n > 4 * 1024 * 1024)
@@ -1215,5 +1282,28 @@ mod tests {
         assert!(part.exists());
         assert_eq!(fs::read(&output).unwrap(), b"payload");
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn origin_login_applies_to_its_origin_only() {
+        let login = OriginLogin {
+            url: "https://a.example/master.m3u8".into(),
+            username: "u".into(),
+            password: "p".into(),
+            allow_insecure: false,
+        };
+        with_origin_login(Some(login), || {
+            let at = |url: &str| origin_authorization(&reqwest::Url::parse(url).unwrap());
+            assert_eq!(at("https://a.example/sub.m3u8").as_deref(), Some("Basic dTpw"));
+            assert!(at("https://b.example/seg.ts").is_none());
+            assert!(at("https://a.example:8443/seg.ts").is_none());
+            assert!(at("http://a.example/seg.ts").is_none());
+        });
+        assert!(origin_authorization(&reqwest::Url::parse("https://a.example/").unwrap()).is_none());
+        let loopback = OriginLogin { url: "http://127.0.0.1:9/m.m3u8".into(), username: "u".into(), password: "p".into(), allow_insecure: false };
+        with_origin_login(Some(loopback), || {
+            assert!(origin_authorization(&reqwest::Url::parse("http://127.0.0.1:9/x").unwrap()).is_some());
+            assert!(origin_authorization(&reqwest::Url::parse("http://localhost:9/x").unwrap()).is_none());
+        });
     }
 }

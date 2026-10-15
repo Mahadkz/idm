@@ -126,20 +126,30 @@ fn classify_text(
         "temporary failure in name resolution",
         "nodename nor servname",
     ];
-    const TLS: [&str; 8] = [
+    const TLS: [&str; 18] = [
         "certificate",
         "invalidcert",
         "unknownissuer",
+        "badcertificate",
         "handshake",
-        "tls",
+        "tls alert",
+        "tls error",
+        "tls connection",
+        "rustls",
+        "ssl routines",
+        "ssl error",
         "received fatal alert",
         "peer sent no certificates",
-        "unknown ca",
+        "peer is incompatible",
+        "peer misbehaved",
+        "corrupt message",
+        "unexpected message",
+        "wrong version number",
     ];
     if DNS.iter().any(|needle| text.contains(needle)) {
         return ErrorKind::Dns;
     }
-    if TLS.iter().any(|needle| text.contains(needle)) {
+    if TLS.iter().any(|needle| text.contains(needle)) || text.contains("unknown ca") {
         return ErrorKind::Tls;
     }
     if io_kind == Some(std::io::ErrorKind::ConnectionRefused) || text.contains("connection refused") {
@@ -238,5 +248,17 @@ mod tests {
         assert_eq!(t("operation timed out", None, true, true), ErrorKind::ConnectTimeout);
         assert_eq!(t("operation timed out", None, false, true), ErrorKind::ReadTimeout);
         assert_eq!(t("network is unreachable", None, true, false), ErrorKind::Network);
+        for message in [
+            "invalid peer certificate: unknownissuer",
+            "peer is incompatible: no shared cipher suites",
+            "received corrupt message of type invalidcontenttype",
+            "peer sent an unexpected message: handshake",
+            "error:0A00010B:SSL routines::wrong version number",
+            "tls handshake eof",
+        ] {
+            assert_eq!(t(message, None, true, false), ErrorKind::Tls, "{message}");
+        }
+        // The bare letters "tls" inside another word are not TLS evidence.
+        assert_eq!(t("hostname settlsone failed to connect", None, true, false), ErrorKind::Network);
     }
 }

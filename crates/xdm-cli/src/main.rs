@@ -36,16 +36,23 @@ fn main() {
     let mut stall_timeout = DEFAULT_STALL_TIMEOUT;
     let mut temp_dir: Option<PathBuf> = None;
     let mut set_file_time = true;
+    let mut proxy_user: Option<String> = None;
+    let mut proxy_password_file: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-proxy" => proxy = Proxy::Direct,
             "--proxy" => {
                 let url = args.next().unwrap_or_else(|| usage());
+                reject_proxy_userinfo(&url);
                 proxy = Proxy::Manual {
                     http: Some(url.clone()),
                     https: Some(url),
                     bypass: Vec::new(),
                 };
+            }
+            "--proxy-user" => proxy_user = Some(args.next().unwrap_or_else(|| usage())),
+            "--proxy-password-file" => {
+                proxy_password_file = Some(args.next().unwrap_or_else(|| usage()));
             }
             "--proxy-bypass" => {
                 let list = args.next().unwrap_or_else(|| usage());
@@ -148,7 +155,13 @@ fn main() {
     match download_with_stall_timeout(
         Options {
             login: None,
-            proxy_login: None,
+            proxy_login: proxy_user.map(|username| {
+                let password = proxy_password_file
+                    .as_deref()
+                    .map(read_secret)
+                    .unwrap_or_default();
+                xdm_http::Login::new(username, password)
+            }),
             url: positional[0].clone(),
             output: output.clone(),
             connections,
@@ -631,6 +644,18 @@ fn daemon_command(args: Vec<String>) {
             });
             return;
         }
+        // daemon login insecure ID on|off  (allow Basic over plain http:// to non-loopback hosts)
+        Some("login") if args.len() == 4 && args[1] == "insecure" => {
+            send_daemon(Command::LoginSetInsecure {
+                id: args[2].parse().unwrap_or_else(|_| usage()),
+                allow: match args[3].as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => usage(),
+                },
+            });
+            return;
+        }
         Some("login") if args.len() == 3 && args[1] == "remove" => {
             send_daemon(Command::LoginRemove {
                 id: args[2].parse().unwrap_or_else(|_| usage()),
@@ -1008,6 +1033,7 @@ fn daemon_command(args: Vec<String>) {
             Command::SetProxy { proxy: ProxyChoice::Direct }
         }
         Some("proxy") if (args.len() == 3 || args.len() == 4) && args[1] == "manual" => {
+            reject_proxy_userinfo(&args[2]);
             Command::SetProxy {
                 proxy: ProxyChoice::Manual {
                     http: Some(args[2].clone()),
@@ -1086,6 +1112,18 @@ fn read_project(path: &str) -> serde_json::Value {
 
 /// Reads a password from a file, or stdin for "-"; never accepted from argv.
 /// Only trailing line breaks are trimmed, so spaces stay part of the secret.
+/// Passwords never travel in argv, so a proxy URL carrying user info is refused.
+fn reject_proxy_userinfo(url: &str) {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    if rest.contains('@') {
+        eprintln!(
+            "proxy URLs must not contain credentials (they would be visible in the process list); \
+             use `daemon proxy-login USER PASSWORD_FILE` or `--proxy-user USER --proxy-password-file FILE`"
+        );
+        std::process::exit(2);
+    }
+}
+
 fn read_secret(path: &str) -> String {
     let text = if path == "-" {
         let mut buffer = String::new();
@@ -1176,11 +1214,11 @@ fn send_daemon(command: Command) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart] [--temp-dir ABSOLUTE_DIR] [--no-server-time]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://[USER:PASS@]HOST:PORT [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon list [--offset N] [--limit 1..2000] [--sort COL] [--status S] [--category C] [--queue ID] [--search TEXT]\n       xdm-cli daemon move-file ID NEW_PATH|partials DIR|partials-delete DIR PATH...|remove ID --delete-partial\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://[USER:PASS@]HOST:PORT [BYPASS,...]\n       xdm-cli daemon proxy-login USER PASSWORD_FILE|-   (store proxy credentials; requeues tasks waiting on a 407)\n       xdm-cli daemon proxy-login-clear\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon temp-dir get|ABSOLUTE_DIR|off\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|playlist FILE_OR_URL ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls
+        "usage: xdm-cli URL OUTPUT_PATH [--connections 1..16] [--header 'Name: value'] [--rate-kib N] [--restart] [--temp-dir ABSOLUTE_DIR] [--no-server-time]\n       xdm-cli URL OUTPUT_PATH [--method POST] [--data-file BODY_FILE]\n       xdm-cli URL OUTPUT_PATH [--stall-timeout 1..600] [--no-proxy | --proxy http|https|socks5|socks5h://HOST:PORT [--proxy-user USER --proxy-password-file FILE|-] [--proxy-bypass HOST,...]]\n       xdm-cli daemon list|submit URL OUTPUT_PATH|submit URL OUTPUT_PATH --allow-duplicate|submit-post URL OUTPUT_PATH BODY_FILE|pause ID|resume ID|limit 1..16\n       xdm-cli daemon list [--offset N] [--limit 1..2000] [--sort COL] [--status S] [--category C] [--queue ID] [--search TEXT]\n       xdm-cli daemon move-file ID NEW_PATH|partials DIR|partials-delete DIR PATH...|remove ID --delete-partial\n       xdm-cli daemon info ID|remove ID|redownload ID OUTPUT_PATH [--allow-duplicate]|restart ID\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls\n       xdm-cli daemon proxy get|system|direct|manual http|https|socks4|socks5|socks5h://HOST:PORT [BYPASS,...]  (credentials: daemon proxy-login, never in the URL)\n       xdm-cli daemon proxy-login USER PASSWORD_FILE|-   (store proxy credentials; requeues tasks waiting on a 407)\n       xdm-cli daemon proxy-login-clear\n       xdm-cli daemon stall-timeout get|SECONDS\n       xdm-cli daemon temp-dir get|ABSOLUTE_DIR|off\n       xdm-cli daemon limit-global KIB|unlimited\n       xdm-cli daemon limit-host PATTERN KIB|unlimited|remove\n       xdm-cli daemon host-connections PATTERN N|remove\n       xdm-cli daemon quota MIB HOURS|off\n       xdm-cli daemon bandwidth\n       xdm-cli daemon priority ID immediate|normal|low\n       xdm-cli daemon rate ID KIB_PER_SECOND|unlimited\n       xdm-cli daemon queue start|stop|at UNIX_SECONDS|stop-at UNIX_SECONDS\n       xdm-cli daemon queue create NAME [LIMIT] [--sync]|sync-interval ID HOURS MINUTES|off|check ID|enable ID|disable ID|limit ID N|rename ID NAME|remove ID\n       xdm-cli daemon queue assign QUEUE_ID TASK_ID [TASK_ID...]\n       xdm-cli daemon queue start-one ID|stop-one ID|events ID\n       xdm-cli daemon queue completion ID none|notify|sleep|hibernate|shutdown|restart|exit|program PATH [ARGS...] [--confirm-destructive] [--countdown SECONDS]\n       xdm-cli daemon completion status|cancel QUEUE_ID\n       xdm-cli daemon queue retry ID COUNT|infinite DELAY_SECONDS\n       xdm-cli daemon queue schedule ID none|once START_UNIX STOP_UNIX|-|daily HH:MM HH:MM|- all|weekdays|mon,tue,...\n       xdm-cli daemon preview LIST_FILE|import LIST_FILE ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|playlist FILE_OR_URL ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|batch 'URL[001-100]' ABSOLUTE_DIRECTORY [--start] [--allow-duplicates]|export NEW_FILE json|urls
        xdm-cli daemon grab PROJECT.json ABSOLUTE_DIRECTORY [--start] [--queue ID]
        xdm-cli daemon grab-status REQUEST_ID|grab-save NAME PROJECT.json|grab-projects|grab-remove NAME
        xdm-cli daemon category list|save NAME EXT,EXT|- ABSOLUTE_DIRECTORY [*.site,...]|remove NAME
-       xdm-cli daemon login list|save PATTERN USER PASSWORD_FILE|- [--disabled]|remove ID
+       xdm-cli daemon login list|save PATTERN USER PASSWORD_FILE|- [--disabled]|remove ID|insecure ID on|off
        xdm-cli daemon auth TASK_ID USER PASSWORD_FILE|- [--remember]
        xdm-cli daemon move ID up|down|top|bottom|INDEX
        xdm-cli grab PROJECT.json

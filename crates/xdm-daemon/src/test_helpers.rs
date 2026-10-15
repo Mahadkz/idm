@@ -142,6 +142,7 @@ pub(crate) fn inner_resume(service: &Service, id: i64) {
 
 pub(crate) fn auth_error(status: u16, realm: Option<&str>) -> Error {
     Box::new(xdm_http::AuthRequired(xdm_http::AuthChallenge {
+        note: None,
         status,
         scheme: "Basic".into(),
         realm: realm.map(str::to_owned),

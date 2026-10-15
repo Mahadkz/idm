@@ -8,8 +8,6 @@
 //! nonce went `stale`, so wrong credentials never loop.
 
 use sha2::{Digest as _, Sha256};
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::sync::Mutex;
 
 /// Username and password for the origin of a transfer. `Debug` hides the password.
@@ -17,6 +15,26 @@ use std::sync::Mutex;
 pub struct Login {
     pub username: String,
     pub password: String,
+    /// Permit Basic over cleartext `http://` to non-loopback hosts. Off by default:
+    /// the password would cross the network readable.
+    pub allow_insecure: bool,
+}
+
+impl Login {
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self { username: username.into(), password: password.into(), allow_insecure: false }
+    }
+}
+
+/// Whether Basic credentials may be sent to this URL: TLS, loopback, or an explicit opt-in.
+pub fn basic_allowed(url: &str, login: &Login) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else { return false };
+    if url.scheme() == "https" || login.allow_insecure {
+        return true;
+    }
+    let host = url.host_str().unwrap_or("").trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 impl std::fmt::Debug for Login {
@@ -281,6 +299,12 @@ enum Scheme {
 
 #[derive(Debug, Default)]
 struct State {
+    /// Strongest Digest algorithm negotiated so far; later challenges never go below it.
+    pinned_rank: u8,
+    /// Digest has been used: the transfer never falls back to Basic.
+    used_digest: bool,
+    /// Why the last challenge was not answered (shown with the auth_required state).
+    refusal: Option<String>,
     scheme: Option<Scheme>,
     /// An authenticated request has succeeded with the current scheme.
     verified: bool,
@@ -294,21 +318,29 @@ pub struct AuthState {
 }
 
 /// Request-target of a URL (`path?query`) as Digest `uri` expects it.
+/// Taken from the parsed URL so it equals what the client puts on the request line.
 pub fn request_target(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let target = rest.find('/').map_or("/", |at| &rest[at..]);
-    let target = target.split('#').next().unwrap_or("/");
-    target.to_owned()
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        },
+        Err(_) => "/".to_owned(),
+    }
 }
 
-fn random_cnonce() -> String {
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos()),
-    );
-    hex(&hasher.finish().to_be_bytes())
+/// 16 bytes from the operating system's CSPRNG, hex encoded.
+fn random_cnonce() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(hex(&bytes))
+}
+
+fn rank(challenge: &DigestChallenge) -> u8 {
+    match challenge.algorithm {
+        Algorithm::Sha256 | Algorithm::Sha256Sess => 2,
+        Algorithm::Md5 | Algorithm::Md5Sess => 1,
+    }
 }
 
 /// Outcome of offering a 401 challenge to the state.
@@ -335,7 +367,7 @@ impl AuthState {
             Scheme::Basic => Some(basic_value(&self.login)),
             Scheme::Digest { challenge, nc, uri } => {
                 *nc = nc.wrapping_add(1);
-                Some(digest_header(challenge, &self.login, method, uri, *nc, &random_cnonce()))
+                Some(digest_header(challenge, &self.login, method, uri, *nc, &random_cnonce()?))
             }
         }
     }
@@ -351,32 +383,58 @@ impl AuthState {
         }
     }
 
+    /// Why the latest challenge went unanswered, when it was a policy refusal.
+    pub fn refusal(&self) -> Option<String> {
+        self.state.lock().ok().and_then(|state| state.refusal.clone())
+    }
+
     /// Takes the strongest supported challenge from a 401. `sent_auth` tells
     /// whether the rejected request already carried credentials; that is only
-    /// retried when the nonce is stale or credentials worked before.
+    /// retried when the nonce is stale or credentials worked before. The
+    /// negotiated algorithm is pinned (never weaker later), Digest never gives
+    /// way to Basic, and Basic needs TLS, loopback or an explicit opt-in.
     pub fn answer(&self, headers: &[String], effective_url: &str, sent_auth: bool) -> Answer {
         let challenges: Vec<Challenge> = headers.iter().flat_map(|value| parse_challenges(value)).collect();
         let digests: Vec<DigestChallenge> = challenges.iter().filter_map(DigestChallenge::from).collect();
-        let best = digests
-            .iter()
-            .max_by_key(|digest| matches!(digest.algorithm, Algorithm::Sha256 | Algorithm::Sha256Sess));
+        let best = digests.iter().max_by_key(|digest| rank(digest));
         let Ok(mut state) = self.state.lock() else {
             return Answer::GiveUp;
         };
         let basic = challenges.iter().any(|c| c.scheme.eq_ignore_ascii_case("basic"));
         let stale = best.is_some_and(|digest| digest.stale);
+        state.refusal = None;
         if sent_auth && !stale && !state.verified {
             return Answer::GiveUp;
         }
         if let Some(digest) = best {
+            if rank(digest) < state.pinned_rank {
+                state.refusal = Some(
+                    "the server now offers only a weaker Digest algorithm than negotiated; refusing to downgrade".into(),
+                );
+                return Answer::GiveUp;
+            }
+            state.pinned_rank = rank(digest);
+            state.used_digest = true;
             state.scheme = Some(Scheme::Digest {
                 challenge: digest.clone(),
                 nc: 0,
                 uri: request_target(effective_url),
             });
-        } else if basic && !sent_auth {
-            state.scheme = Some(Scheme::Basic);
-        } else if basic && state.verified {
+        } else if basic && (!sent_auth || state.verified) {
+            if state.used_digest {
+                state.refusal = Some("the server switched from Digest to Basic; refusing to send Basic credentials".into());
+                return Answer::GiveUp;
+            }
+            if self.login.username.contains(':') {
+                state.refusal = Some("Basic authentication cannot carry a ':' in the username".into());
+                return Answer::GiveUp;
+            }
+            if !basic_allowed(effective_url, &self.login) {
+                state.refusal = Some(
+                    "Basic authentication over plain http:// would expose the password; use https or allow insecure Basic for this login".into(),
+                );
+                return Answer::GiveUp;
+            }
             state.scheme = Some(Scheme::Basic);
         } else {
             return Answer::GiveUp;
@@ -468,7 +526,7 @@ mod tests {
         let digest = challenge(
             r#"Digest realm="testrealm@host.com", qop="auth,auth-int", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", opaque="5ccc069c403ebaf9f0171e9517f40e41""#,
         );
-        let login = Login { username: "Mufasa".into(), password: "Circle Of Life".into() };
+        let login = Login::new("Mufasa", "Circle Of Life");
         let response =
             digest_response(&digest, &login, "GET", "/dir/index.html", 1, "0a4f113b");
         assert_eq!(response, "6629fae49393a05397450978507c4ef1");
@@ -479,7 +537,7 @@ mod tests {
     #[test]
     fn rfc_7616_example_md5_and_sha256() {
         // RFC 7616 section 3.9.1 (SHA-256) and 3.9.2 (MD5 listed in the same example set).
-        let login = Login { username: "Mufasa".into(), password: "Circle of Life".into() };
+        let login = Login::new("Mufasa", "Circle of Life");
         let sha = challenge(
             r#"Digest realm="http-auth@example.org", qop="auth, auth-int", algorithm=SHA-256, nonce="7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", opaque="FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS""#,
         );
@@ -513,7 +571,7 @@ mod tests {
 
     #[test]
     fn nc_increments_and_wrong_credentials_stop_after_one_retry() {
-        let state = AuthState::new(Login { username: "u".into(), password: "p".into() });
+        let state = AuthState::new(Login::new("u", "p"));
         let header = r#"Digest realm="r", nonce="n", qop="auth""#.to_owned();
         assert!(matches!(state.answer(&[header.clone()], "http://h/f?x=1", false), Answer::Retry));
         let first = state.header("GET").unwrap();
@@ -530,13 +588,70 @@ mod tests {
 
     #[test]
     fn prefers_sha256_and_basic_header_is_standard() {
-        let state = AuthState::new(Login { username: "Aladdin".into(), password: "open sesame".into() });
+        let state = AuthState::new(Login::new("Aladdin", "open sesame"));
         let both = r#"Digest realm="r", nonce="n", algorithm=MD5, Digest realm="r", nonce="n", algorithm=SHA-256"#.to_owned();
         assert!(matches!(state.answer(&[both], "http://h/", false), Answer::Retry));
         assert!(state.header("GET").unwrap().contains("algorithm=SHA-256"));
-        let basic = AuthState::new(Login { username: "Aladdin".into(), password: "open sesame".into() });
-        assert!(matches!(basic.answer(&[r#"Basic realm="x""#.into()], "http://h/", false), Answer::Retry));
+        let basic = AuthState::new(Login::new("Aladdin", "open sesame"));
+        assert!(matches!(basic.answer(&[r#"Basic realm="x""#.into()], "http://127.0.0.1/", false), Answer::Retry));
         assert_eq!(basic.header("GET").unwrap(), "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
-        assert!(!format!("{:?}", Login { username: "a".into(), password: "secret".into() }).contains("secret"));
+        assert!(!format!("{:?}", Login::new("a", "secret")).contains("secret"));
+    }
+
+    fn digest_header_for(algorithm: &str, nonce: &str, extra: &str) -> String {
+        format!(r#"Digest realm="r", nonce="{nonce}", qop="auth", algorithm={algorithm}{extra}"#)
+    }
+
+    #[test]
+    fn never_downgrades_digest_algorithm_or_falls_back_to_basic() {
+        let state = AuthState::new(Login::new("u", "p"));
+        assert!(matches!(state.answer(&[digest_header_for("SHA-256", "n1", "")], "http://h/", false), Answer::Retry));
+        // A stale challenge that only offers MD5 is refused.
+        let weaker = digest_header_for("MD5", "n2", ", stale=true");
+        assert!(matches!(state.answer(&[weaker], "http://h/", true), Answer::GiveUp));
+        assert!(state.refusal().unwrap().contains("downgrade"));
+        assert!(state.header("GET").unwrap().contains("algorithm=SHA-256"));
+        // Digest was used: a later Basic-only challenge is not answered.
+        state.confirm();
+        let basic = AuthState::new(Login::new("u", "p"));
+        let _ = basic.answer(&[digest_header_for("MD5", "n", "")], "http://h/", false);
+        basic.confirm();
+        assert!(matches!(basic.answer(&[r#"Basic realm="x""#.into()], "https://h/", true), Answer::GiveUp));
+        assert!(basic.refusal().unwrap().contains("Digest to Basic"));
+        assert!(basic.header("GET").unwrap().starts_with("Digest "));
+    }
+
+    #[test]
+    fn basic_needs_tls_loopback_or_opt_in_and_no_colon_user() {
+        let challenge = vec![r#"Basic realm="x""#.to_owned()];
+        let remote = AuthState::new(Login::new("u", "p"));
+        assert!(matches!(remote.answer(&challenge, "http://example.com/f", false), Answer::GiveUp));
+        assert!(remote.refusal().unwrap().contains("plain http"));
+        assert!(remote.header("GET").is_none());
+        for allowed in ["https://example.com/f", "http://127.0.0.1:8/f", "http://localhost/f", "http://[::1]/f"] {
+            let state = AuthState::new(Login::new("u", "p"));
+            assert!(matches!(state.answer(&challenge, allowed, false), Answer::Retry), "{allowed}");
+        }
+        let mut opted = Login::new("u", "p");
+        opted.allow_insecure = true;
+        assert!(matches!(AuthState::new(opted).answer(&challenge, "http://example.com/f", false), Answer::Retry));
+        let colon = AuthState::new(Login::new("a:b", "p"));
+        assert!(matches!(colon.answer(&challenge, "https://example.com/f", false), Answer::GiveUp));
+        assert!(colon.refusal().unwrap().contains("':'"));
+    }
+
+    #[test]
+    fn request_target_matches_the_request_line() {
+        assert_eq!(request_target("http://h/a/b?x=/y&z=1#frag"), "/a/b?x=/y&z=1");
+        assert_eq!(request_target("http://h?x=/y"), "/?x=/y");
+        assert_eq!(request_target("http://h"), "/");
+        assert_eq!(request_target("http://h/a%20b"), "/a%20b");
+    }
+
+    #[test]
+    fn cnonce_is_sixteen_random_bytes() {
+        let (a, b) = (random_cnonce().unwrap(), random_cnonce().unwrap());
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b);
     }
 }

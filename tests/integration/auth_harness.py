@@ -1,6 +1,8 @@
 """Shared helpers for the N11/N17/N23/N26 integration tests: an isolated daemon plus CLI wrapper."""
 import json
 import os
+import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -29,6 +31,19 @@ class Daemon:
         if raw:
             return result.stdout
         return json.loads(result.stdout) if result.stdout.strip() else {}
+
+    def rpc(self, kind, **payload):
+        command = {"type": kind}
+        if payload:
+            command["payload"] = payload
+        data = json.dumps({"version": 1, "token": (self.base / "state/ipc-token").read_text(), "command": command}).encode()
+        with socket.socket(socket.AF_UNIX) as stream:
+            stream.settimeout(15)
+            stream.connect(str(self.base / "state/daemon.sock"))
+            stream.sendall(struct.pack("=I", len(data)) + data)
+            with stream.makefile("rb") as reader:
+                size = struct.unpack("=I", reader.read(4))[0]
+                return json.loads(reader.read(size))
 
     def info(self, task_id):
         return self.cli("info", task_id)["tasks"][0]

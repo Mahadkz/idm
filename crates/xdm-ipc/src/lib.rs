@@ -25,7 +25,7 @@ pub struct Request {
     pub command: Command,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Command {
     Submit {
@@ -401,6 +401,41 @@ pub enum Command {
     },
     /// Forgets the stored proxy credentials.
     ProxyLoginClear,
+    /// Allows (or forbids again) Basic over cleartext http:// to non-loopback
+    /// hosts for one saved login.
+    LoginSetInsecure {
+        id: i64,
+        allow: bool,
+    },
+}
+
+/// Debug output of a command never includes password fields (`LoginSave`,
+/// `TaskProvideLogin`, `ProxyLogin`, and any future variant with a `password`).
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn mask(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, entry) in map.iter_mut() {
+                        if key.to_ascii_lowercase().contains("password") {
+                            *entry = serde_json::Value::String("<hidden>".into());
+                        } else {
+                            mask(entry);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(mask),
+                _ => {}
+            }
+        }
+        match serde_json::to_value(self) {
+            Ok(mut value) => {
+                mask(&mut value);
+                write!(f, "Command({value})")
+            }
+            Err(_) => f.write_str("Command(<unprintable>)"),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -1350,6 +1385,19 @@ mod tests {
         assert!(!bad_bitrate.valid("opus"));
         let sidecar = MediaMode::Subtitles { track: 0 };
         assert!(sidecar.valid("srt") && sidecar.valid("vtt") && !sidecar.valid("mp3"));
+    }
+
+    #[test]
+    fn command_debug_hides_passwords() {
+        for command in [
+            Command::LoginSave { pattern: "http://h/".into(), username: "u".into(), password: "hunter2".into(), enabled: true },
+            Command::TaskProvideLogin { task_id: 1, username: "u".into(), password: "hunter2".into(), remember: false },
+            Command::ProxyLogin { username: "u".into(), password: "hunter2".into() },
+        ] {
+            let text = format!("{command:?}");
+            assert!(!text.contains("hunter2") && text.contains("<hidden>"), "{text}");
+        }
+        assert!(format!("{:?}", Command::GetProxy).contains("get_proxy"));
     }
 
     #[test]

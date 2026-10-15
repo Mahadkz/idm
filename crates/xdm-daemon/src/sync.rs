@@ -362,6 +362,7 @@ impl Service {
             .map(|stored| xdm_http::Login {
                 username: stored.username.clone(),
                 password: stored.password.clone(),
+                allow_insecure: false,
             });
         let remote = match probe(&member.url, &member.headers, proxy, proxy_login.as_ref(), &member.saved)? {
             Probed::NotModified => return Ok(false),

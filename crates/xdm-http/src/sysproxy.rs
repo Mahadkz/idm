@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// A proxy configuration read from the operating system.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SystemProxy {
     /// Where the settings came from (`gnome`, `kde`, `windows`).
     pub source: String,
@@ -20,6 +20,25 @@ pub struct SystemProxy {
     pub bypass: Vec<String>,
     /// Set when the system asks for a PAC script or WPAD discovery.
     pub pac: Option<Pac>,
+    /// Settings that could not be expressed and were dropped on purpose.
+    pub warnings: Vec<String>,
+}
+
+impl std::fmt::Debug for SystemProxy {
+    // Proxy URLs may carry user info; never print it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemProxy")
+            .field("source", &self.source)
+            .field("http", &self.http.as_deref().map(redact))
+            .field("https", &self.https.as_deref().map(redact))
+            .field("bypass", &self.bypass)
+            .field("pac", &self.pac.as_ref().map(|pac| match pac {
+                Pac::Url(url) => Pac::Url(redact(url)),
+                Pac::Discovery => Pac::Discovery,
+            }))
+            .field("warnings", &self.warnings)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +63,7 @@ impl SystemProxy {
     pub fn describe(&self) -> String {
         if let Some(pac) = &self.pac {
             return match pac {
-                Pac::Url(url) => format!("{} proxy settings use the PAC script {url}: PAC not supported", self.source),
+                Pac::Url(url) => format!("{} proxy settings use the PAC script {}: PAC not supported", self.source, redact(url)),
                 Pac::Discovery => format!("{} proxy settings use automatic discovery (WPAD/PAC): PAC not supported", self.source),
             };
         }
@@ -58,17 +77,25 @@ impl SystemProxy {
         if !self.bypass.is_empty() {
             parts.push(format!("bypass={}", self.bypass.join(",")));
         }
+        for warning in &self.warnings {
+            parts.push(format!("[{warning}]"));
+        }
         format!("{} proxy settings: {}", self.source, parts.join(" "))
     }
 }
 
-fn redact(url: &str) -> String {
-    match url.split_once("://") {
-        Some((scheme, rest)) => match rest.rsplit_once('@') {
-            Some((_, host)) => format!("{scheme}://{host}"),
-            None => url.to_owned(),
-        },
-        None => url.to_owned(),
+/// Removes user info, query and fragment: PAC and proxy URLs often carry tokens there.
+pub(crate) fn redact(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
+    };
+    let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    // Everything up to the last '@' is user info (a password may hold '/').
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    match scheme {
+        Some(scheme) => format!("{scheme}://{rest}"),
+        None => rest.to_owned(),
     }
 }
 
@@ -81,8 +108,32 @@ pub fn environment_proxy_set() -> bool {
     })
 }
 
-/// Resolves the system proxy settings for this machine.
+/// How long a resolution is reused instead of spawning `gsettings` again.
+fn cache_ttl() -> Duration {
+    std::env::var("XDM_SYSTEM_PROXY_TTL_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .map_or(Duration::from_secs(5), Duration::from_millis)
+}
+
+/// Resolves the system proxy settings for this machine, reusing a recent answer.
 pub fn resolve() -> Resolved {
+    static CACHE: std::sync::Mutex<Option<(Instant, Resolved)>> = std::sync::Mutex::new(None);
+    let ttl = cache_ttl();
+    if let Ok(mut cache) = CACHE.lock() {
+        if let Some((at, found)) = cache.as_ref() {
+            if at.elapsed() < ttl {
+                return found.clone();
+            }
+        }
+        let fresh = resolve_uncached();
+        *cache = Some((Instant::now(), fresh.clone()));
+        return fresh;
+    }
+    resolve_uncached()
+}
+
+fn resolve_uncached() -> Resolved {
     if environment_proxy_set() {
         return Resolved::Environment;
     }
@@ -92,8 +143,11 @@ pub fn resolve() -> Resolved {
     }
     #[cfg(unix)]
     {
-        if let Some(found) = gnome_settings() {
-            return Resolved::Settings(found);
+        match gnome_settings() {
+            Gnome::Active(found) => return Resolved::Settings(found),
+            // GNOME says "none" explicitly: an old kioslaverc must not revive a proxy.
+            Gnome::Disabled => return Resolved::Direct,
+            Gnome::Unknown => {}
         }
         if let Some(found) = kde_settings() {
             return Resolved::Settings(found);
@@ -142,8 +196,18 @@ fn endpoint(scheme: &str, host: &str, port: &str) -> Option<String> {
     Some(format!("{scheme}://{host}:{port}"))
 }
 
+/// What GNOME's settings say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gnome {
+    /// Not a GNOME configuration (no usable `mode`).
+    Unknown,
+    /// Explicitly no proxy: later sources (KDE files) must not override it.
+    Disabled,
+    Active(SystemProxy),
+}
+
 /// Parses the output of `gsettings list-recursively org.gnome.system.proxy`.
-pub fn parse_gnome(output: &str) -> Option<SystemProxy> {
+pub fn parse_gnome(output: &str) -> Gnome {
     let mut mode = String::new();
     let mut pac_url = String::new();
     let mut ignore = Vec::new();
@@ -179,13 +243,14 @@ pub fn parse_gnome(output: &str) -> Option<SystemProxy> {
                 found.http.get_or_insert_with(|| socks.clone());
                 found.https.get_or_insert(socks);
             }
-            (found.http.is_some() || found.https.is_some()).then_some(found)
+            if found.http.is_some() || found.https.is_some() { Gnome::Active(found) } else { Gnome::Disabled }
         }
         "auto" => {
             found.pac = Some(if pac_url.is_empty() { Pac::Discovery } else { Pac::Url(pac_url) });
-            Some(found)
+            Gnome::Active(found)
         }
-        _ => None,
+        "none" => Gnome::Disabled,
+        _ => Gnome::Unknown,
     }
 }
 
@@ -248,7 +313,8 @@ pub fn parse_windows(enabled: bool, server: &str, over: &str, auto_config: &str)
         source: "windows".into(),
         ..Default::default()
     };
-    if !enabled {
+    if !enabled || server.trim().is_empty() {
+        // Enabled with no server named means the script (or nothing) decides.
         if auto_config.trim().is_empty() {
             return None;
         }
@@ -287,12 +353,14 @@ pub fn parse_windows(enabled: bool, server: &str, over: &str, auto_config: &str)
         found.http = with_scheme("http", server);
         found.https = found.http.clone();
     }
-    found.bypass = over
-        .split(';')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .flat_map(windows_bypass)
-        .collect();
+    for item in over.split(';').map(str::trim).filter(|item| !item.is_empty()) {
+        // A bare "*" would silently turn every host into a bypass.
+        if matches!(item, "*" | "*.*") {
+            found.warnings.push(format!("ignored match-everything bypass entry {item}"));
+        } else {
+            found.bypass.extend(windows_bypass(item));
+        }
+    }
     (found.http.is_some() || found.https.is_some()).then_some(found)
 }
 
@@ -302,13 +370,19 @@ fn windows_bypass(item: &str) -> Vec<String> {
     if item.eq_ignore_ascii_case("<local>") {
         return vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     }
+    if matches!(item, "*" | "*.*") {
+        return Vec::new();
+    }
     if let Some(domain) = item.strip_prefix("*.") {
+        if domain.contains('*') {
+            return Vec::new();
+        }
         return vec![domain.to_owned()];
     }
     // `192.168.*` style prefixes become CIDR ranges.
     let octets: Vec<&str> = item.split('.').collect();
     if octets.last() == Some(&"*")
-        && octets.len() <= 4
+        && (2..=4).contains(&octets.len())
         && octets[..octets.len() - 1].iter().all(|octet| octet.parse::<u8>().is_ok())
     {
         let fixed = octets.len() - 1;
@@ -326,6 +400,7 @@ fn windows_bypass(item: &str) -> Vec<String> {
 // ---- platform readers ----------------------------------------------------
 
 /// Runs a program with a short deadline; `None` when missing, failing or slow.
+/// Stdout is drained on its own thread so a chatty child cannot fill the pipe and stall.
 fn run_bounded(program: &str, args: &[&str]) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
@@ -334,28 +409,36 @@ fn run_bounded(program: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        // A runaway child cannot grow the buffer past 1 MiB.
+        let _ = std::io::Read::read_to_string(&mut std::io::Read::take(&mut stdout, 1 << 20), &mut text);
+        text
+    });
     let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match child.try_wait().ok()? {
-            Some(status) if status.success() => break,
-            Some(_) => return None,
-            None if Instant::now() >= deadline => {
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                break false;
             }
-            None => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => break false,
         }
-    }
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
-    Some(text)
+    };
+    let text = reader.join().ok()?;
+    success.then_some(text)
 }
 
 #[cfg(unix)]
-fn gnome_settings() -> Option<SystemProxy> {
-    let output = run_bounded("gsettings", &["list-recursively", "org.gnome.system.proxy"])?;
-    parse_gnome(&output)
+fn gnome_settings() -> Gnome {
+    match run_bounded("gsettings", &["list-recursively", "org.gnome.system.proxy"]) {
+        Some(output) => parse_gnome(&output),
+        None => Gnome::Unknown,
+    }
 }
 
 #[cfg(unix)]
@@ -367,6 +450,11 @@ fn kde_settings() -> Option<SystemProxy> {
 }
 
 #[cfg(windows)]
+fn name_text(name: &[u16]) -> String {
+    String::from_utf16_lossy(&name[..name.len().saturating_sub(1)])
+}
+
+#[cfg(windows)]
 fn windows_settings() -> Option<SystemProxy> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
     let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\0".encode_utf16().collect();
@@ -374,12 +462,25 @@ fn windows_settings() -> Option<SystemProxy> {
         let name: Vec<u16> = format!("{name}\0").encode_utf16().collect();
         let mut buffer = vec![0u16; 4096];
         let mut size = (buffer.len() * 2) as u32;
-        // SAFETY: both strings are NUL-terminated and the buffer size matches `size`.
-        let status = unsafe {
-            RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
-        };
-        if status != 0 {
-            return String::new();
+        let mut status;
+        // Two rounds: the second uses the size the first reported for an oversize value.
+        for _ in 0..2 {
+            // SAFETY: both strings are NUL-terminated and the buffer size matches `size`.
+            status = unsafe {
+                RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+            };
+            if status == 234 && (size as usize) <= (1 << 20) {
+                buffer = vec![0u16; (size as usize).div_ceil(2) + 1];
+                size = (buffer.len() * 2) as u32;
+                continue;
+            }
+            if status != 0 {
+                if status == 234 {
+                    eprintln!("warning: proxy registry value {} exceeds 1 MiB and was ignored", name_text(&name));
+                }
+                return String::new();
+            }
+            break;
         }
         let chars = (size as usize / 2).saturating_sub(1);
         String::from_utf16_lossy(&buffer[..chars.min(buffer.len())])
@@ -395,6 +496,15 @@ fn windows_settings() -> Option<SystemProxy> {
         status == 0 && value != 0
     };
     parse_windows(enabled, &string("ProxyServer"), &string("ProxyOverride"), &string("AutoConfigURL"))
+}
+
+/// Human-readable account of how `system` mode resolves right now.
+pub fn status() -> String {
+    match resolve() {
+        Resolved::Environment => "environment proxy variables".into(),
+        Resolved::Settings(found) => found.describe(),
+        Resolved::Direct => "no system proxy configured; connecting directly".into(),
+    }
 }
 
 #[cfg(test)]
@@ -416,21 +526,22 @@ org.gnome.system.proxy.socks port 0\n";
 
     #[test]
     fn gnome_manual_auto_and_none() {
-        let manual = parse_gnome(GNOME).unwrap();
+        let Gnome::Active(manual) = parse_gnome(GNOME) else { panic!() };
         assert_eq!(manual.http.as_deref(), Some("http://proxy.corp:8080"));
         assert_eq!(manual.https.as_deref(), Some("http://secure.corp:8443"));
         assert_eq!(manual.bypass, vec!["localhost", "127.0.0.0/8", "::1"]);
         let auto = GNOME.replace("'manual'", "'auto'").replace("autoconfig-url ''", "autoconfig-url 'http://wpad/proxy.pac'");
-        let found = parse_gnome(&auto).unwrap();
+        let Gnome::Active(found) = parse_gnome(&auto) else { panic!() };
         assert_eq!(found.pac, Some(Pac::Url("http://wpad/proxy.pac".into())));
         assert!(found.describe().contains("PAC not supported"));
-        assert!(parse_gnome(&GNOME.replace("'manual'", "'none'")).is_none());
+        assert_eq!(parse_gnome(&GNOME.replace("'manual'", "'none'")), Gnome::Disabled);
+        assert_eq!(parse_gnome(""), Gnome::Unknown);
         // Manual mode with only SOCKS set routes both protocols through it.
         let socks = GNOME
             .replace("http host 'proxy.corp'", "http host ''")
             .replace("https host 'secure.corp'", "https host ''")
             .replace("socks host ''\norg.gnome.system.proxy.socks port 0", "socks host '10.0.0.1'\norg.gnome.system.proxy.socks port 1080");
-        let found = parse_gnome(&socks).unwrap();
+        let Gnome::Active(found) = parse_gnome(&socks) else { panic!() };
         assert_eq!(found.http.as_deref(), Some("socks5h://10.0.0.1:1080"));
     }
 
@@ -468,13 +579,41 @@ org.gnome.system.proxy.socks port 0\n";
         let found = SystemProxy { source: "x".into(), http: Some("http://u:pw@h:1".into()), ..Default::default() };
         assert!(!found.describe().contains("pw"));
     }
-}
 
-/// Human-readable account of how `system` mode resolves right now.
-pub fn status() -> String {
-    match resolve() {
-        Resolved::Environment => "environment proxy variables".into(),
-        Resolved::Settings(found) => found.describe(),
-        Resolved::Direct => "no system proxy configured; connecting directly".into(),
+    #[test]
+    fn urls_are_redacted_and_debug_hides_user_info() {
+        assert_eq!(redact("http://u:pa/ss@proxy:80"), "http://proxy:80");
+        assert_eq!(redact("http://wpad/p.pac?token=abc#x"), "http://wpad/p.pac");
+        assert_eq!(redact("https://u:p@h/pac.js?k=v"), "https://h/pac.js");
+        let found = SystemProxy {
+            source: "x".into(),
+            http: Some("http://u:topsecret@h:1".into()),
+            pac: Some(Pac::Url("http://a:tok@h/p?s=1".into())),
+            ..Default::default()
+        };
+        let text = format!("{found:?} {}", found.describe());
+        assert!(!text.contains("topsecret") && !text.contains("tok@") && !text.contains("s=1"), "{text}");
+    }
+
+    #[test]
+    fn windows_match_everything_and_empty_server_cases() {
+        let found = parse_windows(true, "p:1", "*;*.*;*.corp", "").unwrap();
+        assert_eq!(found.bypass, vec!["corp"]);
+        assert_eq!(found.warnings.len(), 2);
+        assert!(windows_bypass("*").is_empty() && windows_bypass("*.*").is_empty());
+        // Enabled without a server but with a script: PAC, never direct.
+        let pac = parse_windows(true, "", "", "http://pac/x.pac").unwrap();
+        assert_eq!(pac.pac, Some(Pac::Url("http://pac/x.pac".into())));
+        assert!(parse_windows(true, "", "", "").is_none());
+    }
+
+    #[test]
+    fn chatty_children_do_not_deadlock_and_slow_ones_time_out() {
+        // 512 KiB of output exceeds the pipe buffer; the reader thread drains it.
+        let out = run_bounded("sh", &["-c", "head -c 524288 /dev/zero | tr '\\0' x"]).unwrap();
+        assert_eq!(out.len(), 524288);
+        let start = Instant::now();
+        assert!(run_bounded("sleep", &["30"]).is_none());
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

@@ -28,7 +28,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization")
         with LOCK:
             LOG.append({"host": host, "path": self.path, "auth": auth})
-        # Host A (127.0.0.1) is protected; host B (localhost) is not.
+        # Host A (127.0.0.1) is protected; host B (other.test) is not.
         if host == "127.0.0.1" and auth != AUTH:
             self.send_response(401)
             self.send_header("WWW-Authenticate", 'Basic realm="media"')
@@ -37,10 +37,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         port = self.server.server_port
         if self.path == "/master.m3u8":
-            body = (f'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="b",URI="http://localhost:{port}/other.m3u8"\n'
+            body = (f'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="b",URI="http://other.test:{port}/other.m3u8"\n'
                     f'#EXT-X-STREAM-INF:BANDWIDTH=1000,AUDIO="a"\nvariant.m3u8\n').encode()
         else:
-            body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://localhost:%d/seg.ts\n#EXT-X-ENDLIST\n" % port
+            body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://other.test:%d/seg.ts\n#EXT-X-ENDLIST\n" % port
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -57,7 +57,7 @@ def main():
         script = tools / name
         script.write_text(f'#!/bin/sh\necho "{name} $@" >> "{argv_log}"\ncat /proc/$$/cmdline | tr "\\0" " " >> "{argv_log}"\nexit 1\n')
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    daemon = Daemon("xdm-medialogin-", env_extra={"PATH": f"{tools}:{os.environ['PATH']}"})
+    daemon = Daemon("xdm-medialogin-", env_extra={"PATH": f"{tools}:{os.environ['PATH']}", "XDM_MEDIA_TEST_HOSTS": "other.test=127.0.0.1"})
     try:
         daemon.cli("login", "save", f"http://127.0.0.1:{port}/", USER, daemon.secret("pw.txt", PASSWORD))
         task = daemon.cli("media-job", f"http://127.0.0.1:{port}/master.m3u8", daemon.base / "out.mp3", "audio", "0", "mp3:96")["task_id"]
@@ -65,7 +65,7 @@ def main():
         with LOCK:
             seen = list(LOG)
         home = [e for e in seen if e["host"] == "127.0.0.1"]
-        other = [e for e in seen if e["host"] == "localhost"]
+        other = [e for e in seen if e["host"] == "other.test"]
         assert any(e["auth"] == AUTH for e in home), seen          # own origin: authenticated manifest walk
         assert any(e["path"] == "/variant.m3u8" and e["auth"] == AUTH for e in home), seen
         assert other, "the cross-origin rendition playlist was never fetched"

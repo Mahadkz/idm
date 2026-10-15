@@ -16,13 +16,26 @@ use xdm_ipc::LoginSummary;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// One saved login. `pattern` is `scheme://[*.]host[:port][/path prefix]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Login {
     pub id: i64,
     pub pattern: String,
     pub username: String,
     pub password: String,
     pub enabled: bool,
+    /// Allow Basic over cleartext http:// to non-loopback hosts (off by default).
+    #[serde(default)]
+    pub allow_insecure: bool,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login")
+            .field("pattern", &self.pattern)
+            .field("username", &self.username)
+            .field("password", &"<hidden>")
+            .finish()
+    }
 }
 
 /// A parsed login pattern.
@@ -139,7 +152,12 @@ impl Pattern {
         if !host_matches {
             return false;
         }
-        if self.port.is_some_and(|want| url.port_or_known_default() != Some(want)) {
+        // A pattern without a port covers only the scheme's default port.
+        let want = self.port.or(match self.scheme.as_str() {
+            "https" => Some(443),
+            _ => Some(80),
+        });
+        if url.port_or_known_default() != want {
             return false;
         }
         url.path().starts_with(&self.path)
@@ -159,7 +177,8 @@ impl Pattern {
     }
 }
 
-/// Standard base64 (RFC 4648, with padding) for Basic credentials.
+#[cfg(test)]
+/// Standard base64 (RFC 4648, with padding) for test vectors.
 pub fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -183,9 +202,47 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+#[cfg(test)]
 /// The value of a `Basic` Authorization header for these credentials.
 pub fn basic_token(username: &str, password: &str) -> String {
     base64_encode(format!("{username}:{password}").as_bytes())
+}
+
+/// Splits `user:password@` out of a proxy URL so the secret goes to the credential
+/// store and never into settings or exports. The last `@` ends the user info (a
+/// password may hold `/ ? #`); what remains must be a bare `host[:port]`, because
+/// a URL that cannot be split cleanly must not be stored with its password inside.
+/// Returns the cleaned URL and the decoded credentials when the URL carried any.
+pub fn split_proxy_userinfo(url: &str) -> std::result::Result<(String, Option<(String, String)>), String> {
+    use percent_encoding::percent_decode_str;
+    const REJECT: &str = "the proxy URL has credentials that cannot be parsed safely; \
+        percent-encode them or use `daemon proxy-login`";
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Ok((url.to_owned(), None));
+    };
+    let Some(at) = rest.rfind('@') else {
+        return Ok((url.to_owned(), None));
+    };
+    let (userinfo, tail) = (&rest[..at], &rest[at + 1..]);
+    let tail_clean = tail.trim_end_matches('/');
+    let host_ok = !tail_clean.is_empty()
+        && tail_clean
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']'));
+    if !host_ok {
+        return Err(REJECT.into());
+    }
+    let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    let decode = |text: &str| percent_decode_str(text).decode_utf8_lossy().into_owned();
+    Ok((format!("{scheme}://{tail_clean}"), Some((decode(user), decode(password)))))
+}
+
+/// A proxy URL safe to show: user info (if any slipped in) is removed.
+pub fn redact_proxy_url(url: &str) -> String {
+    match split_proxy_userinfo(url) {
+        Ok((clean, _)) => clean,
+        Err(_) => "<redacted>".into(),
+    }
 }
 
 /// Fields a saved login carries, so callers can validate before storing.
@@ -197,10 +254,28 @@ pub fn valid_login_fields(username: &str, password: &str) -> bool {
         && !password.chars().any(char::is_control)
 }
 
+/// Credentials of the manual proxy (N23); they never appear in the proxy URL.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProxyCredential {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for ProxyCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyCredential")
+            .field("username", &self.username)
+            .field("password", &"<hidden>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct File {
     version: u32,
     logins: Vec<Login>,
+    #[serde(default)]
+    proxy: Option<ProxyCredential>,
 }
 
 /// In-memory login table with protected at-rest persistence.
@@ -209,6 +284,7 @@ pub struct Store {
     /// `None` keeps the store in memory (test databases).
     path: Option<PathBuf>,
     logins: Vec<Login>,
+    proxy: Option<ProxyCredential>,
     next_id: i64,
 }
 
@@ -218,6 +294,7 @@ impl Store {
         let mut store = Self {
             path,
             logins: Vec::new(),
+            proxy: None,
             next_id: 1,
         };
         let Some(path) = &store.path else {
@@ -240,6 +317,7 @@ impl Store {
             .max()
             .unwrap_or(1);
         store.logins = file.logins;
+        store.proxy = file.proxy;
         Ok(store)
     }
 
@@ -274,12 +352,49 @@ impl Store {
                     username: username.to_owned(),
                     password: password.to_owned(),
                     enabled,
+                    allow_insecure: false,
                 });
                 id
             }
         };
         self.persist()?;
         Ok(id)
+    }
+
+    /// The stored proxy credentials, when any.
+    pub fn proxy_login(&self) -> Option<&ProxyCredential> {
+        self.proxy.as_ref()
+    }
+
+    /// Sets the per-login opt-in for Basic over plain http.
+    pub fn set_allow_insecure(&mut self, id: i64, allow: bool) -> Result<bool> {
+        let Some(login) = self.logins.iter_mut().find(|login| login.id == id) else {
+            return Ok(false);
+        };
+        login.allow_insecure = allow;
+        self.persist()?;
+        Ok(true)
+    }
+
+    /// Stores (or replaces) the proxy credentials.
+    pub fn set_proxy_login(&mut self, username: &str, password: &str) -> Result<()> {
+        if !valid_login_fields(username, password) {
+            return Err("username needs 1–128 printable bytes and the password 0–1024".into());
+        }
+        self.proxy = Some(ProxyCredential {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        });
+        self.persist()
+    }
+
+    /// Forgets the proxy credentials; reports whether any were stored.
+    pub fn clear_proxy_login(&mut self) -> Result<bool> {
+        let had = self.proxy.take().is_some();
+        if had {
+            self.persist()?;
+        }
+        Ok(had)
     }
 
     pub fn remove(&mut self, id: i64) -> Result<bool> {
@@ -329,6 +444,7 @@ impl Store {
         let plain = serde_json::to_vec(&File {
             version: 1,
             logins: self.logins.clone(),
+            proxy: self.proxy.clone(),
         })?;
         let sealed = seal(&plain)?;
         let tmp = path.with_extension("json.tmp");
@@ -457,10 +573,10 @@ mod tests {
         assert!(!pattern.matches(&url("http://127.0.0.1:8080/other/a.zip")));
         assert!(!pattern.matches(&url("http://127.0.0.1:8081/files/a.zip")));
         assert!(!pattern.matches(&url("https://127.0.0.1:8080/files/a.zip")));
-        // A pattern without a port matches any port; the path is a prefix.
+        // A pattern without a port matches only the scheme's default port (N10/review 5).
         let any_port = parse_pattern("https://cdn.example.com").unwrap();
         assert!(any_port.matches(&url("https://cdn.example.com/x.bin")));
-        assert!(any_port.matches(&url("https://cdn.example.com:8443/x.bin")));
+        assert!(!any_port.matches(&url("https://cdn.example.com:8443/x.bin")));
         assert!(!any_port.matches(&url("http://cdn.example.com/x.bin")));
         // Wildcards cover subdomains only, never the bare domain.
         let wildcard = parse_pattern("https://*.example.com/files").unwrap();
@@ -493,6 +609,62 @@ mod tests {
         ] {
             assert!(parse_pattern(pattern).is_err(), "{pattern}");
         }
+    }
+
+    #[test]
+    fn proxy_userinfo_is_split_out_and_decoded() {
+        let split = |url: &str| split_proxy_userinfo(url).unwrap();
+        assert_eq!(
+            split("http://al%40ice:p%3Aw@proxy.example:3128"),
+            ("http://proxy.example:3128".into(), Some(("al@ice".into(), "p:w".into())))
+        );
+        assert_eq!(split("socks5://bob@h:1"), ("socks5://h:1".into(), Some(("bob".into(), String::new()))));
+        assert_eq!(split("http://h:1"), ("http://h:1".into(), None));
+        // Unencoded / ? # and @ inside the password still split at the last '@'.
+        assert_eq!(
+            split("http://u:pa/ss?w#rd@h:8"),
+            ("http://h:8".into(), Some(("u".into(), "pa/ss?w#rd".into())))
+        );
+        assert_eq!(split("http://u:p@ss@h:8").1, Some(("u".into(), "p@ss".into())));
+        // A tail that is not a bare host:port is rejected rather than stored with the secret.
+        assert!(split_proxy_userinfo("http://u:pw@h:1/path").is_err());
+        assert!(split_proxy_userinfo("http://u:pw@h:1/path/more").is_err());
+        assert!(split_proxy_userinfo("http://u:pw@").is_err());
+        assert!(split_proxy_userinfo("http://u:pw@ho st:1").is_err());
+        assert_eq!(redact_proxy_url("http://u:pw@h:1"), "http://h:1");
+        assert_eq!(redact_proxy_url("http://u:pw@h:1/x/y"), "<redacted>");
+    }
+
+    #[test]
+    fn portless_patterns_match_only_the_default_port() {
+        let http = parse_pattern("http://example.com/").unwrap();
+        let https = parse_pattern("https://example.com/").unwrap();
+        let url = |text: &str| Url::parse(text).unwrap();
+        assert!(http.matches(&url("http://example.com/f")));
+        assert!(http.matches(&url("http://example.com:80/f")));
+        assert!(!http.matches(&url("http://example.com:8080/f")));
+        assert!(https.matches(&url("https://example.com/f")));
+        assert!(!https.matches(&url("https://example.com:8443/f")));
+        let wildcard = parse_pattern("http://*.example.com/").unwrap();
+        assert!(!wildcard.matches(&url("http://a.example.com:9000/f")));
+        let explicit = parse_pattern("http://example.com:8080/").unwrap();
+        assert!(explicit.matches(&url("http://example.com:8080/f")));
+    }
+
+    #[test]
+    fn proxy_credentials_persist_sealed_and_hide_from_debug() {
+        let path = std::env::temp_dir().join(format!("xdm-proxycred-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::load(Some(path.clone())).unwrap();
+        store.set_proxy_login("pu", "pp-secret").unwrap();
+        assert!(!format!("{store:?}").contains("pp-secret"));
+        let reloaded = Store::load(Some(path.clone())).unwrap();
+        assert_eq!(reloaded.proxy_login().map(|c| c.password.as_str()), Some("pp-secret"));
+        assert!(Store::load(Some(path.clone())).unwrap().summaries().is_empty());
+        let mut again = reloaded;
+        assert!(again.clear_proxy_login().unwrap());
+        assert!(Store::load(Some(path.clone())).unwrap().proxy_login().is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

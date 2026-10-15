@@ -64,6 +64,26 @@ impl Service {
         Ok(reply)
     }
 
+    /// Stores the proxy credentials and requeues tasks parked on a 407.
+    pub(crate) fn proxy_login(&self, username: String, password: String) -> Result<Reply> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("task lock poisoned"))?;
+        if let Err(error) = inner.credentials.set_proxy_login(&username, &password) {
+            return Ok(Reply::error(error.to_string()));
+        }
+        let requeued = inner.db.execute(
+            "UPDATE tasks SET status='queued',error=NULL,error_kind=NULL,auth_realm=NULL,auth_proxy=0,retry_count=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='auth_required' AND auth_proxy=1",
+            [],
+        )?;
+        drop(inner);
+        if requeued > 0 {
+            self.wake.notify_one();
+        }
+        Ok(Reply::accepted(requeued as i64))
+    }
+
     pub(crate) fn task_provide_login(
         &self,
         task_id: i64,
@@ -94,6 +114,16 @@ impl Service {
         if status != "auth_required" {
             return Ok(Reply::error("task is not waiting for a login"));
         }
+        let waits_on_proxy: bool = inner
+            .db
+            .query_row("SELECT auth_proxy FROM tasks WHERE id=?1", [task_id], |row| {
+                row.get::<_, i64>(0).map(|value| value != 0)
+            })?;
+        if waits_on_proxy {
+            return Ok(Reply::error(
+                "the proxy asked for credentials; supply them with `daemon proxy-login`",
+            ));
+        }
         if remember {
             let Some(pattern) = origin_pattern(&url) else {
                 return Ok(Reply::error("logins apply to http and https tasks only"));
@@ -103,12 +133,16 @@ impl Service {
             }
         }
         let updated = inner.db.execute(
-            "UPDATE tasks SET status='queued',error=NULL,auth_realm=NULL,retry_count=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='auth_required'",
+            "UPDATE tasks SET status='queued',error=NULL,auth_realm=NULL,error_kind=NULL,auth_proxy=0,retry_count=0,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='auth_required'",
             [task_id],
         )?;
         if updated == 0 {
             return Ok(Reply::error("task is not waiting for a login"));
         }
+        // The typed credentials serve this task even when they are not remembered.
+        inner
+            .task_logins
+            .insert(task_id, xdm_http::Login::new(username, password));
         let mut reply = Reply::accepted(task_id);
         reply.logins = inner.credentials.summaries();
         drop(inner);

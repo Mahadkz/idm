@@ -40,7 +40,7 @@ Match IDM's structure and workflows using the mapped dialogs (`docs/idm_control_
 | Crash handling: panic hook writes a redacted crash report; daemon restarts cleanly; diagnostics bundle command | Not started | |
 | Single-instance daemon lock, graceful shutdown that checkpoints all transfers, data-directory permissions | Not started | |
 | Database safety: integrity check, backup before migration, recovery from corruption | Not started | |
-| Security: threat model document, all security reviews' findings closed, fuzzing in CI, dependency audit (cargo audit/deny), no secrets in logs/exports/argv | In progress | security reviews in git history |
+| Security: threat model document, all security reviews' findings closed, fuzzing in CI, dependency audit (cargo audit/deny), no secrets in logs/exports/argv | In progress | security reviews in git history. Open: browser-captured Cookie/Authorization headers for media jobs are passed to ffmpeg `-headers` on its command line (visible in /proc to other local users); fix by fetching media segments in-process or via a private loopback relay |
 | Performance gate: benchmark in CI with regression thresholds; idle CPU/RAM budgets | Partial | bench/ |
 | Packaging: Linux AppImage and .deb, Windows installer (per-user, upgrade/uninstall), extension packages (.zip/.xpi), third-party license notices | Partial | packaging/ (release.sh, build-deb.sh, build-appimage.sh, windows/build-installer.sh, extensions/build.sh, licenses.sh), install/; .deb/AppImage extracted and CLI run, NSIS installer built but untested on Windows, web-ext lint and lintian not run, packages unsigned |
 | Updates: update check with signed metadata (no silent auto-install) | Not started | |

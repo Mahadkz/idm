@@ -221,12 +221,18 @@ def main():
                 run(f"{base}/via-http.bin", directory / "via-http.bin", "--connections", "4",
                     "--proxy", f"http://127.0.0.1:{ports['http']}")
                 assert digest(directory / "via-http.bin") == EXPECTED
+                (directory / "socks-pw").write_text("secret\n")
+                (directory / "socks-bad").write_text("wrong\n")
                 target = f"http://localhost:{port}/via-socks.bin"
                 run(target, directory / "via-socks.bin", "--connections", "4",
-                    "--proxy", f"socks5h://user:secret@127.0.0.1:{ports['socks']}")
+                    "--proxy", f"socks5h://127.0.0.1:{ports['socks']}",
+                    "--proxy-user", "user", "--proxy-password-file", str(directory / "socks-pw"))
                 assert digest(directory / "via-socks.bin") == EXPECTED
                 run(target, directory / "bad-socks.bin",
-                    "--proxy", f"socks5h://user:wrong@127.0.0.1:{ports['socks']}", success=False)
+                    "--proxy", f"socks5h://127.0.0.1:{ports['socks']}",
+                    "--proxy-user", "user", "--proxy-password-file", str(directory / "socks-bad"), success=False)
+                # A password inside the proxy URL is refused (it would sit in argv).
+                run(target, directory / "argv.bin", "--proxy", f"socks5h://user:secret@127.0.0.1:{ports['socks']}", success=False)
                 run(f"{base}/bypass.bin", directory / "bypass.bin",
                     "--proxy", "http://127.0.0.1:9", "--proxy-bypass", "127.0.0.1")
                 assert digest(directory / "bypass.bin") == EXPECTED

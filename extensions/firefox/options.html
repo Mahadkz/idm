@@ -26,8 +26,24 @@
     </ul>
   </div>
   <div class="card">
+    <h3>Force / Bypass Keys</h3>
+    <p>Hold these modifier keys while clicking a link. <b>Force</b> sends the link to XDM even when it is excluded or interception is off. <b>Bypass</b> lets the browser download it.</p>
+    <label>Force <input id="forceKeys" value="alt+shift"></label>
+    <label>Bypass <input id="bypassKeys" value="alt"></label>
+    <p class="note">Combine alt, ctrl, shift and meta with "+". The two combinations must differ.</p>
+  </div>
+  <div class="card">
+    <h3>Download Links Filter</h3>
+    <p>Applies to "Download selected links" and "Download all links".</p>
+    <label>Only extensions <input id="linkExtensions" placeholder="zip, pdf, mp4 (empty = any)"></label>
+    <label><input type="checkbox" id="hideHtml" checked> Hide HTML pages</label>
+    <label><input type="checkbox" id="hideImages" checked> Hide images</label>
+    <button id="saveOptions">Save</button> <span id="saveStatus" class="note"></span>
+  </div>
+  <div class="card">
     <h3>Repair &amp; Native Host Status</h3>
     <p>If downloads fail to hand off to the XDM desktop application, ensure the XDM daemon is running and the native messaging manifest <code>org.xdm.browser</code> is registered.</p>
   </div>
+  <script src="options.js"></script>
 </body>
 </html>

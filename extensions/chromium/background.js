@@ -7,9 +7,92 @@ const recent = new Map();
 const bodies = new Map();
 const media = new Map();
 const disabledTabs = new Set();
+const overrides = new Map();
+const OVERRIDE_TTL_MS = 10000;
+
+// B25: a bypass click lets the browser keep the next download of that URL.
+function rememberOverride(url, tabId, mode) {
+  const entry = { mode, time: Date.now() };
+  overrides.set(url, entry);
+  if (tabId != null && tabId >= 0) overrides.set(`${tabId}:${url}`, entry);
+  while (overrides.size > 100) overrides.delete(overrides.keys().next().value);
+}
+
+function takeOverride(urls, tabId) {
+  let found = null;
+  for (const url of urls) {
+    for (const key of [(tabId != null && tabId >= 0) ? `${tabId}:${url}` : null, url]) {
+      if (!key) continue;
+      const entry = overrides.get(key);
+      if (!entry) continue;
+      overrides.delete(key);
+      if (Date.now() - entry.time <= OVERRIDE_TTL_MS && !found) found = entry;
+    }
+  }
+  return found;
+}
 
 function validHttp(url) {
   try { return ["http:", "https:"].includes(new URL(url).protocol); } catch { return false; }
+}
+
+const HTML_EXTENSIONS = new Set(["html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp"]);
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif", "tif", "tiff"]);
+const DEFAULT_LINK_FILTER = { extensions: [], hideHtml: true, hideImages: true };
+const MAX_BATCH_LINKS = 500;
+
+function linkExtension(url) {
+  try {
+    const last = new URL(url).pathname.split("/").pop() || "";
+    const dot = last.lastIndexOf(".");
+    return dot > 0 ? last.slice(dot + 1).toLowerCase() : "";
+  } catch { return ""; }
+}
+
+function normalizeLinkFilter(filter) {
+  const raw = filter?.extensions;
+  const list = Array.isArray(raw) ? raw : (typeof raw === "string" ? raw.split(/[\s,;]+/) : []);
+  return {
+    extensions: list.map(e => String(e).trim().replace(/^\*?\./, "").toLowerCase()).filter(Boolean),
+    hideHtml: filter?.hideHtml ?? DEFAULT_LINK_FILTER.hideHtml,
+    hideImages: filter?.hideImages ?? DEFAULT_LINK_FILTER.hideImages
+  };
+}
+
+// Dedupes by URL (fragment ignored), then applies the extension list and the hide-HTML/hide-images options.
+function filterLinks(links, filter) {
+  const f = normalizeLinkFilter(filter);
+  const out = [];
+  const seenKeys = new Set();
+  for (const link of links || []) {
+    if (!link || !validHttp(link.url)) continue;
+    const parsed = new URL(link.url);
+    parsed.hash = "";
+    const key = parsed.href;
+    if (seenKeys.has(key)) continue;
+    const ext = linkExtension(key);
+    if (f.hideImages && (link.type === "image" || IMAGE_EXTENSIONS.has(ext))) continue;
+    if (f.hideHtml && (HTML_EXTENSIONS.has(ext) || parsed.pathname.endsWith("/"))) continue;
+    if (f.extensions.length > 0 && !f.extensions.includes(ext)) continue;
+    seenKeys.add(key);
+    out.push({ url: key, text: link.text || "", type: link.type || "link" });
+    if (out.length >= MAX_BATCH_LINKS) break;
+  }
+  return out;
+}
+
+function linksFromText(text) {
+  const out = [];
+  for (const m of String(text || "").matchAll(/https?:\/\/[^\s"'<>]+/gi)) out.push({ url: m[0], text: m[0], type: "selection" });
+  return out;
+}
+
+// Redirect semantics a browser applies: 303 turns any non-HEAD request into GET and 301/302 turn POST into GET.
+function redirectMethod(method, status) {
+  const m = String(method || "GET").toUpperCase();
+  if (status === 303 && m !== "HEAD") return "GET";
+  if ((status === 301 || status === 302) && m === "POST") return "GET";
+  return m;
 }
 
 function isAdUrl(url) {
@@ -56,11 +139,16 @@ function remember(details) {
   const tabKey = `${details.tabId}:${details.url}`;
   const previous = recent.get(tabKey) || recent.get(details.url) || {};
   const headers = (details.requestHeaders || []).filter(h => /^(referer|user-agent)$/i.test(h.name));
+  // A redirected hop keeps the Referer of the request that started the chain.
+  if (previous.originalUrl && !headers.some(h => /^referer$/i.test(h.name))) {
+    const kept = (previous.headers || []).find(h => /^referer$/i.test(h.name));
+    if (kept) headers.push(kept);
+  }
   const entry = {
     ...previous,
     method: details.method || previous.method,
     tabId: details.tabId,
-    pageUrl: details.initiator || details.documentUrl || previous.pageUrl,
+    pageUrl: previous.originalUrl ? (previous.pageUrl || details.initiator || details.documentUrl) : (details.initiator || details.documentUrl || previous.pageUrl),
     headers,
     time: Date.now()
   };
@@ -99,15 +187,25 @@ function onRedirect(details) {
   if (!details?.redirectUrl || !validHttp(details.redirectUrl)) return;
   const tabKey = details.tabId >= 0 ? `${details.tabId}:${details.url}` : null;
   const prev = (tabKey && recent.get(tabKey)) || recent.get(details.url);
+  const tabId = details.tabId >= 0 ? details.tabId : undefined;
+  const nextMethod = redirectMethod(details.method || prev?.method, details.statusCode);
   if (prev) {
-    const newEntry = { ...prev, tabId: details.tabId >= 0 ? details.tabId : prev.tabId, time: Date.now() };
-    if (details.tabId >= 0) recent.set(`${details.tabId}:${details.redirectUrl}`, newEntry);
+    const newEntry = {
+      ...prev,
+      method: nextMethod,
+      tabId: tabId ?? prev.tabId,
+      originalUrl: prev.originalUrl || details.url,
+      chain: [...(prev.chain || [details.url]), details.redirectUrl].slice(-20),
+      time: Date.now()
+    };
+    if (tabId !== undefined) recent.set(`${tabId}:${details.redirectUrl}`, newEntry);
     recent.set(details.redirectUrl, newEntry);
   }
+  // 307/308 replay the same body; 301/302/303 hops that became GET carry none, so a body is never replayed on a GET.
   const body = (tabKey && bodies.get(tabKey)) || bodies.get(details.url);
-  if (body) {
-    const newBody = { ...body, tabId: details.tabId >= 0 ? details.tabId : body.tabId, time: Date.now() };
-    if (details.tabId >= 0) bodies.set(`${details.tabId}:${details.redirectUrl}`, newBody);
+  if (body && nextMethod !== "GET") {
+    const newBody = { ...body, tabId: tabId ?? body.tabId, time: Date.now() };
+    if (tabId !== undefined) bodies.set(`${tabId}:${details.redirectUrl}`, newBody);
     bodies.set(details.redirectUrl, newBody);
   }
 }
@@ -137,13 +235,16 @@ function mediaKind(url, mime = "") {
   return null;
 }
 
-function addMedia(tabId, url, mime = "", pageUrl = "", title = "") {
+function addMedia(tabId, url, mime = "", pageUrl = "", title = "", extra = {}) {
   if (tabId < 0 || !validHttp(url) || isAdUrl(url)) return;
   const kind = mediaKind(url, mime);
   if (!kind) return;
   const entries = media.get(tabId) || [];
   if (!entries.some(entry => entry.url === url)) {
-    entries.push({ url, mime, kind, pageUrl, title: deriveTitle(url, title), seenAt: Date.now() });
+    const item = { url, mime, kind, pageUrl, title: deriveTitle(url, title), seenAt: Date.now() };
+    if (extra.adapterId) { item.adapterId = extra.adapterId; item.adapterVersion = extra.adapterVersion; }
+    if (extra.expiresAt) { item.expiresAt = extra.expiresAt; item.expired = Boolean(extra.expired); }
+    entries.push(item);
   }
   if (entries.length > 100) entries.shift();
   media.set(tabId, entries);
@@ -182,26 +283,82 @@ if (typeof Object !== "undefined" && Object.prototype) {
   });
 }
 
+function buildPayload(url, filenameHint, pageUrl, request, capture, cookies, mime = "") {
+  const cookie = cookies.map(item => `${item.name}=${item.value}`).join("; ");
+  const referrer = request?.headers?.find(header => header.name.toLowerCase() === "referer")?.value || (pageUrl || undefined);
+  const agent = request?.headers?.find(header => header.name.toLowerCase() === "user-agent")?.value || navigator.userAgent;
+  const headers = [{ name: "User-Agent", value: agent }];
+  if (capture.body) headers.push({ name: "Content-Type", value: capture.body.contentType });
+  return {
+    url, filenameHint, mime, source: { pageUrl: pageUrl || undefined },
+    requestContext: { headers, referrer, cookies: cookie ? [{ url, header: cookie }] : [] },
+    method: capture.body ? capture.method : undefined,
+    body: capture.body ? capture.body.body : undefined,
+  };
+}
+
 async function submit(url, filenameHint, pageUrl = "", requestId = crypto.randomUUID(), mime = "", tabId) {
   if (["hls", "dash"].includes(mediaKind(url))) return { accepted: false, reason: "choose a stream in the XDM popup" };
   const request = getRecentRequest(url, tabId);
   const capture = capturedBody(url, request, tabId);
   if (!capture) return { accepted: false, reason: "non-GET request has no replayable captured body" };
   const cookies = await chrome.cookies.getAll({ url }).catch(() => []);
-  const cookie = cookies.map(item => `${item.name}=${item.value}`).join("; ");
-  const referrer = request?.headers?.find(header => header.name.toLowerCase() === "referer")?.value || (pageUrl || undefined);
-  const agent = request?.headers?.find(header => header.name.toLowerCase() === "user-agent")?.value || navigator.userAgent;
-  const headers = [{ name: "User-Agent", value: agent }];
-  if (capture.body) headers.push({ name: "Content-Type", value: capture.body.contentType });
   return chrome.runtime.sendNativeMessage(HOST, {
     version: 1, requestId, type: "download.submit",
-    payload: {
-      url, filenameHint, mime, source: { pageUrl: pageUrl || undefined },
-      requestContext: { headers, referrer, cookies: cookie ? [{ url, header: cookie }] : [] },
-      method: capture.body ? capture.method : undefined,
-      body: capture.body ? capture.body.body : undefined,
-    }
+    payload: buildPayload(url, filenameHint, pageUrl, request, capture, cookies, mime)
   });
+}
+
+// B32: hands a filtered link list to the native host as one batch.submit message whose items are
+// download.submit payloads. A host that does not know batch.submit gets the same items one by one.
+async function submitLinkBatch(links, pageUrl, tabId) {
+  const batchId = crypto.randomUUID();
+  const items = [];
+  for (const [index, link] of links.entries()) {
+    if (["hls", "dash"].includes(mediaKind(link.url))) continue;
+    const cookies = await chrome.cookies.getAll({ url: link.url }).catch(() => []);
+    items.push({ requestId: `${batchId}-${index}`, ...buildPayload(link.url, undefined, pageUrl, null, { method: "GET" }, cookies) });
+  }
+  if (items.length === 0) return { accepted: false, count: 0, reason: "no downloadable links" };
+  const batchReply = await chrome.runtime.sendNativeMessage(HOST, {
+    version: 1, requestId: batchId, type: "batch.submit", payload: { batchId, count: items.length, items }
+  }).catch(error => ({ type: "error", reason: String(error?.message || error) }));
+  if (batchReply && batchReply.type !== "error" && batchReply.accepted !== undefined) return { ...batchReply, batchId, count: items.length };
+  let accepted = 0;
+  for (const item of items) {
+    const { requestId, ...payload } = item;
+    const reply = await chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId, type: "download.submit", payload }).catch(() => null);
+    if (reply?.accepted) accepted++;
+  }
+  return { accepted: accepted > 0, batchId, count: items.length, acceptedCount: accepted, fallback: true };
+}
+
+async function collectLinks(info, tab) {
+  const links = [];
+  const selectionMode = info.menuItemId === "xdm-selection";
+  let frameIds = [info.frameId ?? 0];
+  if (!selectionMode) {
+    try {
+      const frames = await chrome.webNavigation?.getAllFrames?.({ tabId: tab.id });
+      if (frames?.length) frameIds = frames.map(frame => frame.frameId);
+    } catch {}
+  }
+  for (const frameId of frameIds) {
+    try {
+      const res = await chrome.tabs.sendMessage(tab.id, { type: "page.extractLinks", options: selectionMode ? { selectionOnly: true } : {} }, { frameId });
+      if (res?.links) links.push(...res.links);
+    } catch {}
+  }
+  if (selectionMode) links.push(...linksFromText(info.selectionText));
+  return links;
+}
+
+async function handleLinkMenu(info, tab) {
+  if (tab?.id == null) return { accepted: false, reason: "no tab" };
+  const { linkFilter } = await chrome.storage.local.get({ linkFilter: DEFAULT_LINK_FILTER });
+  const links = filterLinks(await collectLinks(info, tab), linkFilter);
+  if (links.length === 0) return { accepted: false, count: 0, reason: "no matching links" };
+  return submitLinkBatch(links, tab.url || "", tab.id);
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -209,17 +366,22 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: "xdm-media", title: "Download media URL with XDM", contexts: ["video", "audio"] });
   chrome.contextMenus.create({ id: "xdm-image", title: "Download image with XDM", contexts: ["image"] });
   chrome.contextMenus.create({ id: "xdm-page", title: "Download page with XDM", contexts: ["page", "frame"] });
-  chrome.contextMenus.create({ id: "xdm-downloads", title: "Download all with XDM", contexts: ["page"] });
+  chrome.contextMenus.create({ id: "xdm-downloads", title: "Download all links with XDM", contexts: ["page"] });
+  chrome.contextMenus.create({ id: "xdm-selection", title: "Download selected links with XDM", contexts: ["selection"] });
 
   chrome.storage.local.get({
     interceptDownloads: false,
     siteRules: [],
     siteExclusions: DEFAULT_EXCLUSIONS,
+    captureKeys: { force: "alt+shift", bypass: "alt" },
+    linkFilter: DEFAULT_LINK_FILTER,
     privateModeLimitation: "Private browsing downloads require explicit permission and are not captured by default."
   }).then(values => {
     chrome.storage.local.set({
       interceptDownloads: values.interceptDownloads ?? false,
       siteRules: values.siteRules ?? [],
+      captureKeys: values.captureKeys ?? { force: "alt+shift", bypass: "alt" },
+      linkFilter: values.linkFilter ?? DEFAULT_LINK_FILTER,
       siteExclusions: (values.siteExclusions && values.siteExclusions.length > 0) ? values.siteExclusions : DEFAULT_EXCLUSIONS,
       privateModeLimitation: values.privateModeLimitation ?? "Private browsing downloads require explicit permission and are not captured by default."
     });
@@ -251,7 +413,20 @@ if (chrome.storage?.local?.get) {
   };
 }
 
+function notifyFailure(error) {
+  console.warn("XDM handoff failed:", error);
+  chrome.notifications?.create?.({
+    type: "basic",
+    iconUrl: "icon.png",
+    title: "XDM Download Failed",
+    message: String(error?.message || error || "Failed to send download to XDM")
+  });
+}
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === "xdm-selection" || info.menuItemId === "xdm-downloads") {
+    return handleLinkMenu(info, tab).catch(notifyFailure);
+  }
   const url = info.linkUrl || info.srcUrl || info.pageUrl || info.frameUrl || tab?.url;
   if (!validHttp(url)) return;
   if (["hls", "dash"].includes(mediaKind(url))) {
@@ -293,11 +468,16 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     finish();
   }, 10000);
   (async () => {
+    const finalUrl = validHttp(item.finalUrl) ? item.finalUrl : item.url;
+    // B25: the user bypassed XDM for this click, so the browser keeps the download.
+    if (takeOverride([item.url, finalUrl], item.tabId)?.mode === "bypass") return;
     const { interceptDownloads, siteExclusions } = await chrome.storage.local.get({ interceptDownloads: false, siteExclusions: DEFAULT_EXCLUSIONS });
     if (!interceptDownloads) return;
-    if (isSiteExcluded(item.url, siteExclusions)) return;
-    const request = getRecentRequest(item.url, item.tabId);
-    if (!capturedBody(item.url, request, item.tabId)) return;
+    if (isSiteExcluded(finalUrl, siteExclusions) || isSiteExcluded(item.url, siteExclusions)) return;
+    // B14: a POST whose redirect chain was not observed must not be replayed as a GET.
+    if (finalUrl !== item.url && getRecentRequest(item.url, item.tabId)?.method === "POST" && !getRecentRequest(finalUrl, item.tabId)) return;
+    const request = getRecentRequest(finalUrl, item.tabId);
+    if (!capturedBody(finalUrl, request, item.tabId)) return;
     try {
       await chrome.downloads.pause(item.id);
       if (timedOut) {
@@ -305,7 +485,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
         return;
       }
       const reply = await submit(
-        item.url,
+        finalUrl,
         item.filename?.split(/[\\/]/).pop(),
         request?.pageUrl || "",
         `chromium-${item.id}-${item.startTime || Date.now()}`,
@@ -332,9 +512,41 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (message?.type === "page.media") {
-    addMedia(sender.tab?.id ?? -1, message.url, message.mime || "", sender.tab?.url || "", message.title || "");
+    addMedia(sender.tab?.id ?? -1, message.url, message.mime || "", sender.tab?.url || "", message.title || "", message);
     reply({ ok: true });
     return false;
+  }
+  if (message?.type === "capture.override") {
+    if (sender.tab?.incognito) { reply({ ok: false, reason: "private window" }); return false; }
+    if (!validHttp(message.url) || !["force", "bypass"].includes(message.mode)) { reply({ ok: false, reason: "invalid override" }); return false; }
+    if (message.mode === "bypass") {
+      rememberOverride(message.url, sender.tab?.id, "bypass");
+      reply({ ok: true, mode: "bypass" });
+      return false;
+    }
+    // Force ignores exclusions, the global switch and per-tab disable, but never private windows.
+    submit(message.url, undefined, message.pageUrl || sender.tab?.url || "", undefined, "", sender.tab?.id)
+      .then(result => reply({ ok: true, mode: "force", ...result }), error => reply({ ok: false, reason: String(error) }));
+    return true;
+  }
+  if (message?.type === "page.mediaGone") {
+    const tabId = sender.tab?.id ?? -1;
+    const kept = (media.get(tabId) || []).filter(entry => entry.url !== message.url);
+    if (media.has(tabId)) { media.set(tabId, kept); chrome.action.setBadgeText?.({ tabId, text: kept.length ? String(kept.length) : "" }); }
+    reply({ ok: true });
+    return false;
+  }
+  if (message?.type === "media.refresh") {
+    const tabId = message.tabId ?? sender.tab?.id;
+    if (tabId == null || !validHttp(message.url)) { reply({ ok: false, reason: "invalid refresh request" }); return false; }
+    chrome.tabs.sendMessage(tabId, { type: "page.refreshMedia", url: message.url }, { frameId: message.frameId ?? 0 }).then(result => {
+      const list = media.get(tabId) || [];
+      const entry = list.find(item => item.url === message.url);
+      if (entry && result?.refreshed && validHttp(result.url)) entry.url = result.url;
+      if (entry && result) entry.expired = Boolean(result.expired);
+      reply({ ok: true, ...result });
+    }, error => reply({ ok: false, reason: String(error) }));
+    return true;
   }
   if (message?.type === "media.list") {
     reply({ items: media.get(message.tabId) || [] });

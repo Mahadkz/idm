@@ -10,4 +10,6 @@ xdm-ipc = { path = "../xdm-ipc" }
 xdm-media = { path = "../xdm-media" }
 xdm-categories = { path = "../xdm-categories" }
 sha2 = "0.10"
+url = "2"
+percent-encoding = "2"
 serde_json = "1"

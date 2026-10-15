@@ -588,6 +588,10 @@ pub struct ImportEntry {
     pub video: Option<usize>,
     pub audio: Option<usize>,
     pub category: String,
+    /// Request headers replayed for the task (browser batch submissions).
+    /// Never written to or read from portable transfer lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
 }
 
 /// Live state of a daemon background crawl, reported by `GrabStatus`.

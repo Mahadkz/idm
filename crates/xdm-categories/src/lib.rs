@@ -198,6 +198,12 @@ pub fn builtin_extensions(category: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Invisible Unicode format and bidirectional controls that can disguise a file's real
+/// name or extension.
+fn is_format_char(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
 pub fn valid_filename(name: &str) -> bool {
     if name.is_empty()
         || name.len() > 240
@@ -206,7 +212,7 @@ pub fn valid_filename(name: &str) -> bool {
         || name.ends_with(['.', ' '])
         || name
             .chars()
-            .any(|c| "/\\:<>\"|?*".contains(c) || c.is_control())
+            .any(|c| "/\\:<>\"|?*".contains(c) || c.is_control() || is_format_char(c))
     {
         return false;
     }
@@ -271,6 +277,15 @@ pub fn browser_destination(downloads: &Path, name: &str, mime: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invisible_and_bidi_characters_are_not_valid_in_names() {
+        for c in ['\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{FEFF}'] {
+            assert!(!valid_filename(&format!("report{c}fdp.exe")), "{c:?}");
+            assert!(!valid_filename(&format!("{c}a.txt")), "{c:?}");
+        }
+        assert!(valid_filename("r\u{e9}sum\u{e9} \u{65E5}\u{672C}.pdf"));
+    }
 
     #[test]
     fn extension_and_mime_rules_are_stable() {

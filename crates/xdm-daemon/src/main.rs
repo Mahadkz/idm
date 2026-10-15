@@ -129,10 +129,13 @@ fn restart_reason(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Op
 /// assembles in a temporary directory (N38), the pair inside that directory.
 pub(crate) fn owned_partial_paths(output: &Path, temp: Option<&str>) -> Vec<PathBuf> {
     let mut paths = http_part_paths(output).to_vec();
+    paths.push(PathBuf::from(format!("{}.part.ftp", output.display())));
     if let Some(temp) = temp.filter(|temp| !temp.is_empty()) {
         let temp = std::fs::canonicalize(temp).unwrap_or_else(|_| PathBuf::from(temp));
         let (part, meta) = xdm_http::partial_paths(output, Some(&temp));
         paths.extend([part, meta]);
+        // FTP partials share the HTTP part name; the checkpoint differs.
+        paths.push(xdm_ftp::partial_paths(output, Some(&temp)).1);
     }
     paths
 }
@@ -297,12 +300,11 @@ impl FtpLive {
 
 /// Paused or partially downloaded FTP progress derived from the `.part` file
 /// and its `.part.ftp` checkpoint, the FTP analogue of HTTP checkpoints.
-fn ftp_checkpoint_progress(output: &Path) -> Option<(u64, Option<u64>)> {
-    let encoded = format!("{}.part.ftp", output.display());
+fn ftp_checkpoint_progress(output: &Path, temp: Option<&Path>) -> Option<(u64, Option<u64>)> {
+    let (part, encoded) = xdm_ftp::partial_paths(output, temp);
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&encoded).ok()?).ok()?;
     let total = state.get("size").and_then(|value| value.as_u64());
-    let part = format!("{}.part", output.display());
     Some((std::fs::metadata(&part).ok()?.len(), total))
 }
 
@@ -457,7 +459,12 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                     temp_dir.as_deref().filter(|dir| !dir.is_empty()).map(std::path::Path::new),
                 )
                     .map(|(done, total)| (done, Some(total)))
-                    .or_else(|| ftp_checkpoint_progress(std::path::Path::new(&output)))
+                    .or_else(|| {
+                        ftp_checkpoint_progress(
+                            std::path::Path::new(&output),
+                            temp_dir.as_deref().filter(|dir| !dir.is_empty()).map(std::path::Path::new),
+                        )
+                    })
             };
             Ok(TaskSummary {
                 id,
@@ -1823,8 +1830,9 @@ impl Service {
                     let temp_dir = match stored_temp {
                         Some(dir) => (!dir.is_empty()).then(|| PathBuf::from(dir)),
                         None => {
-                            let beside = http_part_paths(Path::new(&output)).iter().any(|path| path.exists());
-                            let chosen = (matches!(kind, WorkKind::Http { .. }) && !beside)
+                            let beside = http_part_paths(Path::new(&output)).iter().any(|path| path.exists())
+                                || Path::new(&format!("{output}.part.ftp")).exists();
+                            let chosen = (matches!(kind, WorkKind::Http { .. } | WorkKind::Ftp) && !beside)
                                 .then(|| inner.temp_dir.clone())
                                 .flatten();
                             inner.db.execute(
@@ -1965,6 +1973,8 @@ impl Service {
                                 output: work.output,
                                 restart: false,
                                 stop: work.stop.clone(),
+                                temp_dir: work.temp_dir.clone(),
+                                set_file_time: work.set_file_time,
                             },
                             |done, total| live.report(done, total),
                         ),
@@ -2155,6 +2165,21 @@ impl Inner {
         }
         if status == "complete" {
             self.db.execute("UPDATE tasks SET status='complete',error=NULL,auth_realm=NULL,restart_reason=NULL,history_queue_id=queue_id,queue_id=CASE WHEN COALESCE((SELECT sync FROM queues WHERE id=tasks.queue_id),0) THEN queue_id ELSE 0 END,retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+            // Replay secrets are not kept once a task is done, except where a sync
+            // queue still revalidates it with them.
+            let row: Option<(String, i64)> = self
+                .db
+                .query_row("SELECT headers_json,queue_id FROM tasks WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()?;
+            if let Some((json, 0)) = row {
+                if let Ok(mut headers) = serde_json::from_str::<Vec<(String, String)>>(&json) {
+                    let before = headers.len();
+                    headers.retain(|(name, _)| !transfer_lists::secret_header(name));
+                    if headers.len() != before {
+                        self.db.execute("UPDATE tasks SET headers_json=?1 WHERE id=?2", params![serde_json::to_string(&headers)?, id])?;
+                    }
+                }
+            }
             return Ok(());
         }
         if status == "auth_required" {
@@ -2887,6 +2912,99 @@ mod tests {
         assert!(!reply.ok && reply.error.unwrap().contains("moved"));
         service.inner.lock().unwrap().moving.clear();
         assert!(service.command(Command::Remove { task_id: id }).unwrap().ok);
+    }
+
+    fn secret_entry(name: &str, cookie: &str) -> xdm_ipc::ImportEntry {
+        xdm_ipc::ImportEntry {
+            url: format!("http://h.test/{name}"),
+            filename: name.into(),
+            kind: "http".into(),
+            priority: 1,
+            connections: 1,
+            rate_limit: None,
+            video: None,
+            audio: None,
+            category: "Other".into(),
+            headers: vec![("Cookie".into(), cookie.into()), ("Authorization".into(), "Bearer tok".into()), ("User-Agent".into(), "ua".into())],
+        }
+    }
+
+    #[test]
+    fn import_receipts_never_store_credentials_and_still_detect_changed_secrets() {
+        let (service, _, _) = service(1000);
+        let import = |cookie: &str| {
+            service
+                .command(Command::ImportListEx {
+                    request_id: "secret-1".into(),
+                    directory: "/nonexistent-xdm-test/dir".into(),
+                    entries: vec![secret_entry("s.bin", cookie)],
+                    enqueue: false,
+                    allow_duplicate: false,
+                })
+                .unwrap()
+        };
+        let first = import("session=TOPSECRET");
+        assert!(first.ok, "{:?}", first.error);
+        let inner = service.inner.lock().unwrap();
+        let payload: String = inner.db.query_row("SELECT payload_json FROM imports WHERE request_id='secret-1'", [], |r| r.get(0)).unwrap();
+        assert!(!payload.contains("TOPSECRET") && !payload.contains("Bearer") && payload.contains("User-Agent"), "{payload}");
+        let headers: String = inner.db.query_row("SELECT headers_json FROM tasks", [], |r| r.get(0)).unwrap();
+        assert!(headers.contains("TOPSECRET"), "the task itself keeps its replay headers");
+        drop(inner);
+        let replay = import("session=TOPSECRET");
+        assert!(replay.ok && replay.task_ids == first.task_ids);
+        let changed = import("session=OTHER");
+        assert!(!changed.ok && changed.error.unwrap().contains("different batch"));
+    }
+
+    #[test]
+    fn completed_tasks_drop_credentials_from_their_stored_headers() {
+        let (service, _, _) = service(1000);
+        let reply = service
+            .command(Command::ImportListEx {
+                request_id: "secret-2".into(),
+                directory: "/nonexistent-xdm-test/dir".into(),
+                entries: vec![secret_entry("done.bin", "session=TOPSECRET")],
+                enqueue: false,
+                allow_duplicate: false,
+            })
+            .unwrap();
+        let id = reply.task_ids[0];
+        finish(&service, id, "complete", None);
+        let headers: String = service.inner.lock().unwrap().db
+            .query_row("SELECT headers_json FROM tasks WHERE id=?1", [id], |r| r.get(0)).unwrap();
+        assert!(!headers.contains("TOPSECRET") && !headers.contains("Bearer") && headers.contains("User-Agent"), "{headers}");
+    }
+
+    #[test]
+    fn imports_reject_forbidden_request_headers() {
+        let (service, _, _) = service(1000);
+        for name in ["Host", "Range", "if-range", "Accept-Encoding", "Content-Length", "Transfer-Encoding"] {
+            let mut entry = secret_entry("f.bin", "a=b");
+            entry.headers.push((name.into(), "x".into()));
+            let reply = service
+                .command(Command::ImportListEx {
+                    request_id: format!("forbid-{name}"),
+                    directory: "/nonexistent-xdm-test/dir".into(),
+                    entries: vec![entry],
+                    enqueue: false,
+                    allow_duplicate: false,
+                })
+                .unwrap();
+            assert!(!reply.ok, "{name}");
+        }
+    }
+
+    #[test]
+    fn ftp_partials_share_the_http_temp_naming_and_are_owned() {
+        let temp = std::env::temp_dir().join(format!("xdm-ftp-own-{}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let output = Path::new("/nonexistent-xdm-test/dir/file.bin");
+        let (ftp_part, ftp_check) = xdm_ftp::partial_paths(output, Some(&temp));
+        assert_eq!(ftp_part, xdm_http::partial_paths(output, Some(&temp)).0);
+        let owned = owned_partial_paths(output, Some(temp.to_str().unwrap()));
+        assert!(owned.contains(&ftp_part) && owned.contains(&ftp_check));
+        assert!(owned.contains(&PathBuf::from("/nonexistent-xdm-test/dir/file.bin.part.ftp")));
     }
 
     #[test]

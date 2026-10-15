@@ -23,9 +23,47 @@ var XdmCore = (() => {
     return (cookies || []).map(item => `${item.name}=${item.value}`).join("; ");
   }
 
+  // Same-site heuristic for B32 batches: registrable domain = last two host labels, or last three
+  // under a small list of well-known multi-label public suffixes (co.uk, com.au, ...). IP literals
+  // and single-label hosts are their own site. This is deliberately conservative, not a full
+  // public-suffix list: an unknown multi-label suffix makes unrelated sites look same-site only
+  // when both share that suffix, so the cookie rule below stays the main guard.
+  const MULTI_LABEL_SUFFIXES = new Set(["co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "co.in", "com.br", "com.cn", "com.tr", "co.za"]);
+  function registrableDomain(host) {
+    host = String(host || "").toLowerCase().replace(/\.$/, "");
+    if (!host || host.includes(":") || /^[\d.]+$/.test(host)) return host;
+    const labels = host.split(".");
+    if (labels.length <= 2) return host;
+    return MULTI_LABEL_SUFFIXES.has(labels.slice(-2).join(".")) ? labels.slice(-3).join(".") : labels.slice(-2).join(".");
+  }
+  function sameSite(a, b) {
+    try { return registrableDomain(new URL(a).hostname) === registrableDomain(new URL(b).hostname); } catch { return false; }
+  }
+  // Cookies for a link of a "download all/selected links" batch: everything for same-site links;
+  // for cross-site links only SameSite=None cookies, never Strict/Lax/unspecified (an unspecified
+  // cookie is Lax by default), so a hostile page cannot ride the user's session cross-site.
+  function batchCookies(cookies, linkUrl, pageUrl) {
+    if (sameSite(linkUrl, pageUrl)) return cookies;
+    return cookies.filter(cookie => cookie.sameSite === "no_restriction");
+  }
+  // strict-origin-when-cross-origin: full URL (no fragment or userinfo) for same-origin links,
+  // origin only across origins, nothing on an https -> http downgrade.
+  function refererFor(pageUrl, linkUrl) {
+    try {
+      const page = new URL(pageUrl), link = new URL(linkUrl);
+      if (page.origin === link.origin) return `${page.origin}${page.pathname}${page.search}`;
+      if (page.protocol === "https:" && link.protocol === "http:") return undefined;
+      return `${page.origin}/`;
+    } catch { return undefined; }
+  }
+  // The same checks the native host applies to every browser handoff.
+  function validHandoffUrl(url) {
+    try { const u = new URL(url); return ["http:", "https:"].includes(u.protocol) && !u.username && !u.password && url.length <= 8192; } catch { return false; }
+  }
+
   function buildSubmit({ url, filenameHint, mime = "", pageUrl = "", requestId, request, cookies, userAgent, method, body, contentType, container }) {
     const cookie = cookieHeader(cookies);
-    const referrer = headerValue(request?.headers, "referer") || (pageUrl || undefined);
+    const referrer = headerValue(request?.headers, "referer") || (pageUrl ? refererFor(pageUrl, url) : undefined);
     const agent = headerValue(request?.headers, "user-agent") || userAgent;
     const headers = [{ name: "User-Agent", value: agent }];
     if (body) headers.push({ name: "Content-Type", value: contentType });
@@ -104,6 +142,7 @@ var XdmCore = (() => {
 
   return {
     validHttp, mediaKind, isManifest, headerValue, cookieHeader, buildSubmit,
+    registrableDomain, sameSite, batchCookies, refererFor, validHandoffUrl,
     DEFAULT_LINK_FILTER, normalizeLinkFilter, filterLinks, linksFromText, linkExtension, redirectMethod
   };
 })();

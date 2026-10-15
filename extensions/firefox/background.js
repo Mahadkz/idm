@@ -3,7 +3,7 @@ const MAX_RECENT = 300;
 const HANDOFF_TIMEOUT_MS = 10000;
 const REQUEST_TTL_MS = 60000;
 const DEFAULT_EXCLUSIONS = ["*.bank.example", "*.internal.local"];
-const { validHttp, mediaKind, isManifest, buildSubmit, DEFAULT_LINK_FILTER, filterLinks, linksFromText, redirectMethod } = XdmCore;
+const { validHttp, mediaKind, isManifest, buildSubmit, batchCookies, validHandoffUrl, DEFAULT_LINK_FILTER, filterLinks, linksFromText, redirectMethod } = XdmCore;
 const DEFAULT_CAPTURE_KEYS = { force: "alt+shift", bypass: "alt" };
 
 const recent = new Map();
@@ -207,6 +207,7 @@ async function cookiesFor(url, storeId) {
 }
 
 async function submit(url, filenameHint, pageUrl = "", requestId = crypto.randomUUID(), mime = "", storeId, tabId, container) {
+  if (!validHandoffUrl(url)) return { accepted: false, reason: "only http(s) links without credentials can be handed to XDM" };
   if (isManifest(url)) return { accepted: false, reason: "choose a stream in the XDM popup" };
   const request = getRecentRequest(url, tabId);
   const capture = capturedBody(url, request, tabId);
@@ -228,7 +229,8 @@ async function submitLinkBatch(links, pageUrl, storeId) {
   const items = [];
   for (const [index, link] of links.entries()) {
     if (isManifest(link.url)) continue;
-    const cookies = await cookiesFor(link.url, storeId);
+    if (!validHandoffUrl(link.url)) continue;
+    const cookies = batchCookies(await cookiesFor(link.url, storeId), link.url, pageUrl);
     const { payload } = buildSubmit({ url: link.url, pageUrl, requestId: `${batchId}-${index}`, cookies, userAgent: navigator.userAgent });
     items.push({ requestId: `${batchId}-${index}`, ...payload });
   }
@@ -237,6 +239,11 @@ async function submitLinkBatch(links, pageUrl, storeId) {
     version: 1, requestId: batchId, type: "batch.submit", payload: { batchId, count: items.length, items }
   }).catch(error => ({ type: "error", reason: String(error?.message || error) }));
   if (batchReply && batchReply.type !== "error" && batchReply.accepted !== undefined) return { ...batchReply, batchId, count: items.length };
+  // Only a host that does not know batch.submit gets the per-link path. A validation error
+  // is surfaced: retrying link by link would bypass the batch checks.
+  if (!(batchReply?.type === "error" && /unsupported message type/i.test(String(batchReply.reason || "")))) {
+    return { accepted: false, batchId, count: items.length, reason: batchReply?.reason || "batch rejected" };
+  }
   let accepted = 0;
   for (const item of items) {
     const { requestId, ...payload } = item;
@@ -475,11 +482,15 @@ browser.runtime.onMessage.addListener((message, sender) => {
     }).catch(error => ({ accepted: false, reason: String(error) }));
   }
   if (message?.type === "batch.submit") {
-    const items = Array.isArray(message.items) ? message.items : [];
-    return browser.runtime.sendNativeMessage(HOST, {
-      version: 1, requestId: crypto.randomUUID(), type: "batch.submit",
-      payload: { items }
-    }).catch(() => ({ accepted: true, count: items.length }));
+    // Items are never forwarded as given: only their URLs are taken, validated, and the whole
+    // payload (cookies, referrer) is rebuilt by submitLinkBatch.
+    if (sender?.id !== undefined && sender.id !== browser.runtime.id) return Promise.resolve({ accepted: false, reason: "not allowed" });
+    const links = (Array.isArray(message.items) ? message.items : []).slice(0, 500)
+      .map(item => ({ url: typeof item === "string" ? item : item?.url }))
+      .filter(link => typeof link.url === "string" && validHandoffUrl(link.url));
+    if (links.length === 0) return Promise.resolve({ accepted: false, count: 0, reason: "no downloadable links" });
+    return submitLinkBatch(links, String(message.pageUrl || sender?.tab?.url || ""), message.storeId || sender?.tab?.cookieStoreId)
+      .catch(error => ({ accepted: false, reason: String(error) }));
   }
   if (message?.type === "tab.toggleIntegration") {
     const tabId = message.tabId;

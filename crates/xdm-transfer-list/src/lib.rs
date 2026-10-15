@@ -106,6 +106,9 @@ pub fn parse(input: &str) -> Result<TransferList, String> {
         if list.version != 1 {
             return Err("unsupported task list version".into());
         }
+        if list.entries.iter().any(|entry| !entry.headers.is_empty()) {
+            return Err("task lists cannot carry request headers".into());
+        }
         validate(&list.entries)?;
         return Ok(list);
     }
@@ -137,6 +140,7 @@ pub fn parse(input: &str) -> Result<TransferList, String> {
             rate_limit: None,
             video: None,
             audio: None,
+            headers: Vec::new(),
         });
         if entries.len() > MAX_ENTRIES {
             return Err("too many tasks".into());
@@ -442,7 +446,7 @@ mod tests {
         let list = parse("https://a.test/file.bin").unwrap();
         let encoded = serde_json::to_string(&list).unwrap();
         assert_eq!(parse(&encoded).unwrap().entries[0].url, list.entries[0].url);
-        assert!(parse(&encoded.replace("\"kind\":", "\"headers\":[],\"kind\":")).is_err());
+        assert!(parse(&encoded.replace("\"kind\":", "\"headers\":[[\"Cookie\",\"a=b\"]],\"kind\":")).is_err());
         assert_eq!(
             export_url("https://name:secret@a.test/file?token=signed").unwrap(),
             "https://a.test/file?token=signed"

@@ -29,7 +29,8 @@ function makeChromiumHarness({
   frames = [],
 } = {}) {
   const handlers = {};
-  const calls = { native: 0, nativeHosts: [], resume: 0, cancel: 0, suggest: 0, messages: [], badges: [], menus: [], storageSets: [], tabMessages: [], cookieQueries: [] };
+  const store = { ...storage };
+  const calls = { notifications: [], native: 0, nativeHosts: [], resume: 0, cancel: 0, suggest: 0, messages: [], badges: [], menus: [], storageSets: [], tabMessages: [], cookieQueries: [] };
   let timeout;
   const event = name => ({ addListener: fn => { handlers[name] = fn; } });
   const chrome = {
@@ -64,12 +65,18 @@ function makeChromiumHarness({
     },
     storage: {
       local: {
-        get: async defaults => ({ ...defaults, interceptDownloads: intercept, ...storage }),
-        set: async value => { calls.storageSets.push(value); },
+        get: async defaults => ({ ...defaults, interceptDownloads: intercept, ...store }),
+        set: async value => { calls.storageSets.push(value); Object.assign(store, value); },
       },
+    },
+    notifications: {
+      create: (id, opts) => { calls.notifications.push({ id, opts }); },
+      clear: () => {},
+      onButtonClicked: event('notifButton'),
     },
     cookies: { getAll: async query => { calls.cookieQueries.push(query); return cookies(query); } },
     downloads: {
+      onChanged: event('downloadChanged'),
       onDeterminingFilename: event('download'),
       pause,
       resume: async () => { calls.resume++; },
@@ -112,7 +119,8 @@ function makeFirefoxHarness({
   frames = [],
 } = {}) {
   const handlers = {};
-  const calls = { native: 0, nativeHosts: [], resume: 0, cancel: 0, erase: 0, messages: [], cookieQueries: [], badges: [], menus: [], storageSets: [], tabMessages: [] };
+  const store = { ...storage };
+  const calls = { notifications: [], native: 0, nativeHosts: [], resume: 0, cancel: 0, erase: 0, messages: [], cookieQueries: [], badges: [], menus: [], storageSets: [], tabMessages: [] };
   let timeout;
   const event = name => ({ addListener: fn => { handlers[name] = fn; } });
   const browser = {
@@ -148,9 +156,15 @@ function makeFirefoxHarness({
     },
     storage: {
       local: {
-        get: async defaults => ({ ...defaults, interceptDownloads: intercept, ...storage }),
-        set: async value => { calls.storageSets.push(value); },
+        get: async defaults => ({ ...defaults, interceptDownloads: intercept, ...store }),
+        set: async value => { calls.storageSets.push(value); Object.assign(store, value); },
       },
+    },
+    notifications: {
+      create: (id, opts) => { calls.notifications.push({ id, opts }); },
+      clear: () => {},
+      onClicked: event('notifClick'),
+      onClosed: event('notifClosed'),
     },
     cookies: {
       getAll: async query => {
@@ -159,6 +173,7 @@ function makeFirefoxHarness({
       },
     },
     downloads: {
+      onChanged: event('downloadChanged'),
       onCreated: event('download'),
       pause,
       resume: async () => { calls.resume++; },
@@ -191,13 +206,13 @@ function makeFirefoxHarness({
   return { calls, handlers, browser, context, triggerTimeout: () => timeout?.() };
 }
 
-function makeContentHarness(source, isFirefox = false, { storage } = {}) {
+function makeContentHarness(source, isFirefox = false, { storage, location } = {}) {
   const sentMessages = [];
   const observedNodes = [];
   const intersectionObservers = [];
   const resizeObservers = [];
   let messageListener = null;
-  let storageListener = null;
+  const storageListeners = [];
 
   class MockIntersectionObserver {
     constructor(callback) { this.callback = callback; this.targets = []; this.disconnected = false; intersectionObservers.push(this); }
@@ -222,7 +237,20 @@ function makeContentHarness(source, isFirefox = false, { storage } = {}) {
       this.children = [];
       this.parentNode = null;
       this.style = {};
+      Object.defineProperty(this.style, 'setProperty', { value: (name, value, priority) => { (this.important ||= {})[name] = [value, priority]; } });
       this.isConnected = true;
+      this.listeners = {};
+    }
+    addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+    removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter(f => f !== fn); }
+    dispatch(type, event = {}) { for (const fn of [...(this.listeners[type] || [])]) fn({ type, stopPropagation() { event.stopped = true; }, preventDefault() { event.prevented = true; }, ...event }); return event; }
+    focus() { this.focused = true; }
+    attachShadow(init) {
+      const root = new MockElement('#shadow-root');
+      root.mode = init.mode;
+      if (init.mode !== 'closed') this.shadowRoot = root;
+      this.shadow = root;
+      return root;
     }
     matches(sel) {
       const tags = sel.split(',').map(s => s.trim().toUpperCase());
@@ -298,7 +326,7 @@ function makeContentHarness(source, isFirefox = false, { storage } = {}) {
     ...(storage ? {
       storage: {
         local: { get: async defaults => ({ ...defaults, ...storage }) },
-        onChanged: { addListener: fn => { storageListener = fn; } },
+        onChanged: { addListener: fn => { storageListeners.push(fn); } },
       },
     } : {}),
   };
@@ -307,6 +335,7 @@ function makeContentHarness(source, isFirefox = false, { storage } = {}) {
   const docListeners = {};
 
   const context = {
+    ...(location ? { location } : {}),
     Element: MockElement,
     MutationObserver: MockMutationObserver,
     IntersectionObserver: MockIntersectionObserver,
@@ -359,7 +388,7 @@ function makeContentHarness(source, isFirefox = false, { storage } = {}) {
     intersectionObservers,
     resizeObservers,
     onMessage: (msg, sender = {}) => new Promise(resolve => { messageListener(msg, sender, resolve); }),
-    fireStorageChange: (changes, area = 'local') => storageListener(changes, area),
+    fireStorageChange: (changes, area = 'local') => storageListeners.forEach(fn => fn(changes, area)),
     triggerTimeout: () => { if (timeoutCb) { const cb = timeoutCb; timeoutCb = null; cb(); } }
   };
   Object.setPrototypeOf(result, context);
@@ -591,6 +620,11 @@ function appendVideo(c, src, box, parent = c.docEl) {
   v.box = box;
   parent.appendChild(v);
   return v;
+}
+
+// The overlay button lives in a closed shadow root; the mock keeps a handle on it for assertions.
+function btnOf(panel) {
+  return panel.shadow.children.find(ch => ch.tagName === 'BUTTON');
 }
 
 function panelsIn(c) {
@@ -1396,7 +1430,7 @@ tests.B44 = async function test_B44() {
     assert.equal(content.playerRegistry.get(idBefore).url, 'http://example.test/quality-720.mp4');
     assert.equal(panelsIn(content).length, 1, 'source change does not duplicate overlays');
     content.sentMessages.length = 0;
-    panelsIn(content)[0].children[0].onclick();
+    btnOf(panelsIn(content)[0]).onclick();
     assert.equal(content.sentMessages[0]?.url, 'http://example.test/quality-720.mp4', 'overlay button uses the current source');
   }
 };
@@ -1526,10 +1560,13 @@ tests.B48 = async function test_B48() {
     assert.equal(panel.style.display, 'block', 'overlay shows for a large visible player');
     assert.equal(panel.style.top, '104px');
     assert.equal(panel.style.left, `${50 + 640 - 144 - 4}px`, 'overlay sits at the player top-right corner');
-    assert.equal(panel.children[0].textContent, 'Download with XDM');
+    assert.equal(panel.shadow.mode, 'closed', 'overlay UI lives in a closed shadow root');
+    assert.equal(panel.shadowRoot, undefined, 'closed shadow root is not reachable from the page');
+    assert.equal(panel.children.length, 0, 'no overlay UI is exposed as light-DOM children page CSS could style');
+    assert.equal(btnOf(panel).textContent, 'Download with XDM');
 
     content.sentMessages.length = 0;
-    panel.children[0].onclick({ stopPropagation() {}, preventDefault() {} });
+    btnOf(panel).onclick({ stopPropagation() {}, preventDefault() {} });
     assert.deepEqual(content.sentMessages.map(m => [m.type, m.url, m.title]), [['media.download', 'http://example.test/movie.mp4', 'Movie']], 'button hands the player URL to XDM');
 
     // No intrusion: tiny players and 1x1 pixels never show an overlay.
@@ -1542,6 +1579,245 @@ tests.B48 = async function test_B48() {
     content.docEl.removeChild(video);
     content.observedNodes[0].observer.triggerRemove(video);
     assert.ok(!panelsIn(content).includes(panel), 'overlay is detached with its player');
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// Media-panel policy tests (extra IDs, run by default and by filter: node contracts_browser.mjs MEDIA_SIZE)
+// ---------------------------------------------------------------------------
+
+const respHeaders = (mime, extra = []) => [{ name: 'Content-Type', value: mime }, ...extra];
+const cl = n => ({ name: 'Content-Length', value: String(n) });
+
+async function mediaItems(h, tabId) {
+  return plain((await sendRuntime(h, { type: 'media.list', tabId })).items.map(i => i.url.split('/').pop()));
+}
+
+function headersEvent(h, tabId, url, headers, statusCode = 200, origin = 'http://page.test') {
+  h.handlers.headers({ tabId, url, responseHeaders: headers, statusCode, initiator: origin, originUrl: origin });
+}
+
+// MEDIA_SIZE (minimum-media-size): separate audio/video thresholds, only for a known total size; site exclusions.
+tests.MEDIA_SIZE = async function test_MEDIA_SIZE() {
+  const settings = { version: 1, minAudioBytes: 1_000_000, minVideoBytes: 5_000_000, panelExcludedSites: ['*.blocked.example'] };
+  for (const [name, make] of bothHarnesses) {
+    const h = make({ storage: { mediaSettings: settings } });
+    const T = 7;
+    headersEvent(h, T, 'http://m.test/small-audio.mp3', respHeaders('audio/mpeg', [cl(500_000)]));
+    headersEvent(h, T, 'http://m.test/big-audio.mp3', respHeaders('audio/mpeg', [cl(2_000_000)]));
+    headersEvent(h, T, 'http://m.test/small-video.mp4', respHeaders('video/mp4', [cl(2_000_000)]));
+    headersEvent(h, T, 'http://m.test/big-video.mp4', respHeaders('video/mp4', [cl(6_000_000)]));
+    headersEvent(h, T, 'http://m.test/unknown-video.mp4', respHeaders('video/mp4'));
+    headersEvent(h, T, 'http://m.test/unknown-audio.mp3', respHeaders('audio/mpeg'));
+    headersEvent(h, T, 'http://m.test/range-small.mp4', respHeaders('video/mp4', [cl(100), { name: 'Content-Range', value: 'bytes 0-99/4000' }]), 206);
+    headersEvent(h, T, 'http://m.test/range-big.mp4', respHeaders('video/mp4', [cl(100), { name: 'Content-Range', value: 'bytes 0-99/9000000' }]), 206);
+    headersEvent(h, T, 'http://m.test/partial-no-range.mp4', respHeaders('video/mp4', [cl(10)]), 206);
+    headersEvent(h, T, 'http://m.test/gzip.mp4', respHeaders('video/mp4', [cl(10), { name: 'Content-Encoding', value: 'gzip' }]));
+    headersEvent(h, T, 'http://m.test/tiny-manifest.m3u8', respHeaders('application/vnd.apple.mpegurl', [cl(120)]));
+    headersEvent(h, T, 'http://m.test/blocked-site.mp4', respHeaders('video/mp4', [cl(9_000_000)]), 200, 'http://www.blocked.example');
+    const listed = await mediaItems(h, T);
+    assert.deepEqual(listed.sort(), [
+      'big-audio.mp3', 'big-video.mp4', 'gzip.mp4', 'partial-no-range.mp4', 'range-big.mp4', 'tiny-manifest.m3u8', 'unknown-audio.mp3', 'unknown-video.mp4',
+    ].sort(), `${name}: audio and video thresholds differ; unknown-size, partial-without-range, compressed and manifest items are kept; excluded site is hidden`);
+    // A later full response for the unknown-size item reveals its size and the threshold then applies.
+    headersEvent(h, T, 'http://m.test/unknown-video.mp4', respHeaders('video/mp4', [cl(1_000)]));
+    assert.ok(!(await mediaItems(h, T)).includes('unknown-video.mp4'), `${name}: once the known size is below the minimum the item is hidden`);
+    // Raising/lowering the setting applies without reload.
+    const api = h.chrome || h.browser;
+    await api.storage.local.set({ mediaSettings: { version: 1, minAudioBytes: 0, minVideoBytes: 0 } });
+    const all = await mediaItems(h, T);
+    assert.ok(all.includes('small-audio.mp3') && all.includes('small-video.mp4') && all.includes('blocked-site.mp4'), `${name}: zero thresholds and no exclusions show everything`);
+    // Settings are normalized and versioned: garbage degrades to defaults instead of hiding media.
+    await api.storage.local.set({ mediaSettings: { minAudioBytes: 'x', minVideoBytes: -5, overlayMode: 'weird' } });
+    assert.equal((await mediaItems(h, T)).length, all.length, `${name}: invalid thresholds mean no threshold`);
+  }
+};
+
+async function fireNotification(h, id, accept) {
+  if ('browser' in h) {
+    if (accept) h.handlers.notifClick(id); else h.handlers.notifClosed(id, true);
+  } else h.handlers.notifButton(id, accept ? 0 : 1);
+  for (let i = 0; i < 6; i++) await tick();
+}
+
+async function cancelCaptured(h, id, url, handoff = false) {
+  await startDownload(h, { url, finalUrl: url, filename: 'f.bin', id, tabId: 1, startTime: String(id) });
+  if (!handoff) h.handlers.downloadChanged({ id, error: { current: 'USER_CANCELED' } });
+  for (let i = 0; i < 6; i++) await tick();
+}
+
+const exclusionWrites = h => h.calls.storageSets.filter(v => 'siteExclusions' in v);
+const offers = h => h.calls.notifications.filter(n => String(n.id).startsWith('xdm-miscapture:'));
+
+// MISCAPTURE (miscapture-exceptions): repeated cancels/re-downloads of one site offer, never silently apply, an exclusion.
+tests.MISCAPTURE = async function test_MISCAPTURE() {
+  const U = 'http://dl.example.test/a.bin';
+  for (const [name, make] of bothHarnesses) {
+    // Two user cancels of captured downloads of the same site -> one offer, nothing written yet.
+    let h = make({ nativeReply: async () => ({ accepted: false }) });
+    await cancelCaptured(h, 1, U);
+    assert.equal(offers(h).length, 0, `${name}: a single cancel offers nothing`);
+    await cancelCaptured(h, 2, 'http://other.example.test/b.bin');
+    assert.equal(offers(h).length, 1, `${name}: second cancel on the same site (subdomains alike) offers an exclusion`);
+    assert.equal(offers(h)[0].id, 'xdm-miscapture:example.test');
+    assert.equal(exclusionWrites(h).length, 0, `${name}: the exclusion is never added silently`);
+    const pending = await sendRuntime(h, { type: 'miscapture.pending' });
+    assert.deepEqual(plain(pending.offers.map(o => o.pattern)), ['*.example.test'], `${name}: popup can list the pending offer`);
+    assert.equal((await sendRuntime(h, { type: 'miscapture.accept', site: 'attacker.test' })).ok, false, `${name}: only a pending offer can be accepted`);
+    assert.equal(exclusionWrites(h).length, 0);
+    await fireNotification(h, 'xdm-miscapture:example.test', true);
+    assert.ok(exclusionWrites(h)[0].siteExclusions.includes('*.example.test'), `${name}: user acceptance adds the site exclusion`);
+    const before = h.calls.native;
+    await startDownload(h, { url: 'http://dl.example.test/c.bin', filename: 'c.bin', id: 9, tabId: 1 });
+    assert.equal(h.calls.native, before, `${name}: excluded site is no longer captured`);
+
+    // Dismissing suppresses further offers for that site.
+    h = make({ nativeReply: async () => ({ accepted: false }) });
+    await cancelCaptured(h, 1, U); await cancelCaptured(h, 2, U);
+    await fireNotification(h, 'xdm-miscapture:example.test', false);
+    assert.equal(exclusionWrites(h).length, 0, `${name}: declining adds nothing`);
+    await cancelCaptured(h, 3, U); await cancelCaptured(h, 4, U);
+    assert.equal(offers(h).length, 1, `${name}: a declined site is not offered again`);
+
+    // Our own cancel after a successful handoff is not a user mistake.
+    h = make();
+    for (const id of [1, 2, 3]) {
+      await cancelCaptured(h, id, `http://own.example.test/${id}.bin`, true);
+      h.handlers.downloadChanged({ id, error: { current: 'USER_CANCELED' } });
+    }
+    await tick();
+    assert.equal(offers(h).length, 0, `${name}: the extension's own cancel of a handed-off download never counts`);
+
+    // The browser re-downloading a handed-off URL twice counts as miscapture.
+    h = make();
+    await cancelCaptured(h, 1, U, true);
+    await cancelCaptured(h, 2, U, true);
+    assert.equal(offers(h).length, 0, `${name}: first re-download is only one hit`);
+    await cancelCaptured(h, 3, U, true);
+    assert.equal(offers(h).length, 1, `${name}: second browser re-download after handoff offers an exclusion`);
+
+    // Hits outside the window do not count; the feature can be disabled; the threshold is configurable.
+    const stale = { 'example.test': [{ time: Date.now() - 10 * 60_000, reason: 'cancelled' }] };
+    h = make({ storage: { miscaptureHistory: stale }, nativeReply: async () => ({ accepted: false }) });
+    await cancelCaptured(h, 1, U);
+    assert.equal(offers(h).length, 0, `${name}: a hit older than the window is forgotten`);
+    h = make({ storage: { miscaptureSettings: { version: 1, enabled: false } }, nativeReply: async () => ({ accepted: false }) });
+    await cancelCaptured(h, 1, U); await cancelCaptured(h, 2, U); await cancelCaptured(h, 3, U);
+    assert.equal(offers(h).length, 0, `${name}: disabled setting never offers`);
+    h = make({ storage: { miscaptureSettings: { version: 1, threshold: 3 } }, nativeReply: async () => ({ accepted: false }) });
+    await cancelCaptured(h, 1, U); await cancelCaptured(h, 2, U);
+    assert.equal(offers(h).length, 0, `${name}: configured threshold of 3 needs three cancels`);
+    await cancelCaptured(h, 3, U);
+    assert.equal(offers(h).length, 1);
+  }
+};
+
+const policyPage = hostname => ({ hostname, href: `http://${hostname}/watch` });
+async function overlayHarness(source, isFf, mediaSettings, hostname = 'example.test') {
+  const c = makeContentHarness(source, isFf, { storage: { mediaSettings }, location: policyPage(hostname) });
+  await tick(); await tick();
+  return c;
+}
+
+// PANEL_POLICY (player-panel-policy): full/mini mode, per-site disable, never an offer for DRM media.
+tests.PANEL_POLICY = async function test_PANEL_POLICY() {
+  for (const [source, isFf] of bothContents) {
+    const label = isFf ? 'firefox' : 'chromium';
+    // Mini mode: compact button, still labelled for assistive tech, anchored by its own width.
+    let c = await overlayHarness(source, isFf, { overlayMode: 'mini' });
+    let v = appendVideo(c, 'http://example.test/a.mp4', rect(50, 100, 640, 360));
+    c.observedNodes[0].observer.triggerAdd(v);
+    let panel = panelsIn(c)[0];
+    assert.equal(btnOf(panel).textContent, 'XDM', `${label}: mini overlay shows a compact label`);
+    assert.equal(btnOf(panel).getAttribute('aria-label'), 'Download with XDM');
+    assert.equal(panel.style.left, `${50 + 640 - 44 - 4}px`, `${label}: mini overlay uses its smaller width`);
+    // Live switch back to full mode.
+    c.fireStorageChange({ mediaSettings: { newValue: { overlayMode: 'full' } } });
+    assert.equal(btnOf(panel).textContent, 'Download with XDM', `${label}: mode change applies without reload`);
+    assert.equal(panel.style.left, `${50 + 640 - 144 - 4}px`);
+
+    // Per-site disable (exact and wildcard); other sites unaffected; live toggle.
+    for (const pattern of ['example.test', '*.example.test']) {
+      c = await overlayHarness(source, isFf, { overlayDisabledSites: [pattern] }, pattern === 'example.test' ? 'example.test' : 'www.example.test');
+      v = appendVideo(c, 'http://example.test/a.mp4', rect(0, 0, 640, 360));
+      c.observedNodes[0].observer.triggerAdd(v);
+      assert.equal(panelsIn(c)[0].style.display, 'none', `${label}: overlay is disabled on ${pattern}`);
+      c.fireStorageChange({ mediaSettings: { newValue: { overlayDisabledSites: [] } } });
+      assert.equal(panelsIn(c)[0].style.display, 'block', `${label}: re-enabling shows it again`);
+    }
+    c = await overlayHarness(source, isFf, { overlayDisabledSites: ['example.test'] }, 'other.test');
+    v = appendVideo(c, 'http://other.test/a.mp4', rect(0, 0, 640, 360));
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c)[0].style.display, 'block', `${label}: another site keeps its overlay`);
+    c = await overlayHarness(source, isFf, { panelExcludedSites: ['example.test'] });
+    v = appendVideo(c, 'http://example.test/a.mp4', rect(0, 0, 640, 360));
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c)[0].style.display, 'none', `${label}: a media-panel site exclusion also hides the overlay`);
+
+    // DRM: encrypted event after playback starts removes the overlay and the catalog offer.
+    c = await overlayHarness(source, isFf, {});
+    v = appendVideo(c, 'http://example.test/drm.mp4', rect(0, 0, 640, 360));
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c).length, 1);
+    c.sentMessages.length = 0;
+    v.dispatch('encrypted');
+    assert.equal(panelsIn(c).length, 0, `${label}: encrypted event removes the overlay`);
+    assert.ok(c.sentMessages.some(m => m.type === 'page.protected' && m.url === 'http://example.test/drm.mp4'), `${label}: the background is told the player is protected`);
+    c.observedNodes[0].observer.triggerAdd(v);
+    c.triggerTimeout();
+    assert.equal(panelsIn(c).length, 0, `${label}: re-inspection never brings the overlay back`);
+    assert.equal(c.playerRegistry.isProtected(v), true);
+    // MediaKeys already attached before detection: never an overlay, never a media report.
+    c = await overlayHarness(source, isFf, {});
+    v = appendVideo(c, 'http://example.test/keys.mp4', rect(0, 0, 640, 360));
+    v.mediaKeys = {};
+    c.sentMessages.length = 0;
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c).length, 0, `${label}: element with MediaKeys gets no overlay`);
+    assert.ok(!c.sentMessages.some(m => m.type === 'page.media'), `${label}: protected media is not offered to the catalog`);
+  }
+  // Background: protected URLs leave the catalog and stay out.
+  for (const [name, make] of bothHarnesses) {
+    const h = make();
+    headersEvent(h, 4, 'http://m.test/drm.mp4', respHeaders('video/mp4', [cl(9_000_000)]));
+    assert.deepEqual(await mediaItems(h, 4), ['drm.mp4']);
+    await sendRuntime(h, { type: 'page.protected', url: 'http://m.test/drm.mp4' }, { tab: { id: 4 } });
+    assert.deepEqual(await mediaItems(h, 4), [], `${name}: protected media is removed from the catalog`);
+    headersEvent(h, 4, 'http://m.test/drm.mp4', respHeaders('video/mp4', [cl(9_000_000)]));
+    assert.deepEqual(await mediaItems(h, 4), [], `${name}: and not re-added by later network sightings`);
+  }
+};
+
+// OVERLAY_SHADOW (B48 gap): closed shadow root, important inline host styles, keyboard focus and Escape.
+tests.OVERLAY_SHADOW = async function test_OVERLAY_SHADOW() {
+  for (const [source, isFf] of bothContents) {
+    const label = isFf ? 'firefox' : 'chromium';
+    const c = await overlayHarness(source, isFf, {});
+    const v = appendVideo(c, 'http://example.test/k.mp4', rect(0, 0, 640, 360));
+    c.observedNodes[0].observer.triggerAdd(v);
+    const panel = panelsIn(c)[0];
+    assert.equal(panel.shadow.mode, 'closed', `${label}: closed shadow root`);
+    assert.ok(btnOf(panel), `${label}: button is inside the shadow root`);
+    assert.equal(panel.important?.display?.[1], 'important', `${label}: host display is an !important inline declaration page CSS cannot override`);
+    assert.equal(panel.important?.position?.[0], 'fixed');
+    assert.ok(panel.shadow.children.some(ch => ch.tagName === 'STYLE'), `${label}: overlay styles are scoped inside the shadow root`);
+    // Keyboard: keys inside the overlay never reach page shortcuts.
+    const space = panel.shadow.dispatch('keydown', { key: ' ' });
+    assert.equal(space.stopped, true, `${label}: key events stop at the overlay`);
+    assert.equal(panel.style.display, 'block');
+    // Escape dismisses and gives focus back to the player.
+    const esc = panel.shadow.dispatch('keydown', { key: 'Escape' });
+    assert.equal(esc.stopped, true);
+    assert.equal(panel.style.display, 'none', `${label}: Escape hides the overlay`);
+    assert.equal(v.focused, true, `${label}: Escape returns focus to the player`);
+    c.resizeObservers[0].trigger();
+    c.intersectionObservers[0].trigger(v, true);
+    assert.equal(panel.style.display, 'none', `${label}: layout changes do not resurrect a dismissed overlay`);
+    // A new source on the same player brings it back.
+    v.src = v.currentSrc = 'http://example.test/next.mp4';
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c)[0].style.display, 'block', `${label}: a new source shows the overlay again`);
   }
 };
 
@@ -1711,8 +1987,13 @@ tests.B62 = async function test_B62() {
 
 // Test Runner
 async function run() {
-  console.log('Running IDM Browser Behavior Contract Tests (B01-B62)...\n');
-  const allIds = Array.from({ length: 62 }, (_, i) => `B${String(i + 1).padStart(2, '0')}`);
+  console.log('Running IDM Browser Behavior Contract Tests (B01-B62 plus media-policy checks)...\n');
+  const only = process.argv.slice(2);
+  const baseIds = Array.from({ length: 62 }, (_, i) => `B${String(i + 1).padStart(2, '0')}`);
+  const extraIds = ['MEDIA_SIZE', 'MISCAPTURE', 'PANEL_POLICY', 'OVERLAY_SHADOW'];
+  const allIds = [...baseIds, ...extraIds].filter(id => only.length === 0 || only.includes(id));
+  const unknown = only.filter(id => ![...baseIds, ...extraIds].includes(id));
+  if (unknown.length) { console.error(`unknown test id(s): ${unknown.join(', ')}`); process.exit(2); }
 
   let passed = 0;
   let xfailed = 0;

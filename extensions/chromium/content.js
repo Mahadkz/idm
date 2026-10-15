@@ -377,12 +377,65 @@ function adapterMedia(player, pageUrl = "") {
   return items;
 }
 
-// B48: Floating "Download with XDM" button attached to detected players.
+// Overlay policy from the versioned `mediaSettings` storage object: full or mini mode and per-site disable.
+var overlayPolicy = { mode: "full", disabled: false, raw: null };
+
+function hostInList(host, list) {
+  host = String(host || "").toLowerCase();
+  return (Array.isArray(list) ? list : []).some(pattern => {
+    const p = String(pattern || "").trim().toLowerCase();
+    if (!p) return false;
+    if (p.startsWith("*.")) return host === p.slice(2) || host.endsWith("." + p.slice(2));
+    return host === p;
+  });
+}
+
+function setOverlayPolicy(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const host = typeof location !== "undefined" ? location.hostname : "";
+  overlayPolicy = {
+    mode: r.overlayMode === "mini" ? "mini" : "full",
+    disabled: hostInList(host, r.overlayDisabledSites) || hostInList(host, r.panelExcludedSites),
+    raw: r
+  };
+  if (typeof playerPanel !== "undefined") playerPanel.applyPolicy();
+}
+
+if (api?.storage?.local?.get) {
+  api.storage.local.get({ mediaSettings: {} }).then(v => setOverlayPolicy(v.mediaSettings)).catch?.(() => {});
+  api.storage.onChanged?.addListener?.((changes, area) => {
+    if (area === "local" && changes.mediaSettings) setOverlayPolicy(changes.mediaSettings.newValue);
+  });
+}
+
+// B48: Floating "Download with XDM" button attached to detected players. The visible UI lives inside a
+// closed shadow root so page CSS and page scripts cannot restyle or reach it; the host element only carries
+// position. Keyboard: the button is focusable, Escape dismisses the overlay and returns focus to the player,
+// and key events never leak to page shortcuts.
 var playerPanel = (() => {
   const panels = new Map();
+  const parts = new Map();
   const owned = typeof WeakSet !== "undefined" ? new WeakSet() : new Set();
   const MIN_SIZE = 40;
-  const PANEL_WIDTH = 144;
+  const WIDTHS = { full: 144, mini: 44 };
+  const CSS = ":host{all:initial}button{all:initial;box-sizing:border-box;display:block;cursor:pointer;font:600 12px/1.2 sans-serif;color:#fff;background:#1a56c4;border:1px solid #fff;border-radius:4px;padding:6px 10px;text-align:center;width:100%}button:hover{background:#2a6ae0}button:focus-visible{outline:2px solid #ffbf00;outline-offset:1px}";
+
+  const kebab = name => name.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+  // Plain assignment plus an !important inline declaration so page rules with !important cannot override it.
+  function setStyle(el, prop, value) {
+    el.style = el.style || {};
+    el.style[prop] = value;
+    if (typeof el.style.setProperty === "function") el.style.setProperty(kebab(prop), value, "important");
+  }
+
+  function width() { return WIDTHS[overlayPolicy.mode] || WIDTHS.full; }
+
+  function labelFor(btn) {
+    const mini = overlayPolicy.mode === "mini";
+    btn.textContent = mini ? "XDM" : "Download with XDM";
+    btn.setAttribute?.("aria-label", "Download with XDM");
+    btn.title = "Download with XDM";
+  }
 
   function create(playerId, mediaInfo = {}) {
     if (!playerId) return null;
@@ -398,17 +451,25 @@ var playerPanel = (() => {
     panel.className = "xdm-player-panel";
     panel.setAttribute?.("data-player-id", playerId);
     panel.style = panel.style || {};
-    panel.style.position = "fixed";
-    panel.style.zIndex = "2147483647";
-    panel.style.display = "none";
-    panel.style.pointerEvents = "auto";
+    setStyle(panel, "position", "fixed");
+    setStyle(panel, "zIndex", "2147483647");
+    setStyle(panel, "display", "none");
+    setStyle(panel, "pointerEvents", "auto");
+    setStyle(panel, "width", `${width()}px`);
     panel.mediaInfo = mediaInfo;
     owned.add(panel);
 
+    let root = panel;
+    if (typeof panel.attachShadow === "function") {
+      try { root = panel.attachShadow({ mode: "closed" }); } catch { root = panel; }
+    }
+    const style = doc.createElement("style");
+    style.textContent = CSS;
+    root.appendChild(style);
     const btn = doc.createElement("button");
     btn.className = "xdm-download-btn";
-    btn.textContent = "Download with XDM";
     btn.type = "button";
+    labelFor(btn);
     // Reads the live entry so a replaced source is never downloaded from a stale URL.
     btn.onclick = event => {
       event?.stopPropagation?.();
@@ -419,9 +480,20 @@ var playerPanel = (() => {
       }
     };
     owned.add(btn);
-    panel.appendChild(btn);
+    root.appendChild(btn);
+    const part = { root, btn, focusTarget: null };
+    root.addEventListener?.("keydown", event => {
+      event?.stopPropagation?.();
+      if (event?.key === "Escape") {
+        event.preventDefault?.();
+        dismiss(playerId);
+        try { part.focusTarget?.(); } catch {}
+      }
+    });
+    for (const type of ["keyup", "keypress"]) root.addEventListener?.(type, event => event?.stopPropagation?.());
 
     panels.set(playerId, panel);
+    parts.set(playerId, part);
     return panel;
   }
 
@@ -443,7 +515,7 @@ var playerPanel = (() => {
   function show(playerId) {
     const panel = panels.get(playerId);
     if (panel) {
-      if (panel.style) panel.style.display = "block";
+      if (panel.style) setStyle(panel, "display", "block");
       panel.visible = true;
     }
   }
@@ -451,24 +523,44 @@ var playerPanel = (() => {
   function hide(playerId) {
     const panel = panels.get(playerId);
     if (panel) {
-      if (panel.style) panel.style.display = "none";
+      if (panel.style) setStyle(panel, "display", "none");
       panel.visible = false;
     }
+  }
+
+  // Escape: hide this overlay until the player gets a new source.
+  function dismiss(playerId) {
+    const panel = panels.get(playerId);
+    if (!panel) return;
+    panel.dismissed = true;
+    hide(playerId);
+  }
+
+  function reset(playerId) {
+    const panel = panels.get(playerId);
+    if (panel) panel.dismissed = false;
+  }
+
+  function bind(playerId, focusTarget) {
+    const part = parts.get(playerId);
+    if (part) part.focusTarget = focusTarget;
   }
 
   function updatePosition(playerId, rect) {
     const panel = panels.get(playerId);
     if (!panel || !rect) return;
     if (panel.style) {
-      panel.style.top = `${Math.max(rect.top || 0, 0) + 4}px`;
-      panel.style.left = `${Math.max((rect.right || 0) - PANEL_WIDTH - 4, 0)}px`;
+      setStyle(panel, "top", `${Math.max(rect.top || 0, 0) + 4}px`);
+      setStyle(panel, "left", `${Math.max((rect.right || 0) - width() - 4, 0)}px`);
+      setStyle(panel, "width", `${width()}px`);
     }
   }
 
-  // Shows the panel only while its player is connected, big enough and inside the viewport.
+  // Shows the panel only while policy allows it and its player is connected, big enough and inside the viewport.
   function sync(playerId, element, intersecting) {
     const panel = panels.get(playerId);
     if (!panel) return false;
+    if (overlayPolicy.disabled || panel.dismissed) { hide(playerId); return false; }
     const doc = typeof document !== "undefined" ? document : null;
     const connected = !!element && (doc?.contains ? doc.contains(element) : element.isConnected !== false);
     const rect = typeof element?.getBoundingClientRect === "function" ? element.getBoundingClientRect() : null;
@@ -485,6 +577,11 @@ var playerPanel = (() => {
     return false;
   }
 
+  function applyPolicy() {
+    for (const [id, part] of parts) labelFor(part.btn);
+    if (typeof playerRegistry !== "undefined") playerRegistry.repositionAll();
+  }
+
   function remove(playerId) {
     const panel = panels.get(playerId);
     if (panel) {
@@ -492,6 +589,7 @@ var playerPanel = (() => {
         panel.parentNode.removeChild(panel);
       }
       panels.delete(playerId);
+      parts.delete(playerId);
     }
   }
 
@@ -499,7 +597,12 @@ var playerPanel = (() => {
     return panels.get(playerId) || null;
   }
 
-  return { create, attach, show, hide, updatePosition, sync, remove, get, isOwn, panels };
+  // The closed shadow root and its button, for the content script's own use and tests.
+  function internals(playerId) {
+    return parts.get(playerId) || null;
+  }
+
+  return { create, attach, show, hide, dismiss, reset, bind, updatePosition, sync, applyPolicy, remove, get, internals, isOwn, panels };
 })();
 
 // B44: Player registry with WeakRef tracking, per-player observers and removal cleanup.
@@ -523,8 +626,27 @@ var playerRegistry = (() => {
     }
   }
 
+  const isEncrypted = el => { try { return !!(el.mediaKeys || el.webkitKeys); } catch { return false; } };
+
+  // DRM/EME media: no overlay and no download offer, ever.
+  function markProtected(entry) {
+    if (entry.protected) return;
+    entry.protected = true;
+    const el = deref(entry);
+    try { entry.io?.disconnect(); } catch {}
+    try { entry.ro?.disconnect(); } catch {}
+    entry.io = entry.ro = null;
+    playerPanel.remove(entry.id);
+    const urls = new Set([entry.url, ...(el ? playerUrls(el) : [])].filter(Boolean));
+    for (const url of urls) api?.runtime?.sendMessage({ type: "page.protected", url })?.catch?.(() => {});
+  }
+
   function dispose(entry, notify) {
     entries.delete(entry.id);
+    if (entry.drmHandler) {
+      const el = deref(entry);
+      for (const type of ["encrypted", "waitingforkey"]) { try { el?.removeEventListener?.(type, entry.drmHandler); } catch {} }
+    }
     try { entry.io?.disconnect(); } catch {}
     try { entry.ro?.disconnect(); } catch {}
     entry.io = entry.ro = null;
@@ -543,7 +665,10 @@ var playerRegistry = (() => {
     }
     const existing = entries.get(id);
     if (existing) {
+      if (existing.protected) return id;
+      if (isEncrypted(element)) { markProtected(existing); return id; }
       // Same element with a new source keeps its identity, panel and observers.
+      if (info.url && info.url !== existing.url) playerPanel.reset(id);
       existing.url = info.url || existing.url;
       existing.title = info.title || existing.title;
       playerPanel.sync(id, element);
@@ -559,7 +684,11 @@ var playerRegistry = (() => {
       ro: null
     };
     entries.set(id, entry);
+    entry.drmHandler = () => markProtected(entry);
+    for (const type of ["encrypted", "waitingforkey"]) { try { element.addEventListener?.(type, entry.drmHandler); } catch {} }
+    if (isEncrypted(element)) { markProtected(entry); return id; }
     playerPanel.create(id, entry);
+    playerPanel.bind(id, () => element.focus?.());
     playerPanel.attach(id);
     observe(element, entry);
     playerPanel.sync(id, element);
@@ -573,6 +702,11 @@ var playerRegistry = (() => {
     if (!entry) return false;
     dispose(entry, notify);
     return true;
+  }
+
+  function isProtected(elementOrId) {
+    const id = typeof elementOrId === "string" ? elementOrId : elementToId.get(elementOrId);
+    return !!entries.get(id)?.protected;
   }
 
   function get(id) {
@@ -610,7 +744,7 @@ var playerRegistry = (() => {
     return entries.size;
   }
 
-  return { register, unregister, get, cleanup, repositionAll, disposeAll, size, entries };
+  return { register, unregister, isProtected, get, cleanup, repositionAll, disposeAll, size, entries };
 })();
 
 // B47: Scroll/resize keep overlays aligned; navigation drops every overlay and observer.
@@ -653,6 +787,7 @@ function inspect(node) {
       const known = seen.has(url);
       // A replacement element showing an already reported URL still needs its own overlay.
       playerRegistry.register(player, { url, title: item.title });
+      if (playerRegistry.isProtected(player)) continue;
       if (known) continue;
       seen.add(url);
       const expiresAt = urlExpiry(url);
@@ -779,4 +914,5 @@ if (typeof globalThis !== "undefined") {
   globalThis.DEBOUNCE_MS = DEBOUNCE_MS;
   globalThis.debouncedInspect = debouncedInspect;
   globalThis.playerPanel = playerPanel;
+  globalThis.setOverlayPolicy = setOverlayPolicy;
 }

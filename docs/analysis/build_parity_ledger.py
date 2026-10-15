@@ -4,10 +4,14 @@
 Parses docs/idm_core_queue_contracts.md (N01-N48, Q01-Q21),
 docs/idm_browser_behavior_contracts.md (B01-B62),
 docs/idm_behavior_review.md (39 named contracts).
+The 39 named contracts are also cross-checked against the executable suite
+tests/integration/contracts_behavior.py, which is read statically with ast
+(never imported or executed).
 Outputs docs/parity_ledger.json and docs/parity_ledger.md.
 --check exits non-zero if outputs are stale.
 """
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -221,8 +225,41 @@ def parse_browser_contracts(md_text: str) -> list[dict]:
     return contracts
 
 
-def parse_behavior_review_contracts(md_text: str, json_data: dict) -> list[dict]:
-    """Parse the behavior review contracts (39 named contracts)."""
+BEHAVIOR_SUITE_PATH = 'tests/integration/contracts_behavior.py'
+
+
+def parse_behavior_suite(py_text: str) -> dict:
+    """Statically read the executable behavior suite (ast only; nothing is run).
+
+    The runner names each test after its contract ID (test_foo_bar -> foo-bar),
+    and EXPECTED_FAIL / UNTESTED are literal dicts keyed by contract ID.
+    """
+    tree = ast.parse(py_text)
+    functions = {}
+    expected_fail = {}
+    untested = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith('test_'):
+            functions[node.name.removeprefix('test_').replace('_', '-')] = node.name
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name)):
+            if node.targets[0].id == 'EXPECTED_FAIL':
+                expected_fail = ast.literal_eval(node.value)
+            elif node.targets[0].id == 'UNTESTED':
+                untested = ast.literal_eval(node.value)
+    return {'functions': functions, 'expected_fail': expected_fail, 'untested': untested}
+
+
+def parse_behavior_review_contracts(md_text: str, json_data: dict,
+                                    suite: Optional[dict] = None) -> list[dict]:
+    """Parse the behavior review contracts (39 named contracts).
+
+    Status comes from xdm_family_states, then the executable suite may raise a
+    'missing' contract to 'partial' when its test passes (a pass covers only a
+    subset). XFAIL and UNTESTED entries keep their JSON status; their reasons
+    are recorded in behavior_suite.
+    """
+    suite = suite or {'functions': {}, 'expected_fail': {}, 'untested': {}}
     contracts = []
     for contract in json_data.get('contracts', []):
         cid = contract['id']
@@ -240,17 +277,39 @@ def parse_behavior_review_contracts(md_text: str, json_data: dict) -> list[dict]
             status = 'missing'
         else:
             status = 'unknown'
+
         test_refs = []
         test_refs.extend(extract_test_refs(contract.get('acceptance_scenario', '')))
         for ref in contract.get('source_references', []):
             test_refs.extend(extract_test_refs(ref))
+
+        # Executable suite evidence (static).
+        function = suite['functions'].get(cid)
+        if cid in suite['expected_fail']:
+            result, reason = 'xfail', suite['expected_fail'][cid]
+        elif cid in suite['untested']:
+            result, reason = 'untested', suite['untested'][cid]
+        elif function:
+            result, reason = 'pass', None
+        else:
+            result, reason = 'none', None
+        if function:
+            test_refs.append(BEHAVIOR_SUITE_PATH)
+        if result == 'pass' and status == 'missing':
+            status = 'partial'
+
         contracts.append({
             'id': cid,
             'title': title,
             'source_doc': 'idm_behavior_review.md',
             'current_behavior': behavior_summary,
             'status': status,
-            'test_refs': list(set(test_refs)),
+            'test_refs': list(dict.fromkeys(test_refs)),
+            'behavior_suite': {
+                'test_function': function,
+                'result': result,
+                'reason': reason,
+            },
         })
     return contracts
 
@@ -297,12 +356,14 @@ def build_ledger() -> dict:
     browser_md = (DOCS / 'idm_browser_behavior_contracts.md').read_text()
     behavior_review_md = (DOCS / 'idm_behavior_review.md').read_text()
     behavior_review_json = json.loads((DOCS / 'idm_behavior_review.json').read_text())
+    suite_text = (ROOT / BEHAVIOR_SUITE_PATH).read_text()
+    suite = parse_behavior_suite(suite_text)
 
     # Parse contracts from each document
     all_contracts = []
     all_contracts.extend(parse_core_queue_contracts(core_queue_md))
     all_contracts.extend(parse_browser_contracts(browser_md))
-    all_contracts.extend(parse_behavior_review_contracts(behavior_review_md, behavior_review_json))
+    all_contracts.extend(parse_behavior_review_contracts(behavior_review_md, behavior_review_json, suite))
 
     # Scan tests for contract ID mentions
     contract_to_tests = scan_tests_for_contract_ids()
@@ -336,6 +397,11 @@ def build_ledger() -> dict:
 
     return {
         'schema_version': 1,
+        'summary': summary,
+        # Hashes of statically read sources, so --check notices any change to them.
+        'source_sha256': {
+            BEHAVIOR_SUITE_PATH: hashlib.sha256(suite_text.encode('utf-8')).hexdigest(),
+        },
         'summary': summary,
         'contracts': all_contracts,
     }

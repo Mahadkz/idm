@@ -5759,6 +5759,7 @@ name = "xdm-cli"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "rusqlite",
  "serde_json",
  "url",
  "xdm-ftp",

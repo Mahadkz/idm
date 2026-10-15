@@ -2282,7 +2282,10 @@ macro_rules! install_tr {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    xdm_ipc::ops::handle_version_flag("xdm-gui");
     let paths = Paths::open()?;
+    xdm_ipc::ops::init_logging(&paths.dir, "xdm-gui");
+    xdm_ipc::ops::install_panic_hook(&paths.dir, "xdm-gui");
     let ipc = IpcClient::new(paths.clone());
     let ui = MainWindow::new()?;
     let task_ids = Arc::new(Mutex::new(Vec::new()));

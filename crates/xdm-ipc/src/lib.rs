@@ -13,6 +13,11 @@ fn default_submit_method() -> String {
     "GET".into()
 }
 
+pub mod ops;
+
+/// IPC protocol number negotiated by `Hello`; bump on incompatible changes.
+pub const PROTOCOL: u32 = 1;
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 /// Replies may be larger than requests (a 2000-row `ListPage`); requests stay
 /// bounded by `MAX_FRAME`.
@@ -407,6 +412,8 @@ pub enum Command {
         id: i64,
         allow: bool,
     },
+    /// Version handshake: the reply carries `daemon_version` and `protocol`.
+    Hello { client_version: String, protocol: u32 },
 }
 
 /// Debug output of a command never includes password fields (`LoginSave`,
@@ -927,6 +934,9 @@ pub struct Reply {
     /// imported OS settings or "PAC not supported"; never carries credentials.
     #[serde(default)]
     pub proxy_note: Option<String>,
+    /// IPC protocol number; set by the `Hello` reply.
+    #[serde(default)]
+    pub protocol: Option<u32>,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -980,6 +990,7 @@ impl Reply {
             daemon_version: None,
             temp_dir: None,
             proxy_note: None,
+            protocol: None,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -1013,6 +1024,7 @@ impl Reply {
             daemon_version: None,
             temp_dir: None,
             proxy_note: None,
+            protocol: None,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -1055,6 +1067,7 @@ impl Reply {
             daemon_version: None,
             temp_dir: None,
             proxy_note: None,
+            protocol: None,
         }
     }
 }

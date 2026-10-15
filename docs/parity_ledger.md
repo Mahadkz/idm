@@ -6,8 +6,8 @@
 |---|---:|---:|---:|---:|---:|---:|
 | idm_core_queue_contracts.md | 11 | 47 | 5 | 6 | 0 | 69 |
 | idm_browser_behavior_contracts.md | 41 | 10 | 8 | 3 | 0 | 62 |
-| idm_behavior_review.md | 0 | 32 | 0 | 7 | 0 | 39 |
-| **Total** | **52** | **89** | **13** | **16** | **0** | **170** |
+| idm_behavior_review.md | 0 | 34 | 0 | 5 | 0 | 39 |
+| **Total** | **52** | **91** | **13** | **14** | **0** | **170** |
 
 ## Contract Details
 
@@ -163,9 +163,9 @@
 | grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | partial | grabber.load: pending; grabber.save: pending; grabber.schedule: pending | tests/integration/contracts_behavior.py |
 | limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | speed.task: partial | tests/integration/contracts_behavior.py |
 | live-stop-save | Stopping live recording can finalize captured content, with … | partial | media.overlay: pending; task.resume: partial | tests/integration/contracts_behavior.py |
-| minimum-media-size | Separate audio/video panel thresholds only apply when total … | missing | media.minimum: pending | tests/integration/contracts_behavior.py |
-| miscapture-exceptions | Two cancellations or similar mistaken captures can prompt fo… | missing | browser.exceptions: pending | tests/integration/contracts_behavior.py |
-| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | media.overlay: pending; browser.types: partial; browser.exceptions: pending | tests/integration/contracts_behavior.py |
+| minimum-media-size | Separate audio/video panel thresholds only apply when total … | partial | media.minimum: pending | tests/integration/contracts_behavior.py, tests/integration/contracts_browser.mjs |
+| miscapture-exceptions | Two cancellations or similar mistaken captures can prompt fo… | partial | browser.exceptions: pending | tests/integration/contracts_behavior.py, tests/integration/contracts_browser.mjs |
+| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | media.overlay: pending; browser.types: partial; browser.exceptions: pending | tests/integration/contracts_behavior.py, tests/integration/contracts_browser.mjs |
 | playlist-link-expansion | Downloaded M3U can offer its MP3 links as one download or a … | missing | media.overlay: pending; browser.all_links: pending | tests/integration/contracts_behavior.py |
 | proxy-selection | Manual, auto-detected, system and none modes; PAC, protocol-… | missing | settings.proxy: pending | tests/integration/contracts_behavior.py |
 | quality-and-track-catalog | Other quality may appear only after player selection; separa… | partial | media.overlay: pending | tests/integration/contracts_behavior.py |
@@ -277,7 +277,9 @@
 | grabber-project-recovery | Corrupt/incompatible projects/templates, partial loading and… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | limiter-precedence | Startup limiter default and remembered per-file exceptions/p… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | live-stop-save | Stopping live recording can finalize captured content, with … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
-| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
+| minimum-media-size | Separate audio/video panel thresholds only apply when total … | partial | tests/integration/contracts_behavior.py, tests/integration/contracts_browser.mjs | idm_behavior_review.md |
+| miscapture-exceptions | Two cancellations or similar mistaken captures can prompt fo… | partial | tests/integration/contracts_behavior.py, tests/integration/contracts_browser.mjs | idm_behavior_review.md |
+| player-panel-policy | Full/mini media panel, site exclusions and protected-content… | partial | tests/integration/contracts_behavior.py, tests/integration/contracts_browser.mjs | idm_behavior_review.md |
 | quality-and-track-catalog | Other quality may appear only after player selection; separa… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | queue-independent-start | Named queues have individual start/stop commands; toolbar st… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | queue-order-and-retry | Manual queue ordering and a scheduler retry count per failed… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
@@ -293,4 +295,4 @@
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 
-**Count: 82**
+**Count: 84**

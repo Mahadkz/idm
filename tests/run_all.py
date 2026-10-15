@@ -46,6 +46,8 @@ def prerequisite_problem(path, text):
         return "suite talks to the daemon over a Unix socket; Windows uses a named pipe (no Python client yet)"
     if "Xvfb" in text and (WINDOWS or not find("Xvfb")):
         return "Xvfb not available (Linux with xvfb installed required)"
+    if "xdotool" in text and (WINDOWS or not find("xdotool")):
+        return "xdotool not available"
     if re.search(r"ffmpeg|ffprobe", text) and not (find("ffmpeg") and find("ffprobe")):
         return "ffmpeg/ffprobe not found on PATH"
     if path.name == "chromium_real.mjs" and not find_chrome():

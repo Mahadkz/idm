@@ -5,9 +5,9 @@
 | Document | Implemented | Partial | Different | Missing | Unknown | Total |
 |---|---:|---:|---:|---:|---:|---:|
 | idm_core_queue_contracts.md | 11 | 45 | 5 | 8 | 0 | 69 |
-| idm_browser_behavior_contracts.md | 37 | 14 | 8 | 3 | 0 | 62 |
+| idm_browser_behavior_contracts.md | 41 | 10 | 8 | 3 | 0 | 62 |
 | idm_behavior_review.md | 0 | 27 | 0 | 12 | 0 | 39 |
-| **Total** | **48** | **86** | **13** | **23** | **0** | **170** |
+| **Total** | **52** | **82** | **13** | **23** | **0** | **170** |
 
 ## Contract Details
 
@@ -95,7 +95,7 @@
 | B11 | B `Nb/cb`: before-request observes GET/POST, request body, s… | implemented | Implemented: Observes request bodies via webRequest.onBeforeRequest; file upload… | tests/integration/contracts_browser.mjs |
 | B12 | B `Rb`: before-send-headers captures headers, correlates pag… | implemented | Implemented: Request context is keyed by tab ID and URL; Referer and User-Agent … | tests/integration/contracts_browser.mjs |
 | B13 | B `Ub/Hc`: response status, MIME, Content-Disposition, chars… | implemented | Implemented: Captures Content-Type from response headers and preserves UTF-8 fil… | tests/integration/contracts_browser.mjs |
-| B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | partial | Partial: Tracks redirects via webRequest.onBeforeRedirect to propagate request c… | tests/integration/contracts_browser.mjs |
+| B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | implemented | Implemented: Tracks redirects via webRequest.onBeforeRedirect. Each hop keeps th… | tests/integration/contracts_browser.mjs |
 | B15 | B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path ex… | partial | Partial: Implements wildcard site exclusion rules (*.domain) and storage setting… | tests/integration/contracts_browser.mjs |
 | B16 | B `qb`: onCreated correlates recent request by URL/time (obs… | implemented | Implemented: Correlates downloads using composite tab ID and URL keys with a 60s… | tests/integration/contracts_browser.mjs |
 | B17 | B `rb/lc/X`: filename listener filters then submits type13, … | implemented | Implemented: Defers filename determination via asynchronous handoff, releases th… | tests/integration/contracts_browser.mjs |
@@ -106,14 +106,14 @@
 | B22 | B `Kc/Bc`: CRLF request/response headers; raw bytes, URL-enc… | implemented | Implemented: Captures URL-encoded form POST bodies up to 1 MiB with repeated fie… | tests/integration/contracts_browser.mjs |
 | B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | partial | Partial: Declares webNavigation permission and collects initiator/documentUrl ac… | tests/integration/contracts_browser.mjs |
 | B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | partial | Partial: Declares proxy permission and provides a basic proxy diagnostic handsha… | tests/integration/contracts_browser.mjs |
-| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | partial | Partial: Content script tracks Alt, Ctrl, Shift and Meta state in `modifierState… | tests/integration/contracts_browser.mjs |
+| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | implemented | Implemented: Content script tracks Alt, Ctrl, Shift and Meta state and clears it… | tests/integration/contracts_browser.mjs |
 | B26 | B `Nb/Mb`, R: configured main-frame registration redirect us… | different | Different: Manifest declares declarativeNetRequest permission, but XDM intention… | tests/integration/contracts_browser.mjs |
 | B27 | B `T/dc`: HTTP/HTTPS/FTP/FTPS plus proprietary registration/… | implemented | Implemented: Restricts interception strictly to valid HTTP(S) protocols; unsuppo… | tests/integration/contracts_browser.mjs |
 | B28 | B `Cb/Ea/pa`: link,image,video context download; page/frame/… | implemented | Implemented: Registers context menus for link, image, media (video/audio), and p… | tests/integration/contracts_browser.mjs |
 | B29 | B `Ea/Eb`, C `Zb`: media/image source can ask DOM anchor loo… | implemented | Implemented: Context menu link downloads query the DOM content script via page.g… | tests/integration/contracts_browser.mjs |
 | B30 | B `Qa/Db/Zb/ec`, C `Xb/nb/N`: selected links and all links c… | implemented | Implemented: Content script `extractLinks` collects http(s) URLs from anchor and… | tests/integration/contracts_browser.mjs |
 | B31 | B `ec`: multi-link type15 initialization, count and batch id… | different | Different: Implements batch.submit native messaging with UUID request IDs and it… | tests/integration/contracts_browser.mjs |
-| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | partial | Partial: Content script `selectionHandler`, run on selectionchange and mouseup, … | tests/integration/contracts_browser.mjs |
+| B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | partial | Partial: Content script `selectionHandler` reports selected text, its bounding r… | tests/integration/contracts_browser.mjs |
 | B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | partial | Partial: Registers a context menu entry for page downloads (xdm-downloads), but … | tests/integration/contracts_browser.mjs |
 | B34 | B `fc`: no host/no links produces browser-side error notific… | implemented | Implemented: Displays a browser notification via chrome.notifications.create whe… | tests/integration/contracts_browser.mjs |
 | B35 | B `Aa/Hc`: direct audio/video, MPEGTS, M4S, HLS/DASH/F4M, su… | implemented | Implemented: Classifies direct media (MP4, WebM, MP3, etc.) and streaming manife… | tests/integration/contracts_browser.mjs |
@@ -123,13 +123,13 @@
 | B39 | D `la/Ma/P/Na/ya`: fetch wrapper and Response text/json/arra… | implemented | Implemented: Injects page_fetch.js at document_start to monitor window.fetch for… | tests/integration/contracts_browser.mjs |
 | B40 | D message1229212978 config dynamically installs/restores wra… | implemented | Implemented: Reports installed hook capabilities and status via hook.status runt… | tests/integration/contracts_browser.mjs |
 | B41 | D message1229212981 property/selector extraction→1229212982;… | implemented | Implemented: Content script `queryElementMetadata` returns declared element prop… | tests/integration/contracts_browser.mjs |
-| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | partial | Partial: Content script defines two versioned site adapters, generic-html5 and e… | tests/integration/contracts_browser.mjs |
+| B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | partial | Partial: Content script has two independent, versioned site adapters (embedded-s… | tests/integration/contracts_browser.mjs |
 | B43 | C `Tb/H/ib`: video/audio/object/embed/source-child associati… | implemented | Implemented: Scans video, audio, and source elements on initial load and observe… | tests/integration/contracts_browser.mjs |
-| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | partial | Partial: Content script `playerRegistry` gives each video or audio element a sta… | tests/integration/contracts_browser.mjs |
+| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | implemented | Implemented: Content script `playerRegistry` gives each video or audio element a… | tests/integration/contracts_browser.mjs |
 | B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | partial | Partial: Suppresses 1x1 tracking pixels using getBoundingClientRect, but lacks f… | tests/integration/contracts_browser.mjs |
 | B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | Partial: Runs content scripts in all frames (all_frames: true), but does not tra… | tests/integration/contracts_browser.mjs |
-| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | Partial: Content script runs DOM inspection behind a 200 ms debounce timer for c… | tests/integration/contracts_browser.mjs |
-| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | Partial: Content script `playerPanel` builds a per-player overlay element with a… | tests/integration/contracts_browser.mjs |
+| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | implemented | Implemented: DOM inspection runs behind a 200 ms debounce for childList/subtree … | tests/integration/contracts_browser.mjs |
+| B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | Partial: Content script `playerPanel` builds a per-player overlay (fixed-positio… | tests/integration/contracts_browser.mjs |
 | B49 | B window listeners and `U/sc/pc/Oa`: window registration6, c… | missing | Missing: Does not register browser window listeners for geometry, fullscreen, DP… | tests/integration/contracts_browser.mjs |
 | B50 | B `ab/xb/Ob/xa`: navigation and history changes refresh site… | implemented | Implemented: Clears tab media catalogs and resets badge counts on navigation via… | tests/integration/contracts_browser.mjs |
 | B51 | C `C/$b/ob` + B `ec`: title from top page/og:title, source c… | implemented | Implemented: Derives human-readable media titles from player element titles, doc… | tests/integration/contracts_browser.mjs |
@@ -178,7 +178,7 @@
 | server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | task.properties: partial; task.add: partial | tests/integration/contracts_behavior.py |
 | single-use-request | A second request may return HTML instead of the file; origin… | partial | browser.fallback: verified-subset; browser.shortcuts: pending; task.add: partial | tests/integration/contracts_behavior.py |
 | stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | media.overlay: pending; task.progress: partial | tests/integration/contracts_behavior.py |
-| synchronization | Synchronization and grabber updates revisit sources, update … | partial | queue.files: partial; grabber.schedule: pending | tests/integration/contracts_behavior.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/queues.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs |
+| synchronization | Synchronization and grabber updates revisit sources, update … | partial | queue.files: partial; grabber.schedule: pending | tests/integration/contracts_behavior.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/queues.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-gui/src/scheduler.rs, crates/xdm-ipc/src/lib.rs |
 | temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | settings.paths: partial; task.resume: partial | tests/integration/contracts_behavior.py |
 | tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | settings.connections: partial | tests/integration/contracts_behavior.py |
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | task.progress: partial; task.completion: pending | tests/integration/contracts_behavior.py |
@@ -251,18 +251,14 @@
 | Q10 | Synchronization repeat/check changed objects | partial | tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_core_queue_contracts.md |
 | Q14 | Completion success/failure/manual-stop rules | partial | tests/integration/completion_actions.py, tests/integration/queue_policies.py | idm_core_queue_contracts.md |
 | B09 | B `Oc` checks competing packaged extension IDs and can disab… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
-| B14 | B `Qb/cb/X`: maintains earlier URL/headers/body across redir… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B15 | B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path ex… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B23 | B `Lc`: walk frame ancestry past about:blank for referrer; p… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B24 | B `bb/Rb/Sb`, host requests20: direct/system/auto/PAC/fixed/… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
-| B25 | B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/byp… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B32 | B `Db/Zb` + C mouse26: selected text can create desktop sele… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B33 | B `nb/Ea` menu5: browser downloads-page link search; erases … | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B42 | C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rule… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
-| B44 | C `R/ib/jb/wb/O`: stable element/site IDs, replacement-playe… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B45 | C `P/Lb/fa`: visibility/opacity/dimensions/clipped ancestors… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B46 | C `Sb/cc`, B `hc/ic/nc`: nested frame IDs/rectangles transla… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
-| B47 | C mutation/resize/intersection observers, 200 ms debounce `W… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | B48 | B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/backg… | partial | tests/integration/contracts_browser.mjs | idm_browser_behavior_contracts.md |
 | address-refresh | Expired task enters a wait-for-new-session/address flow; one… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | all-links-and-clipboard | All-link collection can hide HTML/images/duplicates and use … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
@@ -286,10 +282,10 @@
 | server-name-reconciliation | Redirect/response filename and MIME-derived extension can pr… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | single-use-request | A second request may return HTML instead of the file; origin… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | stream-assembly-fallback | Media part processing can seek a matching frame; muxing has … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
-| synchronization | Synchronization and grabber updates revisit sources, update … | partial | tests/integration/contracts_behavior.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/queues.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-ipc/src/lib.rs | idm_behavior_review.md |
+| synchronization | Synchronization and grabber updates revisit sources, update … | partial | tests/integration/contracts_behavior.py, tests/integration/sync_queues.py, crates/xdm-daemon/src/main.rs, crates/xdm-daemon/src/queues.rs, crates/xdm-daemon/src/sync.rs, crates/xdm-gui/src/scheduler.rs, crates/xdm-ipc/src/lib.rs | idm_behavior_review.md |
 | temporary-storage-cleanup | Final and temporary volumes have separate capacity/file-size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | tls-substitution | Experimental original TLS mode changes a global Windows sett… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | unknown-length-completion | EOF completion includes a notice that a file of unknown size… | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 | updater-integrity | Update metadata/signature/download validation and site-rule … | partial | tests/integration/contracts_behavior.py | idm_behavior_review.md |
 
-**Count: 79**
+**Count: 75**

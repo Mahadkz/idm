@@ -8,10 +8,10 @@
       "missing": 8
     },
     "idm_browser_behavior_contracts.md": {
-      "implemented": 37,
+      "implemented": 41,
       "different": 8,
       "missing": 3,
-      "partial": 14
+      "partial": 10
     },
     "idm_behavior_review.md": {
       "partial": 27,
@@ -850,8 +850,8 @@
       "id": "B14",
       "title": "B `Qb/cb/X`: maintains earlier URL/headers/body across redirects; HTTP301/302/30",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Tracks redirects via webRequest.onBeforeRedirect to propagate request context and bodies, while cross-origin header stripping and redirect method transitions are handled by the engine. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "partial",
+      "current_behavior": "Implemented: Tracks redirects via webRequest.onBeforeRedirect. Each hop keeps the original Referer, page context and method association; 307/308 keep POST and its form body, while 301/302 on POST and 303 become GET and replay no body (the extension never turns a POST into a GET on its own: a POST whose redirect chain was not observed stays in the browser). The final URL (`finalUrl`) is what is submitted, cookies are read for the final origin only, and only User-Agent, Referer and Content-Type are forwarded, so Authorization and Cookie request headers from earlier hops are dropped. Chain context lives in memory with a 60 s TTL, so it is lost if the background worker restarts mid-chain. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -860,7 +860,7 @@
       "id": "B15",
       "title": "B `Fc/Gc/Hc/Y/yc`: host-provided extension/MIME/site/path exclusions, wildcard m",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Implements wildcard site exclusion rules (*.domain) and storage settings, but lacks rule priority ordering, rule match preview, and keyboard force/bypass controls. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Partial: Implements wildcard site exclusion rules (*.domain) and storage settings, plus user-configurable keyboard force/bypass controls (see B25). Still lacks rule priority ordering, rule match preview and independently versioned type rules. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -960,8 +960,8 @@
       "id": "B25",
       "title": "B `rc/Cb/Fb/wb`, C key/mouse31/32/33: host-defined force/bypass key masks and cl",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script tracks Alt, Ctrl, Shift and Meta state in `modifierState` from keydown/keyup listeners and clears it on window blur (tested in both content scripts). No extension code reads `modifierState` to force or bypass download capture. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "partial",
+      "current_behavior": "Implemented: Content script tracks Alt, Ctrl, Shift and Meta state and clears it on window blur and when the tab is hidden. A capture-phase click handler maps the held modifiers (event flags first, tracked state as fallback) to user-configurable combinations stored in `captureKeys` (defaults: Alt+Shift force, Alt bypass; set in the options page; identical or invalid combinations fall back to the defaults). Bypass tells the background to leave the next browser download of that URL alone. Force cancels the click and hands the link to XDM even when the site is excluded, interception is off or the tab is disabled. Private windows are never overridden. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1030,7 +1030,7 @@
       "id": "B32",
       "title": "B `Db/Zb` + C mouse26: selected text can create desktop selection panel; count/t",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script `selectionHandler`, run on selectionchange and mouseup, reports selected text, its bounding client rect and matching link count, and clears state when the selection is empty or collapsed (tested in both content scripts). No desktop selection panel or context-menu integration consumes this state. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Partial: Content script `selectionHandler` reports selected text, its bounding rect and a link count that now includes links inside the selection. The consumer is a context-menu flow: \"Download selected links\" (selection) and \"Download all links\" (page) collect links from the selection frame or every frame, dedupe them, apply the stored `linkFilter` (extension list, hide HTML, hide images) and send them as one `batch.submit` native message `{version:1, requestId:batchId, type:\"batch.submit\", payload:{batchId, count, items:[download.submit payloads with requestId \"<batchId>-<index>\">]}}`. If the host replies with an error (the current native host does not implement `batch.submit` yet) the same items are sent one by one as `download.submit`. There is no on-page selection panel, and the reported rect is frame-local with no DPI scaling or frame-ancestry translation. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1130,7 +1130,7 @@
       "id": "B42",
       "title": "C `Gc/qc/Jc/xb/Ic/lc/mc/oc/nc`: host-version-gated site rules, dynamic player/li",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script defines two versioned site adapters, generic-html5 and embedded-stream, with URL matching and media extraction (tested for shape and lookup only). `refreshUrl` is a stub that returns the same URL with `expired: false`, so expiring streams are not refreshed; the adapters are not used by the inspection path, and there is no host-version gating or auth-expiry reporting. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Partial: Content script has two independent, versioned site adapters (embedded-stream v1, generic-html5 v2) that now drive inspection: each reported media item carries the adapter id and version, adapters needing a newer protocol (`minHostVersion`) are disabled, and signed-URL expiry (`expires`/`exp`/`X-Amz-Expires`) is reported on `page.media`. `refreshUrl` re-reads the live player so a rotated source replaces the stale one and reports `expired`; the background exposes it as `media.refresh` and drops entries on `page.mediaGone`. Remaining gap: the protocol version is a constant rather than negotiated with the host, only two generic adapters exist, player-quality changes are not reported, and refresh works only while the original player is still on the page. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1150,8 +1150,8 @@
       "id": "B44",
       "title": "C `R/ib/jb/wb/O`: stable element/site IDs, replacement-player association using ",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script `playerRegistry` gives each video or audio element a stable ID through a WeakMap and holds the element through a WeakRef; explicit unregister removes the entry and its overlay panel (tested in both content scripts). The MutationObserver removal path that calls the same cleanup is in code but not exercised by the test. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "partial",
+      "current_behavior": "Implemented: Content script `playerRegistry` gives each video or audio element a stable ID through a WeakMap and holds it through a WeakRef. A source change keeps the ID, panel and observers and updates the URL the overlay button submits. Removal, including a player nested in a removed subtree, popstate/hashchange cleanup and pagehide, deletes the entry, removes the overlay, disconnects its intersection and resize observers and reports `page.mediaGone`; a replacement player with the same URL gets its own single overlay. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1180,8 +1180,8 @@
       "id": "B47",
       "title": "C mutation/resize/intersection observers, 200 ms debounce `W/uc`; scroll29/resiz",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script runs DOM inspection behind a 200 ms debounce timer for childList/subtree mutations and src, style and class attribute changes (tested: the timer is set on mutation with a 200 ms delay). Removed-node unregistering is in code but not tested; resize and intersection observers, visibility handling and scroll re-inspection are not implemented. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
-      "status": "partial",
+      "current_behavior": "Implemented: DOM inspection runs behind a 200 ms debounce for childList/subtree mutations and src, style and class attribute changes (src changes are picked up after the debounce). Mutations caused by the extension's own overlay are ignored, so there is no feedback loop and an idle page keeps no timer. Per-player IntersectionObserver and ResizeObserver show, hide and reposition the overlay; scroll and resize realign it without timers; removals and navigation clean up observers and overlays. Scroll realignment is not throttled beyond the browser's own event rate. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "status": "implemented",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
       ]
@@ -1190,7 +1190,7 @@
       "id": "B48",
       "title": "B `ba/Fb/oc/ga/fc`: native panel states hidden/visible/background, delayed hide;",
       "source_doc": "idm_browser_behavior_contracts.md",
-      "current_behavior": "Partial: Content script `playerPanel` builds a per-player overlay element with a \"Download with XDM\" button that sends media.download, and supports show, hide and remove (tested in both content scripts). The panel element is never attached to the page document and its position is updated only when called, so no visible overlay is injected into pages. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
+      "current_behavior": "Partial: Content script `playerPanel` builds a per-player overlay (fixed-position \"Download with XDM\" button, top-right of the player) that is attached to the page document and shown only while its player is connected, at least 40x40 px and inside the viewport; the button submits the player's current URL and is removed with the player. Remaining gap: the panel is a plain page-DOM element (no closed shadow root, so page CSS can restyle it), has no keyboard focus management, no delayed hide and no host acknowledgment or background states. Verified with mocked browser APIs only, not a real browser. [contracts_browser.mjs](../tests/integration/contracts_browser.mjs)",
       "status": "partial",
       "test_refs": [
         "tests/integration/contracts_browser.mjs"
@@ -1688,6 +1688,7 @@
         "crates/xdm-daemon/src/main.rs",
         "crates/xdm-daemon/src/queues.rs",
         "crates/xdm-daemon/src/sync.rs",
+        "crates/xdm-gui/src/scheduler.rs",
         "crates/xdm-ipc/src/lib.rs"
       ]
     },

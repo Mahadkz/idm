@@ -127,12 +127,14 @@ def main():
         # media_audio/media_live use xdm-media example binaries.
         subprocess.run(["cargo", "build", "-p", "xdm-media", "--examples"], cwd=ROOT, check=False)
     results = []
+    explicit = 0  # --skip is a deliberate choice, not a missing prerequisite
     for path in suites:
         selected = (not args.only or path.name in args.only or path.stem in args.only)
         if not selected:
             continue
         if path.name in args.skip or path.stem in args.skip:
             results.append((path.name, "SKIP", 0.0, "skipped by --skip"))
+            explicit += 1
             continue
         reason = prerequisite_problem(path, path.read_text(errors="replace"))
         if reason:
@@ -153,7 +155,7 @@ def main():
         print(name.ljust(width), status.ljust(7), f"{elapsed:6.1f}s", detail)
     counts = {s: sum(1 for r in results if r[1] == s) for s in ("PASS", "FAIL", "TIMEOUT", "SKIP")}
     print("\n" + ", ".join(f"{v} {k}" for k, v in counts.items()))
-    bad = counts["FAIL"] + counts["TIMEOUT"] + (counts["SKIP"] if args.strict else 0)
+    bad = counts["FAIL"] + counts["TIMEOUT"] + ((counts["SKIP"] - explicit) if args.strict else 0)
     if not any(r[1] == "PASS" for r in results) and results:
         bad += 1  # nothing actually ran: never report success
     return 1 if bad else 0

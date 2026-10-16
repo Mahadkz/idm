@@ -369,35 +369,72 @@ pub fn normalize(page_url: &str, json: &serde_json::Value) -> Result<ProbeResult
 
 static CACHE: Mutex<Option<HashMap<String, (Instant, ProbeResult)>>> = Mutex::new(None);
 
-fn cache_get(url: &str) -> Option<ProbeResult> {
-    let guard = CACHE.lock().ok()?;
-    guard.as_ref()?.get(url).filter(|(at, _)| at.elapsed() < CACHE_TTL).map(|(_, result)| result.clone())
+/// Cache key: YouTube watch, shorts, embed, live and youtu.be addresses share one entry per video id
+/// (extra parameters such as `t=` or `list=` do not matter); everything else is keyed by URL.
+pub fn cache_key(url: &str) -> String {
+    youtube_id(url).map(|id| format!("youtube:{id}")).unwrap_or_else(|| url.to_owned())
 }
 
-fn cache_put(url: &str, result: &ProbeResult) {
+fn youtube_id(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").or_else(|| host.strip_prefix("m.")).or_else(|| host.strip_prefix("music.")).unwrap_or(&host);
+    let id = if host == "youtu.be" {
+        parsed.path_segments()?.next().map(str::to_owned)
+    } else if host == "youtube.com" || host == "youtube-nocookie.com" {
+        let mut segments = parsed.path_segments()?;
+        match segments.next()? {
+            "watch" => parsed.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.into_owned()),
+            "shorts" | "embed" | "live" | "v" => segments.next().map(str::to_owned),
+            _ => None,
+        }
+    } else {
+        None
+    }?;
+    (!id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')).then_some(id)
+}
+
+fn cache_get(key: &str) -> Option<ProbeResult> {
+    let guard = CACHE.lock().ok()?;
+    guard.as_ref()?.get(key).filter(|(at, _)| at.elapsed() < CACHE_TTL).map(|(_, result)| result.clone())
+}
+
+fn cache_put(key: &str, result: &ProbeResult) {
     if let Ok(mut guard) = CACHE.lock() {
         let map = guard.get_or_insert_with(HashMap::new);
         map.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
         if map.len() >= 16 {
             map.clear();
         }
-        map.insert(url.to_owned(), (Instant::now(), result.clone()));
+        map.insert(key.to_owned(), (Instant::now(), result.clone()));
     }
 }
 
-/// Probes `page_url`. Results are cached per URL for a few minutes (stream addresses expire) unless
-/// `refresh` is set. Cookies, when given, live in a 0600 file inside a private directory that is
-/// deleted before returning.
-pub fn probe(page_url: &str, cookies: &[ProbeCookie], refresh: bool, proxy: &ProxyArgs, stop: &AtomicBool) -> Result<ProbeResult> {
-    validate_url(page_url)?;
-    if !refresh && let Some(hit) = cache_get(page_url) {
-        return Ok(hit);
+/// True when yt-dlp's error says the video needs a signed-in account (login, age, members, private,
+/// bot check), the only case where forwarding browser cookies can help.
+pub fn needs_login(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    ["sign in", "log in", "login", "your age", "age-restricted", "age restricted", "age verification", "inappropriate for some", "members-only", "members only", "join this channel", "private video", "confirm you", "not a bot", "cookies", "authentication", "premium"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Cookieless first; one retry with cookies only when the first error needs an account. If the retry
+/// also fails, the cookieless error is the one reported (a partial cookie jar can cause its own errors).
+fn probe_ordered(cookies_available: bool, mut run: impl FnMut(bool) -> Result<ProbeResult>) -> Result<ProbeResult> {
+    match run(false) {
+        Ok(result) => Ok(result),
+        Err(first) if cookies_available && needs_login(&first.to_string()) => run(true).map_err(|_| first),
+        Err(first) => Err(first),
     }
+}
+
+fn probe_once(page_url: &str, cookies: Option<&[ProbeCookie]>, proxy: &ProxyArgs, stop: &AtomicBool) -> Result<ProbeResult> {
     let mut args: Vec<String> = ["-J", "--no-playlist", "--no-warnings", "--no-cache-dir"].map(String::from).to_vec();
     args.extend(proxy.args.iter().cloned());
     args.extend(js_runtime_args());
     let dir;
-    if !cookies.is_empty() {
+    if let Some(cookies) = cookies {
         dir = PrivateDir::create()?;
         let file = write_cookie_file(&dir.0, cookies)?;
         args.push("--cookies".into());
@@ -405,9 +442,21 @@ pub fn probe(page_url: &str, cookies: &[ProbeCookie], refresh: bool, proxy: &Pro
     }
     args.push("--".into());
     args.push(page_url.to_owned());
-    let json = run_json(&args, proxy, stop)?;
-    let result = normalize(page_url, &json)?;
-    cache_put(page_url, &result);
+    normalize(page_url, &run_json(&args, proxy, stop)?)
+}
+
+/// Probes `page_url`. Results are cached per URL (per video id for YouTube) for a few minutes (stream
+/// addresses expire) unless `refresh` is set. The first attempt carries no cookies; they are used only for
+/// a retry when yt-dlp reports that an account is needed. Cookies live in a 0600 file inside a private
+/// directory that is deleted before returning.
+pub fn probe(page_url: &str, cookies: &[ProbeCookie], refresh: bool, proxy: &ProxyArgs, stop: &AtomicBool) -> Result<ProbeResult> {
+    validate_url(page_url)?;
+    let key = cache_key(page_url);
+    if !refresh && let Some(hit) = cache_get(&key) {
+        return Ok(hit);
+    }
+    let result = probe_ordered(!cookies.is_empty(), |with_cookies| probe_once(page_url, with_cookies.then_some(cookies), proxy, stop))?;
+    cache_put(&key, &result);
     Ok(result)
 }
 
@@ -562,6 +611,99 @@ mod tests {
         assert_eq!(kinds, [("137", "video"), ("140", "audio"), ("18", "muxed"), ("web", "muxed")]);
         assert!(result.formats[0].filesize_approx);
         assert!(!result.formats[1].filesize_approx);
+    }
+
+    #[test]
+    fn youtube_urls_share_a_cache_key() {
+        let key = cache_key("https://www.youtube.com/watch?v=TTz9NtVHJM4");
+        assert_eq!(key, "youtube:TTz9NtVHJM4");
+        for url in [
+            "https://youtu.be/TTz9NtVHJM4?t=5",
+            "https://www.youtube.com/shorts/TTz9NtVHJM4",
+            "https://m.youtube.com/watch?list=x&v=TTz9NtVHJM4&t=9s",
+            "https://youtube.com/embed/TTz9NtVHJM4",
+        ] {
+            assert_eq!(cache_key(url), key, "{url}");
+        }
+        assert_eq!(cache_key("https://example.com/v?v=1"), "https://example.com/v?v=1");
+    }
+
+    #[test]
+    fn login_errors_are_classified() {
+        for yes in [
+            "yt-dlp failed: [youtube] x: Sign in to confirm you're not a bot",
+            "yt-dlp failed: This video may be inappropriate for some users. Sign in to confirm your age",
+            "yt-dlp failed: Join this channel to get access to members-only content",
+            "yt-dlp failed: Private video. Sign in if you've been granted access",
+            "yt-dlp failed: login required",
+        ] {
+            assert!(needs_login(yes), "{yes}");
+        }
+        for no in ["yt-dlp failed: [youtube] x: The page needs to be reloaded.", "yt-dlp failed: HTTP Error 404", "yt-dlp timed out while reading the page"] {
+            assert!(!needs_login(no), "{no}");
+        }
+    }
+
+    fn fake_result() -> ProbeResult {
+        ProbeResult { page_url: "p".into(), title: "T".into(), duration: None, thumbnail: None, extractor: "x".into(), live: false, formats: Vec::new() }
+    }
+
+    #[test]
+    fn cookies_are_a_retry_only_for_login_errors() {
+        let mut calls = Vec::new();
+        let ok = probe_ordered(true, |c| {
+            calls.push(c);
+            Ok(fake_result())
+        });
+        assert!(ok.is_ok());
+        assert_eq!(calls, [false]);
+
+        calls.clear();
+        let ok = probe_ordered(true, |c| {
+            calls.push(c);
+            if c { Ok(fake_result()) } else { Err("yt-dlp failed: Sign in to confirm your age".into()) }
+        });
+        assert!(ok.is_ok());
+        assert_eq!(calls, [false, true]);
+
+        calls.clear();
+        let err = probe_ordered(true, |c| {
+            calls.push(c);
+            Err(if c { "yt-dlp failed: The page needs to be reloaded." } else { "yt-dlp failed: Sign in to confirm you're not a bot" }.into())
+        })
+        .unwrap_err();
+        assert_eq!(calls, [false, true]);
+        assert!(err.to_string().contains("not a bot"), "{err}");
+
+        calls.clear();
+        assert!(probe_ordered(true, |c| {
+            calls.push(c);
+            Err("yt-dlp failed: HTTP Error 404".into())
+        })
+        .is_err());
+        assert_eq!(calls, [false]);
+    }
+
+    /// A stub yt-dlp that fails with the reload message whenever --cookies is passed.
+    #[cfg(unix)]
+    #[test]
+    fn stub_ytdlp_never_sees_cookies_when_cookieless_works() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = PrivateDir::create().unwrap();
+        let stub = dir.0.join("yt-dlp");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = --cookies ]; then echo 'ERROR: [youtube] abc: The page needs to be reloaded.' >&2; exit 1; fi; done\necho '{\"title\":\"T\",\"extractor_key\":\"Youtube\",\"formats\":[{\"format_id\":\"18\",\"ext\":\"mp4\",\"protocol\":\"https\",\"url\":\"https://x/m\",\"vcodec\":\"avc1\",\"acodec\":\"mp4a\",\"height\":360}]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        set_configured(Some(stub.to_string_lossy().into_owned()));
+        let cookie = ProbeCookie { name: "a".into(), value: "b".into(), domain: ".youtube.com".into(), path: "/".into(), secure: true, expires: None };
+        let proxy = ProxyArgs { args: Vec::new(), env: Vec::new() };
+        let stop = AtomicBool::new(false);
+        let result = probe("https://www.youtube.com/watch?v=stubstub001", &[cookie], true, &proxy, &stop);
+        set_configured(None);
+        assert_eq!(result.unwrap().formats.len(), 1);
     }
 
     #[cfg(unix)]

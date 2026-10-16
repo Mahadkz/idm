@@ -467,6 +467,21 @@ function ytOnPlayer(response) {
     for (const entry of playerRegistry.entries.values()) if (entry.videoId === model.videoId) api?.runtime?.sendMessage({ type: "page.protected", url: `https://www.youtube.com/watch?v=${model.videoId}` })?.catch?.(() => {});
   }
   if (typeof document !== "undefined" && document.documentElement) debouncedInspect(document.documentElement, 50);
+  ytPrefetch(model.videoId);
+}
+
+// Start the yt-dlp probe as soon as a YouTube video is shown so the menu is usually ready on click. The
+// background script keeps one probe per video; the daemon caches the result.
+var ytPrefetched = null;
+var ytPrefetchTimer = null;
+function ytPrefetch(videoId) {
+  if (!videoId || ytPrefetched === videoId || typeof api === "undefined" || !api?.runtime?.sendMessage) return;
+  ytPrefetched = videoId;
+  if (ytPrefetchTimer) clearTimeout(ytPrefetchTimer);
+  ytPrefetchTimer = setTimeout(() => {
+    ytPrefetchTimer = null;
+    try { const r = api.runtime.sendMessage({ type: "video.ytdlp", pageUrl: `https://www.youtube.com/watch?v=${videoId}`, prefetch: true }); r?.catch?.(() => {}); } catch {}
+  }, 600);
 }
 
 var lastVideoMenu = [];

@@ -1,8 +1,8 @@
-// Page-context (MAIN world) half of the YouTube adapter. It observes the page's own /youtubei/v1/player
-// traffic and the player element, and answers the content script's "resolve" requests by asking YouTube's
-// own player endpoint, same-origin and with the page's own session data, for stream addresses. Nothing
-// here fetches or executes remote code, and nothing leaves the page except postMessage to the content
-// script. Other sites: this file does nothing.
+// Page-context (MAIN world) half of the YouTube adapter. It only observes the page's own
+// /youtubei/v1/player traffic and the player element so the content script knows which video is playing
+// and whether it is downloadable at all (not live, DRM or blocked). It requests nothing itself: formats
+// come from yt-dlp. Nothing leaves the page except postMessage to the content script. Other sites: this
+// file does nothing.
 (function () {
   if (typeof window === "undefined" || window.__xdmVideoHook) return;
   if (!/(^|\.)youtube(?:-nocookie)?\.com$/i.test(location.hostname)) return;
@@ -96,43 +96,9 @@
   }
   document.addEventListener("loadedmetadata", () => fromPage(), true);
 
-  // 3. Resolution: ask YouTube's player endpoint, as the page itself would, with a client profile whose
-  // responses carry plain stream addresses. Tried in order until one yields addresses.
-  const CLIENTS = [
-    { name: "ANDROID", client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 30, osName: "Android", osVersion: "11", hl: "en" } },
-    { name: "IOS", client: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82", hl: "en" } },
-    { name: "MWEB", client: { clientName: "MWEB", clientVersion: "2.20250311.03.00", hl: "en" } }
-  ];
-
-  async function resolve(videoId) {
-    if (!idRe.test(videoId || "")) return { ok: false, reason: "bad video id" };
-    const cfg = window.ytcfg;
-    const get = key => { try { return cfg?.get?.(key); } catch { return undefined; } };
-    const key = get("INNERTUBE_API_KEY");
-    const visitor = get("VISITOR_DATA") || get("INNERTUBE_CONTEXT")?.client?.visitorData;
-    let last = "no stream addresses offered";
-    for (const { name, client } of CLIENTS) {
-      try {
-        const context = { client: { ...client, ...(visitor ? { visitorData: visitor } : {}) } };
-        const body = { context, videoId, contentCheckOk: true, racyCheckOk: true,
-          playbackContext: { contentPlaybackContext: { html5Preference: "HTML5_PREF_WANTS", signatureTimestamp: get("STS") || undefined } } };
-        const res = await nativeFetch(`/youtubei/v1/player?prettyPrint=false${key ? `&key=${encodeURIComponent(key)}` : ""}`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin"
-        });
-        const json = await res.json();
-        const status = json?.playabilityStatus?.status;
-        const formats = [...(json?.streamingData?.formats || []), ...(json?.streamingData?.adaptiveFormats || [])];
-        if (status === "OK" && formats.some(f => f.url)) return { ok: true, response: slim(json, name) };
-        last = json?.playabilityStatus?.reason || status || last;
-      } catch (error) { last = String(error).slice(0, 120); }
-    }
-    return { ok: false, reason: last };
-  }
-
   window.addEventListener("message", event => {
     const m = event.data;
     if (event.source !== window || !m || m.xdmVideo !== 1) return;
-    if (m.type === "resolve") resolve(m.videoId).then(r => post("resolved", { requestId: m.requestId, ...r }));
     if (m.type === "hello") fromPage();
   });
   post("ready", {});

@@ -59,7 +59,7 @@ Downloads go to `<data directory>/downloads` by default, with one folder per cat
 - Choosing an entry opens XDM's **Download File Info** dialog with the file name taken from the video title. If no XDM window is open, the download is queued directly instead.
 - The extension toolbar popup shows the same list for the current tab.
 - Videos with DRM protection never get the button. Live streams are not offered.
-- YouTube: XDM offers only the qualities YouTube actually serves to the end. In the current state of the site that is **MP4 360p** for videos longer than about a minute (YouTube withholds its higher qualities from anything but its own player), and every quality for very short videos. Separate video and audio streams are downloaded together and merged with ffmpeg into one MP4, WEBM or MKV file. The menu says when higher qualities are hidden.
+- YouTube and other video sites: XDM uses the optional [yt-dlp](https://github.com/yt-dlp/yt-dlp) program to list a page's formats (install it with `pipx install yt-dlp`, `brew install yt-dlp` or your package manager and keep it on your `PATH`; `xdm-cli daemon ytdlp-path ABSOLUTE_FILE` points XDM at a specific copy). Click the player's "Download this video" button, wait for "Getting formats…", and pick an entry such as "MP4 1080p 60fps" or "M4A 129 kbps". On sites with their own direct, HLS or DASH links those entries stay and a "More formats…" row asks yt-dlp. Separate video and audio streams are downloaded together and merged with ffmpeg; formats XDM cannot fetch itself are downloaded by yt-dlp. YouTube needs a JavaScript runtime that yt-dlp can use (deno, node, quickjs or bun); XDM passes the first one it finds. If yt-dlp is missing the menu says so and shows how to install it. Your browser's cookies for that site are given to yt-dlp through a private temporary file for the format lookup only (never in private windows).
 
 ### Batch download
 
@@ -78,6 +78,7 @@ Downloads go to `<data directory>/downloads` by default, with one folder per cat
 - **Tasks → Add media download…** The window is titled **Add media** and has **Manifest URL** and **Headers (opt)** fields, then lists the available tracks.
 - Browser extensions detect HLS and DASH manifests and media URLs on a page. Open the extension popup to see them and queue a chosen video and audio pair.
 - Media jobs need `ffprobe` and `ffmpeg` on your `PATH`. XDM does not bundle them. Without them, media jobs fail.
+- Video-page downloads (YouTube and similar sites) additionally use `yt-dlp` when it is installed; it is optional and XDM works without it.
 - Media output is an MP4 copy of the selected streams, when the codecs allow it. Audio-only and subtitle outputs are also available from the CLI.
 
 ## 4. The main window
@@ -186,7 +187,7 @@ Press Ctrl-C to pause. Run the same command again to resume. `--restart` discard
 - Tasks: `list`, `submit`, `submit-post`, `info`, `pause`, `resume`, `remove`, `remove ID --delete-partial`, `redownload`, `restart`, `move`, `priority`, `rate`, `limit`, `bulk`, `move-file`, `partials`, `partials-delete`.
 - Lists: `preview`, `import LIST ABSOLUTE_DIR [--start] [--allow-duplicates]`, `batch 'URL[001-100]' ABSOLUTE_DIR`, `playlist`, `export NEW_FILE json|urls`.
 - Queues: `queue create|rename|remove|enable|disable|limit|assign|start|stop|start-one|stop-one|events|at|stop-at|retry|schedule|sync-interval|check|completion`, and `completion status|cancel`.
-- Bandwidth and proxy: `limit-global`, `limit-host`, `host-connections`, `quota`, `bandwidth`, `proxy`, `proxy-login`, `proxy-login-clear`, `stall-timeout`, `temp-dir`.
+- Bandwidth and proxy: `limit-global`, `limit-host`, `host-connections`, `quota`, `bandwidth`, `proxy`, `proxy-login`, `proxy-login-clear`, `stall-timeout`, `temp-dir`, `ytdlp-path`.
 - Grabber and categories: `grab`, `grab-status`, `grab-save`, `grab-projects`, `grab-remove`, `category list|save|remove`.
 - Logins: `login list|save|remove|insecure`, `auth`.
 - Support: `version`, `diagnostics OUT.zip|OUT_DIR` (section 11).

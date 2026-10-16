@@ -385,6 +385,7 @@ fn execute_plan(
 fn execute_once(paths: &Paths, plan: &Plan, rules: &[xdm_categories::CategoryRule]) -> Outcome {
     let offer = plan.offer.as_ref().filter(|offer| offer.url == plan.url);
     let media_mode = offer.and_then(|offer| match (&offer.audio_url, offer.stream_video) {
+        _ if offer.ytdlp_format.is_some() => offer.ytdlp_format.clone().map(|format| MediaMode::YtDlp { format }),
         (Some(audio_url), _) => Some(MediaMode::Adaptive { audio_url: audio_url.clone() }),
         (None, Some(video)) => Some(MediaMode::Video { video, audio: offer.stream_audio, subtitles: Vec::new() }),
         _ => None,
@@ -687,7 +688,7 @@ fn open_file_info_ex(ctx: &DialogCtx, url: String, typed_destination: Option<Str
             apply_category_path(&window, &st);
         });
     }
-    if offer.as_ref().is_none_or(|offer| offer.audio_url.is_none() && offer.stream_video.is_none() && offer.size.is_none()) {
+    if offer.as_ref().is_none_or(|offer| offer.audio_url.is_none() && offer.stream_video.is_none() && offer.ytdlp_format.is_none() && offer.size.is_none()) {
         spawn_probe(window.as_weak(), url.clone());
     }
 

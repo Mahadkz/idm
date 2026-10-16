@@ -205,7 +205,6 @@ function getRecentRequest(url, tabId) {
 
 function remember(details) {
   if (!validHttp(details.url) || details.tabId < 0) return;
-  if (details.url.includes("googlevideo.com/videoplayback")) captureVideoplayback(details);
   const tabKey = `${details.tabId}:${details.url}`;
   const previous = recent.get(tabKey) || recent.get(details.url) || {};
   const headers = (details.requestHeaders || []).filter(h => /^(referer|user-agent)$/i.test(h.name));
@@ -350,7 +349,6 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   media.delete(tabId);
-  capturedStreams.delete(tabId);
   protectedUrls.delete(tabId);
   disabledTabs.delete(tabId);
   for (const [key, entry] of bodies) if (entry.tabId === tabId) bodies.delete(key);
@@ -360,8 +358,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 function onTabUpdated(tabId, change) {
   if (change?.status === "loading" && change?.url) {
     media.delete(tabId);
-    capturedStreams.delete(tabId);
-    protectedUrls.delete(tabId);
+      protectedUrls.delete(tabId);
     chrome.action.setBadgeText?.({ tabId, text: "" });
   }
 }
@@ -742,25 +739,6 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
 // Page-video support (YouTube adapter and captured HLS/DASH menus). Content scripts send a selection; this
 // side re-validates it and builds the native message itself.
-const capturedStreams = new Map(); // tabId -> Map(itag -> raw format-like entry)
-const EXPIRY_GRACE_MS = 30000;
-
-// Plain GET videoplayback requests made by the page's own player: the whole-stream address (chunk parameters
-// stripped) of an itag. YouTube's web player now uses POST (SABR) requests, which carry no itag and are not recorded.
-function captureVideoplayback(details) {
-  if (typeof XdmVideo === "undefined" || details.tabId < 0 || details.method !== "GET") return;
-  let params;
-  try { params = new URL(details.url).searchParams; } catch { return; }
-  const itag = Number(params.get("itag"));
-  const mime = params.get("mime");
-  const whole = XdmVideo.wholeStreamUrl(details.url);
-  if (!whole || !Number.isInteger(itag) || !/^(video|audio)\//.test(mime || "")) return;
-  const list = capturedStreams.get(details.tabId) || new Map();
-  list.set(itag, { itag, mimeType: mime, url: whole, contentLength: params.get("clen") || undefined, capturedAt: Date.now() });
-  capturedStreams.set(details.tabId, list);
-  while (list.size > 60) list.delete(list.keys().next().value);
-}
-
 // Sends a video-panel choice to the XDM window's Download File Info dialog; a host without that message, or
 // with no window open, queues it directly instead (`fallback`).
 async function offerVideo(payload, fallback) {
@@ -773,61 +751,50 @@ async function offerVideo(payload, fallback) {
   return fallback();
 }
 
-// Is the stream served at `at` (a byte offset deep into the file)? One-byte ranged GETs, cached for a while;
-// anything but 206 (googlevideo answers 403 once the address is past its integrity-free allowance) is a no.
-const verifyCache = new Map();
-async function streamServed(url, at) {
-  const key = `${url}#${at}`;
-  const hit = verifyCache.get(key);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.ok;
-  const controller = typeof AbortController === "function" ? new AbortController() : null;
-  const timer = setTimeout(() => controller?.abort(), 8000);
-  let ok = null;
+// Formats of the page's video from yt-dlp, through the native host and daemon. The site's cookies go along
+// (to the local native host only, never into a page or a log) so members-only and age-gated videos work.
+// Stream addresses stay in the daemon; the menu only gets what it needs to list the formats.
+async function probeVideoPage(pageUrl, tab) {
+  if (tab?.incognito) return { ok: false, reason: "private window" };
+  let url;
+  try { const u = new URL(pageUrl); u.hash = ""; url = u.toString(); } catch { return { ok: false, reason: "invalid page address" }; }
+  if (!validHttp(url) || url.length > 2048) return { ok: false, reason: "invalid page address" };
+  const cookies = (await chrome.cookies.getAll({ url }).catch(() => [])).slice(0, 2000)
+    .map(c => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: !!c.secure, expirationDate: c.expirationDate }));
+  let reply;
   try {
-    const response = await fetch(url, { headers: { Range: `bytes=${at}-${at}` }, signal: controller?.signal, credentials: "omit" });
-    ok = response.status === 206;
-    controller?.abort();
-  } catch { ok = null; } finally { clearTimeout(timer); }
-  if (ok !== null) { verifyCache.set(key, { ok, at: Date.now() }); while (verifyCache.size > 400) verifyCache.delete(verifyCache.keys().next().value); }
-  return ok;
+    reply = await chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId: crypto.randomUUID(), type: "video.probe", payload: { url, cookies } });
+  } catch (error) {
+    return { ok: false, reason: /unsupported/i.test(String(error)) ? "This XDM version cannot list formats; update XDM." : String(error) };
+  }
+  if (reply?.type === "error") return { ok: false, reason: "This XDM version cannot list formats; update XDM." };
+  if (!reply?.ok) return { ok: false, reason: String(reply?.reason || "probe failed").slice(0, 400), missing: !!reply?.ytdlpMissing };
+  const { ok, title, duration, live, formats } = reply;
+  return { ok, title, duration, live, formats };
 }
 
-async function verifyStreams(items) {
-  if (typeof XdmVideo === "undefined" || !Array.isArray(items)) return { ok: false };
-  const wanted = items.slice(0, 60).filter(item => item && XdmVideo.validateChoice({ type: "direct", video: { url: item.url }, filename: "x" }).ok);
-  const results = {};
-  await Promise.all(wanted.map(async item => {
-    const served = await streamServed(item.url, Math.max(0, Math.floor(Number(item.at) || 0)));
-    if (served !== null) results[item.url] = served;
-  }));
-  return { ok: true, results };
+// A yt-dlp menu entry: the page address plus yt-dlp format ids. The daemon resolves the stream addresses
+// when the download runs, fetches plain https formats with its own engine and merges with ffmpeg.
+async function submitYtdlpChoice(choice, pageUrl, tab) {
+  const check = XdmVideo.validateYtdlpChoice(choice);
+  if (!check.ok) return { accepted: false, reason: check.reason };
+  let url;
+  try { const u = new URL(pageUrl); u.hash = ""; url = u.toString(); } catch { return { accepted: false, reason: "invalid page address" }; }
+  if (!validHttp(url) || url.length > 2048) return { accepted: false, reason: "invalid page address" };
+  const payload = {
+    url, mode: "ytdlp", ytdlpFormat: choice.ytdlpFormat, container: choice.container, filenameHint: choice.filename,
+    title: String(choice.title || "").slice(0, 300), size: Number.isFinite(choice.size) ? choice.size : undefined,
+    source: { pageUrl: url }, requestContext: { headers: [{ name: "User-Agent", value: navigator.userAgent }], referrer: url }
+  };
+  return offerVideo(payload, () => chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId: crypto.randomUUID(), type: "media.submit", payload }));
 }
 
 async function submitVideoChoice(choice, pageUrl, tab) {
   if (tab?.incognito) return { accepted: false, reason: "private window" };
   if (choice?.site === "generic") return submitGenericChoice(choice, pageUrl, tab);
   if (typeof XdmVideo === "undefined") return { accepted: false, reason: "video support unavailable" };
-  const check = XdmVideo.validateChoice(choice);
-  if (!check.ok) return { accepted: false, reason: check.reason };
-  const parts = [choice.video, choice.audio].filter(Boolean);
-  const now = Date.now();
-  for (const part of parts) {
-    const expiry = XdmVideo.expiryOf(part.url);
-    if (expiry && expiry <= now + EXPIRY_GRACE_MS) return { accepted: false, expired: true, reason: "stream address expired; open the menu again to refresh it" };
-  }
-  const referrer = "https://www.youtube.com/";
-  const headers = [{ name: "User-Agent", value: navigator.userAgent }];
-  const adaptive = choice.type === "adaptive";
-  const primary = adaptive ? choice.video : parts[0];
-  const payload = {
-    url: primary.url, filenameHint: choice.filename, title: choice.title || "", mime: primary.mime || "",
-    size: Number.isFinite(choice.size) ? choice.size : undefined, source: { pageUrl: pageUrl || undefined },
-    requestContext: { headers, referrer }
-  };
-  if (adaptive) Object.assign(payload, { audioUrl: choice.audio.url, mode: "adaptive", container: choice.container });
-  return offerVideo(payload, () => adaptive
-    ? chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId: crypto.randomUUID(), type: "media.submit", payload })
-    : submit(primary.url, choice.filename, referrer, undefined, primary.mime || "", tab?.id));
+  if (choice?.site === "ytdlp") return submitYtdlpChoice(choice, pageUrl, tab);
+  return { accepted: false, reason: "unknown selection type" };
 }
 
 // Direct files and HLS/DASH renditions captured for the tab (any site).
@@ -954,14 +921,10 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     pageVideoOptions(sender?.tab?.id ?? message.tabId, message).then(reply, error => reply({ ok: false, reason: String(error) }));
     return true;
   }
-  if (message?.type === "video.verify") {
-    verifyStreams(message.items).then(reply, () => reply({ ok: false }));
+  if (message?.type === "video.ytdlp") {
+    if (sender?.id !== undefined && sender.id !== chrome.runtime.id) { reply({ ok: false, reason: "not allowed" }); return false; }
+    probeVideoPage(String(message.pageUrl || sender?.tab?.url || ""), sender?.tab).then(reply, error => reply({ ok: false, reason: String(error) }));
     return true;
-  }
-  if (message?.type === "video.captured") {
-    const tabId = sender?.tab?.id ?? message.tabId;
-    reply({ formats: [...(capturedStreams.get(tabId)?.values() || [])] });
-    return false;
   }
   if (message?.type === "page.media") {
     addMedia(sender.tab?.id ?? -1, message.url, message.mime || "", sender.tab?.url || "", message.title || "", message);

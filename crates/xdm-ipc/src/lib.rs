@@ -429,6 +429,23 @@ pub enum Command {
     OfferDownload { offer: DownloadOffer },
     /// GUI poll: returns and clears pending offers, and marks a GUI as present.
     TakeOffers,
+    /// Asks the optional external yt-dlp for the formats of a web page's video
+    /// (`Reply::probe`). Cookies go to a private temporary file, never argv.
+    /// `refresh` bypasses the short per-URL cache.
+    MediaProbe {
+        page_url: String,
+        #[serde(default)]
+        cookies: Vec<ProbeCookie>,
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// Sets (absolute path) or clears (`None`) the configured yt-dlp program.
+    SetYtdlpPath {
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Reads the configured yt-dlp path and where it resolves (`Reply::ytdlp_path`, `ytdlp_found`).
+    GetYtdlpPath,
     /// Version handshake: the reply carries `daemon_version` and `protocol`.
     Hello { client_version: String, protocol: u32 },
 }
@@ -441,7 +458,8 @@ impl std::fmt::Debug for Command {
             match value {
                 serde_json::Value::Object(map) => {
                     for (key, entry) in map.iter_mut() {
-                        if key.to_ascii_lowercase().contains("password") {
+                        let lower = key.to_ascii_lowercase();
+                        if lower.contains("password") || lower == "cookies" {
                             *entry = serde_json::Value::String("<hidden>".into());
                         } else {
                             mask(entry);
@@ -527,6 +545,13 @@ pub enum MediaMode {
     Adaptive {
         audio_url: String,
     },
+    /// A video page handled through yt-dlp: the task URL is the page URL and `format` is a
+    /// yt-dlp selector of one format id or `video+audio`. The daemon resolves the formats when
+    /// the task runs (stream addresses expire), fetches plain https formats with its own
+    /// engine and lets yt-dlp itself download anything else.
+    YtDlp {
+        format: String,
+    },
 }
 
 impl MediaMode {
@@ -542,7 +567,7 @@ impl MediaMode {
                 _ => &[],
             },
             Self::Subtitles { .. } => &["srt", "vtt"],
-            Self::Adaptive { .. } => &["mp4", "mkv", "webm"],
+            Self::Adaptive { .. } | Self::YtDlp { .. } => &["mp4", "mkv", "webm", "m4a", "opus", "mp3", "ogg", "aac"],
         }
     }
 
@@ -1010,6 +1035,93 @@ pub struct Reply {
     /// nobody is polling and the submitter should queue the download itself.
     #[serde(default)]
     pub offered: bool,
+    /// `MediaProbe` result.
+    #[serde(default)]
+    pub probe: Option<ProbeResult>,
+    /// Configured yt-dlp path (`GetYtdlpPath`/`SetYtdlpPath`).
+    #[serde(default)]
+    pub ytdlp_path: Option<String>,
+    /// True when yt-dlp resolves to a runnable program (`GetYtdlpPath`).
+    #[serde(default)]
+    pub ytdlp_found: bool,
+    /// Set on a `MediaProbe` failure caused by yt-dlp not being installed.
+    #[serde(default)]
+    pub ytdlp_missing: bool,
+}
+
+/// One browser cookie handed to yt-dlp through a private temporary file.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub secure: bool,
+    /// Unix seconds; `None` is a session cookie.
+    #[serde(default)]
+    pub expires: Option<i64>,
+}
+
+impl std::fmt::Debug for ProbeCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProbeCookie({}, <hidden>)", self.domain)
+    }
+}
+
+/// One format of a probed page, normalized from yt-dlp's `-J` output.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProbeFormat {
+    pub id: String,
+    pub ext: String,
+    /// `muxed` (video and audio), `video` (video only) or `audio` (audio only).
+    pub kind: String,
+    #[serde(default)]
+    pub width: Option<u64>,
+    #[serde(default)]
+    pub height: Option<u64>,
+    #[serde(default)]
+    pub fps: Option<f64>,
+    #[serde(default)]
+    pub vcodec: String,
+    #[serde(default)]
+    pub acodec: String,
+    #[serde(default)]
+    pub tbr: Option<f64>,
+    #[serde(default)]
+    pub abr: Option<f64>,
+    #[serde(default)]
+    pub filesize: Option<u64>,
+    /// True when `filesize` is yt-dlp's estimate.
+    #[serde(default)]
+    pub filesize_approx: bool,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Stream address and request headers: used by the daemon, stripped before they reach a browser.
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProbeResult {
+    pub page_url: String,
+    pub title: String,
+    #[serde(default)]
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+    #[serde(default)]
+    pub extractor: String,
+    #[serde(default)]
+    pub live: bool,
+    pub formats: Vec<ProbeFormat>,
 }
 
 /// A download a browser extension wants the user to confirm in the Download File
@@ -1038,6 +1150,9 @@ pub struct DownloadOffer {
     pub stream_video: Option<usize>,
     #[serde(default)]
     pub stream_audio: Option<usize>,
+    /// yt-dlp format selector: `url` is the page URL and the download is a `MediaMode::YtDlp` job.
+    #[serde(default)]
+    pub ytdlp_format: Option<String>,
 }
 
 /// One download segment: inclusive byte range and the next byte to write.
@@ -1104,6 +1219,10 @@ impl Reply {
             segments: Vec::new(),
             offers: Vec::new(),
             offered: false,
+            probe: None,
+            ytdlp_path: None,
+            ytdlp_found: false,
+            ytdlp_missing: false,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -1142,6 +1261,10 @@ impl Reply {
             segments: Vec::new(),
             offers: Vec::new(),
             offered: false,
+            probe: None,
+            ytdlp_path: None,
+            ytdlp_found: false,
+            ytdlp_missing: false,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -1189,6 +1312,10 @@ impl Reply {
             segments: Vec::new(),
             offers: Vec::new(),
             offered: false,
+            probe: None,
+            ytdlp_path: None,
+            ytdlp_found: false,
+            ytdlp_missing: false,
         }
     }
 }
@@ -1811,5 +1938,16 @@ mod tests {
         json.as_object_mut().unwrap().remove("bulk");
         let reply: Reply = serde_json::from_value(json).unwrap();
         assert!(reply.bulk.is_none());
+    }
+
+    #[test]
+    fn probe_cookies_never_appear_in_debug_output() {
+        let cookie = ProbeCookie { name: "SID".into(), value: "very-secret".into(), domain: ".a.test".into(), path: "/".into(), secure: true, expires: None };
+        let command = Command::MediaProbe { page_url: "https://a.test/v".into(), cookies: vec![cookie.clone()], refresh: false };
+        assert!(!format!("{command:?}").contains("very-secret"));
+        assert!(!format!("{cookie:?}").contains("very-secret"));
+        // Older clients omit the new fields.
+        let parsed: Command = serde_json::from_str(r#"{"type":"media_probe","payload":{"page_url":"https://a.test/v"}}"#).unwrap();
+        assert!(matches!(parsed, Command::MediaProbe { cookies, refresh: false, .. } if cookies.is_empty()));
     }
 }

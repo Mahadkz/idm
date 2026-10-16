@@ -21,6 +21,7 @@ mod schedule;
 pub(crate) mod test_helpers;
 mod task_files;
 mod transfer_lists;
+mod ytdlp;
 
 use categories::*;
 use grabber::*;
@@ -1023,6 +1024,7 @@ impl Service {
             .filter(|value| STALL_TIMEOUT_RANGE.contains(value))
             .unwrap_or(xdm_http::DEFAULT_STALL_TIMEOUT.as_secs());
         let temp_dir = get_setting(&db, "temp_dir")?.filter(|dir| Path::new(dir).is_absolute());
+        ytdlp::set_configured(get_setting(&db, "ytdlp_path")?);
         // Site logins live beside the task database; in-memory test databases
         // keep the store in memory only.
         let credentials = credentials::Store::load(
@@ -1385,6 +1387,57 @@ impl Service {
                 reply.temp_dir = path;
                 Ok(reply)
             }
+            Command::MediaProbe { page_url, cookies, refresh } => {
+                let (proxy, login) = {
+                    let inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
+                    (
+                        serde_json::from_str::<Proxy>(&inner.proxy).unwrap_or_default(),
+                        inner.credentials.proxy_login().map(|stored| xdm_http::Login {
+                            username: stored.username.clone(),
+                            password: stored.password.clone(),
+                            allow_insecure: false,
+                        }),
+                    )
+                };
+                // The lock is released: yt-dlp may run for most of a minute.
+                let args = ytdlp::proxy_args(&proxy, login.as_ref());
+                let stop = AtomicBool::new(false);
+                match ytdlp::probe(&page_url, &cookies, refresh, &args, &stop) {
+                    Ok(result) => {
+                        let mut reply = Reply::accepted(0);
+                        reply.probe = Some(result);
+                        Ok(reply)
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let mut reply = Reply::error(message.clone());
+                        reply.ytdlp_missing = ytdlp::is_missing(&message);
+                        Ok(reply)
+                    }
+                }
+            }
+            Command::SetYtdlpPath { path } => {
+                let path = path.filter(|path| !path.is_empty());
+                if let Some(path) = &path
+                    && (!Path::new(path).is_absolute() || !Path::new(path).is_file())
+                {
+                    return Ok(Reply::error("the yt-dlp location must be an absolute path to an existing file"));
+                }
+                let inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
+                set_setting(&inner.db, "ytdlp_path", path.as_deref().unwrap_or(""))?;
+                drop(inner);
+                ytdlp::set_configured(path.clone());
+                let mut reply = Reply::accepted(0);
+                reply.ytdlp_path = path;
+                reply.ytdlp_found = ytdlp::locate().is_some();
+                Ok(reply)
+            }
+            Command::GetYtdlpPath => {
+                let mut reply = Reply::accepted(0);
+                reply.ytdlp_path = ytdlp::configured();
+                reply.ytdlp_found = ytdlp::locate().is_some();
+                Ok(reply)
+            }
             Command::GetTempDir => {
                 let inner = self
                     .inner
@@ -1522,7 +1575,7 @@ impl Service {
                 let id = next_task_id(&inner.db)?;
                 let rules = load_rules(&inner.db)?;
                 let category = match &mode {
-                    MediaMode::Video { .. } | MediaMode::Live { .. } | MediaMode::Adaptive { .. } => "Video".to_string(),
+                    MediaMode::Video { .. } | MediaMode::Live { .. } | MediaMode::Adaptive { .. } | MediaMode::YtDlp { .. } => "Video".to_string(),
                     MediaMode::Audio { .. } => xdm_categories::classify_with(
                         &rules,
                         std::path::Path::new(&output)
@@ -2072,7 +2125,7 @@ impl Service {
                     // Only live recordings have progress to report while they run.
                     let media = match stored_mode.as_ref() {
                         Some(MediaMode::Live { .. }) => Some(Arc::new(MediaLive::new())),
-                        Some(MediaMode::Adaptive { .. }) => Some(Arc::new(MediaLive::new_transfer())),
+                        Some(MediaMode::Adaptive { .. } | MediaMode::YtDlp { .. }) => Some(Arc::new(MediaLive::new_transfer())),
                         _ => None,
                     };
                     let kind = if kind == "media" {
@@ -2310,6 +2363,24 @@ impl Service {
                                 &live,
                             ),
                         },
+                        MediaMode::YtDlp { format } => match work.media.clone() {
+                            None => Err("yt-dlp media task without a progress holder".into()),
+                            Some(live) => run_ytdlp_task(
+                                AdaptiveJob {
+                                    video_url: &work.url,
+                                    audio_url: "",
+                                    output: &work.output,
+                                    proxy: &work.proxy,
+                                    login: &work.login,
+                                    proxy_login: &work.proxy_login,
+                                    stop: &work.stop,
+                                    stall_timeout: work.stall_timeout,
+                                    policy: work.policy,
+                                },
+                                format,
+                                &live,
+                            ),
+                        },
                         MediaMode::Live {
                             video,
                             audio,
@@ -2507,6 +2578,119 @@ fn run_adaptive(
     let _ = std::fs::remove_file(&video_path);
     let _ = std::fs::remove_file(&audio_path);
     Ok(())
+}
+
+/// A page handled through yt-dlp. The formats are resolved now (their addresses expire): plain https
+/// formats go through the segmented engine (two streams are merged with ffmpeg); anything else, or a
+/// selection the probe no longer lists, is downloaded by yt-dlp itself. A 403 re-probes once.
+fn run_ytdlp_task(work: AdaptiveJob<'_>, selector: &str, live: &Arc<MediaLive>) -> Result<()> {
+    let ids: Vec<&str> = selector.split('+').collect();
+    let args = ytdlp::proxy_args(work.proxy, work.proxy_login.as_ref());
+    for attempt in 0..2 {
+        let probe = ytdlp::probe(work.video_url, &[], attempt > 0, &args, work.stop)?;
+        let picked: Vec<&xdm_ipc::ProbeFormat> =
+            ids.iter().filter_map(|id| probe.formats.iter().find(|format| format.id == *id)).collect();
+        let direct = picked.len() == ids.len()
+            && picked.iter().all(|format| matches!(format.protocol.as_str(), "https" | "http") && format.url.len() <= 8192)
+            && (picked.len() == 1 || (picked[0].kind == "video" && picked[1].kind == "audio"));
+        let total: Option<u64> = picked.iter().map(|format| format.filesize).sum();
+        if let Some(total) = total {
+            live.report_total(total);
+        }
+        xdm_ipc::ops::log_info(&format!(
+            "yt-dlp job {}: {} via {}",
+            ids.join("+"),
+            probe.extractor,
+            if direct { "the segmented engine" } else { "yt-dlp itself" }
+        ));
+        if !direct {
+            return ytdlp::download(
+                work.video_url,
+                selector,
+                work.output,
+                total,
+                &args,
+                work.stop,
+                &|done, size| {
+                    live.report(done);
+                    if let Some(size) = size {
+                        live.report_total(size);
+                    }
+                },
+            );
+        }
+        let result = if picked.len() == 2 {
+            run_adaptive(
+                AdaptiveJob { video_url: &picked[0].url, audio_url: &picked[1].url, ..work },
+                &picked[0].headers,
+                live,
+            )
+        } else {
+            run_single_stream(&work, &picked[0].url, &picked[0].headers, live)
+        };
+        match result {
+            Err(error) if attempt == 0 && error.to_string().contains("403") && !work.stop.load(Ordering::Relaxed) => {
+                // Expired address: drop the stale partials so the fresh one starts clean.
+                xdm_ipc::ops::log_info(&format!("yt-dlp job {selector}: stream address refused ({error}); probing again"));
+                for path in adaptive_stage_paths(work.output) {
+                    let (part, meta) = xdm_http::partial_paths(&path, None);
+                    for stale in [part, meta, path] {
+                        let _ = std::fs::remove_file(stale);
+                    }
+                }
+                let (part, meta) = xdm_http::partial_paths(work.output, None);
+                let _ = std::fs::remove_file(part);
+                let _ = std::fs::remove_file(meta);
+            }
+            other => return other,
+        }
+    }
+    Err("stream address kept failing after a refresh".into())
+}
+
+fn run_single_stream(
+    work: &AdaptiveJob<'_>,
+    url: &str,
+    headers: &[(String, String)],
+    live: &Arc<MediaLive>,
+) -> Result<()> {
+    let control = Arc::new(TransferControl::new(None)?);
+    let finished = Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let (control, live, finished) = (control.clone(), live.clone(), finished.clone());
+        thread::spawn(move || {
+            while !finished.load(Ordering::Relaxed) {
+                let progress = control.progress();
+                live.report(progress.downloaded);
+                if let Some(total) = progress.total {
+                    live.report_total(total);
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+        })
+    };
+    let cap = range_cap_for(url);
+    let result = download_ex(
+        Options {
+            url: url.to_owned(),
+            output: work.output.to_path_buf(),
+            connections: 8,
+            headers: headers.to_vec(),
+            proxy: work.proxy.clone(),
+            login: work.login.clone(),
+            proxy_login: work.proxy_login.clone(),
+            stop: work.stop.clone(),
+            max_request_bytes: cap,
+            ..Options::default()
+        },
+        control,
+        work.stall_timeout,
+        ResumePolicy { same_site_redirects: cap.is_some(), ..work.policy },
+        None,
+    );
+    finished.store(true, Ordering::Relaxed);
+    let _ = sampler.join();
+    result.map(|_| ())
 }
 
 /// The engine flips the shared stop flag when it aborts a failing transfer;

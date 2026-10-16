@@ -2,7 +2,6 @@
 // a quality menu and validate what the menu hands to the background script. The same file ships in the
 // Chromium and Firefox extensions; tests/integration/contracts_browser.mjs keeps the copies identical.
 var XdmVideo = (() => {
-  const GOOGLEVIDEO = /(^|\.)googlevideo\.com$/i;
   const WATCH_HOSTS = /^(?:www\.|m\.|music\.)?youtube(?:-nocookie)?\.com$/i;
   const MAX_FORMATS = 200;
   const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
@@ -31,13 +30,6 @@ var XdmVideo = (() => {
     return { type: m[1].toLowerCase(), subtype: m[2].toLowerCase(), codecs };
   }
 
-  function expiryOf(url) {
-    try {
-      const n = Number(new URL(url).searchParams.get("expire"));
-      return Number.isFinite(n) && n > 0 ? n * 1000 : null;
-    } catch { return null; }
-  }
-
   // One entry of streamingData.formats / adaptiveFormats. Ciphered formats (no plain URL) are kept but
   // flagged: this extension never runs a site's signature code outside the page.
   function normalizeFormat(raw, muxedList) {
@@ -50,8 +42,6 @@ var XdmVideo = (() => {
     const acodec = mime.type === "audio" ? (mime.codecs[0] || "") : (mime.codecs[1] || "");
     const kind = mime.type === "audio" ? "audio" : (muxedList || acodec ? "muxed" : "video");
     const ext = mime.type === "audio" ? (mime.subtype === "mp4" ? "m4a" : mime.subtype) : mime.subtype;
-    let n = false;
-    try { n = !!url && new URL(url).searchParams.has("n"); } catch {}
     return {
       itag, kind, mime: `${mime.type}/${mime.subtype}`, ext, vcodec, acodec,
       width: num(raw.width), height: num(raw.height), fps: num(raw.fps),
@@ -62,7 +52,6 @@ var XdmVideo = (() => {
       lang: raw.audioTrack?.displayName || null,
       approxMs: num(raw.approxDurationMs),
       url, ciphered: !url && !!(raw.signatureCipher || raw.cipher),
-      throttled: n, expiresAt: url ? expiryOf(url) : null,
       drm: !!(raw.drmFamilies || raw.drmTrackType)
     };
   }
@@ -93,22 +82,6 @@ var XdmVideo = (() => {
     };
   }
 
-  // Adds URLs from a later source (another client's response, or URLs the player itself requested) to the
-  // formats of a model that has none for them. Existing URLs are kept.
-  function mergeUrls(model, extra, { addUnknown = true } = {}) {
-    if (!model) return model;
-    const byItag = new Map();
-    for (const f of extra || []) if (f && f.url && !byItag.has(f.itag)) byItag.set(f.itag, f);
-    const formats = model.formats.map(f => {
-      if (f.url) return f;
-      const e = byItag.get(f.itag);
-      return e ? { ...f, url: e.url, ciphered: false, throttled: e.throttled, expiresAt: e.expiresAt, size: e.size || f.size, approxMs: e.approxMs || f.approxMs } : f;
-    });
-    const known = new Set(formats.map(f => f.itag));
-    if (addUnknown) for (const e of byItag.values()) if (!known.has(e.itag)) formats.push(e);
-    return { ...model, formats, hasUrls: formats.some(f => f.url) };
-  }
-
   function safeName(title, fallback = "video") {
     let name = String(title || "").replace(/[\u0000-\u001f\u007f<>:"/\\|?*‪-‮]/g, " ").replace(/\s+/g, " ").trim();
     name = name.replace(/[. ]+$/g, "").slice(0, 120).trim();
@@ -125,120 +98,99 @@ var XdmVideo = (() => {
     return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
   }
 
-  const family = f => /^avc1|^h264/i.test(f.vcodec) ? "mp4" : /^vp0?9|^vp8/i.test(f.vcodec) ? "webm" : /^av01/i.test(f.vcodec) ? "av1" : "other";
-  const better = (a, b) => (b.bitrate || 0) - (a.bitrate || 0) || (b.size || 0) - (a.size || 0);
+  const kbps = f => Math.round(f.abr || f.tbr || 0);
+  const sizeOf = (...parts) => {
+    if (parts.some(p => !p || !p.filesize)) return { size: null, approx: false };
+    return { size: parts.reduce((n, p) => n + p.filesize, 0), approx: parts.some(p => p.filesizeApprox) };
+  };
+  const FAMILY = { avc: /^(avc1|h264)/i, vp9: /^vp0?[89]/i, av1: /^av01/i };
+  const familyOf = f => FAMILY.avc.test(f.vcodec) ? "avc" : FAMILY.vp9.test(f.vcodec) ? "vp9" : FAMILY.av1.test(f.vcodec) ? "av1" : "other";
+  const direct = f => f.protocol === "https" || f.protocol === "http";
+  const byQuality = (a, b) => (direct(b) - direct(a)) || (b.tbr || 0) - (a.tbr || 0) || (b.filesize || 0) - (a.filesize || 0);
+  const audioCodecName = f => /opus/i.test(f.acodec) ? "Opus" : /mp4a|aac/i.test(f.acodec) ? (f.ext === "m4a" ? "M4A" : "AAC") : /mp3/i.test(f.acodec) ? "MP3" : /vorbis/i.test(f.acodec) ? "Vorbis" : f.ext.toUpperCase();
+  const FORMAT_ID = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
+  const CONTAINERS = ["mp4", "mkv", "webm", "m4a", "opus", "mp3", "ogg", "aac"];
 
-  function bestAudio(audios, ext) {
-    return audios.filter(a => a.ext === ext).sort(better)[0] || null;
-  }
-
-  // The IDM-style list: video qualities (largest first) as MP4/WEBM, then audio-only. Video-only adaptive
-  // formats are paired with the best stereo audio of the matching codec family so the merge needs no
-  // transcoding; muxed formats download as one file. Formats without a plain URL are omitted.
-  function buildMenu(model, now = Date.now()) {
-    if (!model || !model.playable) return [];
-    const usable = model.formats.filter(f => f.url && (!f.expiresAt || f.expiresAt > now));
-    const audios = usable.filter(f => f.kind === "audio" && !f.isDrc && f.audioDefault && (f.channels || 2) <= 2);
-    const stem = safeName(model.title);
-    for (const f of usable) f.durationSec = model.durationSec;
+  // The IDM-style list from a yt-dlp probe: best combined options first ("MP4 1080p 60fps" ...), each
+  // naming the yt-dlp format ids it needs, then audio-only entries. Video-only formats pair with the best
+  // audio whose codec fits the container (H.264/AV1 with AAC into MP4, VP9 with Opus into WEBM); anything
+  // else falls back to MKV. Live streams get no menu.
+  function buildYtdlpMenu(probe) {
+    if (!probe || probe.live || !Array.isArray(probe.formats)) return [];
+    const usable = probe.formats.filter(f => f && FORMAT_ID.test(String(f.id)) && !/drc/i.test(`${f.id} ${f.note || ""}`));
+    const stem = safeName(probe.title);
+    const audios = usable.filter(f => f.kind === "audio").sort((a, b) => byQuality(a, b) || (b.abr || 0) - (a.abr || 0));
+    const bestAudio = (re) => audios.filter(a => re.test(a.acodec)).sort((x, y) => (!!x.language - !!y.language) || byQuality(x, y))[0] || null;
+    const m4a = bestAudio(/mp4a|aac/i), opus = bestAudio(/opus|vorbis/i);
     const out = [];
     const seen = new Set();
-    const push = o => { if (!seen.has(o.key)) { seen.add(o.key); out.push(o); } };
-
-    for (const f of usable.filter(f => f.kind === "muxed")) {
-      const ext = f.ext === "mp4" ? "mp4" : f.ext;
-      const q = `${f.height || "?"}p${f.fps > 30 ? f.fps : ""}`;
-      push({ key: `${ext}:${f.height}:${f.fps > 30 ? f.fps : 30}`, type: "direct", ext, container: ext, height: f.height || 0, fps: f.fps || 0,
-        label: `${ext.toUpperCase()} ${q}`, size: f.size, video: pick(f), audio: null, filename: `${stem} [${q}].${ext}` });
+    const push = o => {
+      if (seen.has(o.key) || out.length >= 40) return;
+      seen.add(o.key);
+      const quality = o.height ? `${o.height}p${o.fps > 30 ? ` ${Math.round(o.fps)}fps` : ""}` : (o.note || "video");
+      const tag = `${o.height ? o.height + "p" : (o.note || "video")}${o.fps > 30 ? Math.round(o.fps) : ""}`;
+      o.label = o.audioOnly ? o.audioLabel : `${o.container.toUpperCase()} ${quality}`;
+      o.detail = o.size ? `${o.approx ? "~" : ""}${fmtSize(o.size)}` : "";
+      o.filename = `${stem} [${o.audioOnly ? o.audioTag : tag}].${o.container}`;
+      out.push(o);
+    };
+    for (const f of usable.filter(f => f.kind === "muxed").sort(byQuality)) {
+      const s = sizeOf(f);
+      push({ key: `m:${f.ext}:${f.height}:${f.fps > 30 ? f.fps : 30}`, ytdlpFormat: f.id, container: f.ext, ext: f.ext, height: f.height || 0, fps: f.fps || 0,
+        note: f.note, size: s.size, approx: s.approx });
     }
-    const videos = usable.filter(f => f.kind === "video").sort((a, b) => (b.height || 0) - (a.height || 0) || (b.fps || 0) - (a.fps || 0) || better(a, b));
-    const heights = new Map();
-    for (const v of videos) {
-      const k = `${v.height}:${v.fps > 30 ? v.fps : 30}`;
-      if (!heights.has(k)) heights.set(k, []);
-      heights.get(k).push(v);
+    const groups = new Map();
+    for (const v of usable.filter(f => f.kind === "video")) {
+      const k = `${v.height || v.note || v.id}:${v.fps > 30 ? v.fps : 30}`;
+      if (!groups.has(k)) groups.set(k, { height: v.height || 0, fps: v.fps || 0, formats: [] });
+      groups.get(k).formats.push(v);
     }
-    for (const [k, group] of heights) {
-      const byFamily = {};
-      for (const v of group) { const fam = family(v); if (!byFamily[fam]) byFamily[fam] = v; }
+    for (const [k, g] of groups) {
+      const best = {};
+      for (const v of g.formats.sort(byQuality)) { const fam = familyOf(v); if (!best[fam]) best[fam] = v; }
       const picks = [];
-      if (byFamily.mp4) picks.push(byFamily.mp4);
-      if (byFamily.webm) picks.push(byFamily.webm);
-      if (!picks.length && byFamily.av1) picks.push(byFamily.av1);
-      if (!picks.length && byFamily.other) picks.push(byFamily.other);
+      if (best.avc) picks.push(best.avc);
+      if (best.vp9) picks.push(best.vp9);
+      if (!best.avc && best.av1) picks.push(best.av1);
+      if (!picks.length) for (const v of Object.values(best)) { picks.push(v); break; }
       for (const v of picks) {
-        const fam = family(v);
-        const m4a = bestAudio(audios, "m4a"), webm = bestAudio(audios, "webm");
-        const webmFirst = fam === "webm";
-        const a = webmFirst ? (webm || m4a) : (m4a || webm);
+        const webmFirst = familyOf(v) === "vp9";
+        const a = webmFirst ? (opus || m4a) : (m4a || opus);
         if (!a) continue;
-        const container = fam === "webm" && a.ext === "webm" ? "webm" : (fam !== "webm" && a.ext === "m4a" ? "mp4" : "mkv");
-        const q = `${v.height}p${v.fps > 30 ? v.fps : ""}`;
-        push({ key: `${container}:${k}`, type: "adaptive", ext: container, container, height: v.height || 0, fps: v.fps || 0,
-          label: `${container.toUpperCase()} ${q}`, size: v.size && a.size ? v.size + a.size : null,
-          video: pick(v), audio: pick(a), filename: `${stem} [${q}].${container}` });
+        const container = webmFirst && a === opus && /webm/i.test(v.ext) ? "webm" : (!webmFirst && a === m4a && /mp4|m4v/i.test(v.ext) ? "mp4" : "mkv");
+        const s = sizeOf(v, a);
+        push({ key: `a:${container}:${k}`, ytdlpFormat: `${v.id}+${a.id}`, container, ext: container, height: g.height, fps: g.fps, note: v.note, size: s.size, approx: s.approx });
       }
     }
-    out.sort((a, b) => b.height - a.height || b.fps - a.fps || (a.type === "direct" ? -1 : 1) - (b.type === "direct" ? -1 : 1));
+    out.sort((a, b) => b.height - a.height || b.fps - a.fps);
     const seenAudio = new Set();
-    for (const a of audios.slice().sort(better)) {
-      const kbps = Math.round((a.bitrate || 0) / 1000);
-      const key = `${a.ext}:${a.itag}`;
-      if (seenAudio.has(key) || seenAudio.size >= 4) continue;
-      seenAudio.add(key);
-      const label = `${a.ext.toUpperCase()} ${kbps ? kbps + " kbps" : "audio"}`;
-      out.push({ key: `a:${key}`, type: "direct", ext: a.ext, container: a.ext, height: 0, fps: 0, audioOnly: true,
-        label, size: a.size, video: null, audio: pick(a), filename: `${stem} [${kbps || "audio"}k].${a.ext}`, url: a.url });
+    for (const a of audios) {
+      const label = `${audioCodecName(a)} ${kbps(a) ? kbps(a) + " kbps" : "audio"}`;
+      if (seenAudio.has(label) || seenAudio.size >= 4) continue;
+      seenAudio.add(label);
+      const s = sizeOf(a);
+      push({ key: `o:${a.id}`, ytdlpFormat: a.id, container: a.ext, ext: a.ext, height: 0, fps: 0, audioOnly: true, audioLabel: label,
+        audioTag: kbps(a) ? `${kbps(a)}k` : "audio", size: s.size, approx: s.approx });
     }
-    for (const o of out) {
-      o.detail = fmtSize(o.size);
-      o.id = o.key;
-    }
-    return out;
+    return out.map(o => ({
+      key: o.key, label: o.label, detail: o.detail, audioOnly: !!o.audioOnly, height: o.height, container: o.container,
+      choice: { site: "ytdlp", type: "ytdlp", ytdlpFormat: o.ytdlpFormat, container: o.container, filename: o.filename, title: String(probe.title || "").slice(0, 300), size: o.size || undefined }
+    }));
   }
 
-  // Where to test whether a stream is served to the end: its last byte when the length is known, otherwise
-  // 90% of the way through the size its bitrate and duration imply. YouTube cuts addresses obtained without
-  // its integrity proof after about a minute of media, which shows up as a 403 deep into the file.
-  function probeOffset(f, durationSec) {
-    if (f.size) return f.size - 1;
-    const seconds = f.approxMs ? f.approxMs / 1000 : durationSec;
-    return f.bitrate && seconds ? Math.floor(f.bitrate / 8 * seconds * 0.9) : 0;
-  }
-
-  function pick(f) { return { itag: f.itag, url: f.url, size: f.size, ext: f.ext, mime: f.mime, expiresAt: f.expiresAt, probeAt: probeOffset(f, f.durationSec) }; }
-
-  // What the background script accepts from a content script for a page-video download: every URL must be
-  // an https googlevideo URL (the only hosts a YouTube adapter may hand to the daemon), the container must be
-  // one the daemon merges, and the file name must be a plain name.
-  function validateChoice(choice) {
+  // What the background script accepts from a content script for a yt-dlp download: one or two plain format
+  // ids, a container the daemon accepts and a plain file name. The page address is checked separately.
+  function validateYtdlpChoice(choice) {
     const bad = reason => ({ ok: false, reason });
-    if (!choice || typeof choice !== "object") return bad("no selection");
-    const okUrl = u => {
-      try { const p = new URL(u); return p.protocol === "https:" && !p.username && !p.password && GOOGLEVIDEO.test(p.hostname) && u.length <= 8192; } catch { return false; }
-    };
-    const parts = [choice.video, choice.audio].filter(Boolean);
-    if (!parts.length || !parts.every(p => okUrl(p.url))) return bad("stream address is not a YouTube media address");
-    if (choice.type === "adaptive" && !(choice.video && choice.audio)) return bad("adaptive selection needs video and audio");
-    if (choice.type === "adaptive" && !["mp4", "webm", "mkv"].includes(choice.container)) return bad("unsupported container");
-    if (choice.type !== "adaptive" && choice.type !== "direct") return bad("unknown selection type");
+    if (!choice || typeof choice !== "object" || choice.site !== "ytdlp") return bad("no selection");
+    const ids = String(choice.ytdlpFormat || "").split("+");
+    if (ids.length < 1 || ids.length > 2 || !ids.every(id => FORMAT_ID.test(id))) return bad("invalid format selection");
+    if (!CONTAINERS.includes(choice.container)) return bad("unsupported container");
     const name = String(choice.filename || "");
     if (!name || name.length > 200 || /[\\/:*?"<>|\u0000-\u001f]/.test(name)) return bad("invalid file name");
     return { ok: true };
   }
 
-  // URLs the page's own player requested (plain GET videoplayback): strip the parameters that address one
-  // chunk so the URL addresses the whole stream.
-  const CHUNK_PARAMS = ["range", "rn", "rbuf", "ump", "sabr", "srfvp"];
-  function wholeStreamUrl(url) {
-    let u;
-    try { u = new URL(url); } catch { return null; }
-    if (!GOOGLEVIDEO.test(u.hostname) || u.pathname !== "/videoplayback") return null;
-    for (const p of CHUNK_PARAMS) u.searchParams.delete(p);
-    return u.toString();
-  }
-
-  return { ytVideoId, parseMime, normalizeFormat, normalizePlayerResponse, mergeUrls, buildMenu, validateChoice,
-    wholeStreamUrl, safeName, fmtSize, expiryOf, googlevideo: GOOGLEVIDEO };
+  return { ytVideoId, parseMime, normalizeFormat, normalizePlayerResponse, buildYtdlpMenu, validateYtdlpChoice, safeName, fmtSize };
 })();
 if (typeof globalThis !== "undefined") globalThis.XdmVideo = XdmVideo;

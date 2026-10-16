@@ -434,12 +434,10 @@ if (typeof document !== "undefined" && api?.runtime?.getManifest?.().manifest_ve
   } catch {}
 }
 
-// Page-video state for the YouTube adapter. The page script (page_video.js, main world) posts the page's own
-// player responses; formats arrive without addresses (YouTube serves the web player over SABR), so addresses are
-// resolved on demand by asking the page script, and refreshed when they are close to expiring.
-var ytState = { videoId: null, model: null, merged: null, resolvedAt: 0, pending: null, error: "", requestSeq: 0 };
-var YT_REFRESH_MARGIN_MS = 10 * 60 * 1000;
-var YT_RESOLVE_TIMEOUT_MS = 20000;
+// Page-video state for the YouTube adapter. The page script (page_video.js, main world) only reports the
+// page's own player response: which video is playing and whether it is downloadable at all. The formats
+// themselves come from yt-dlp (see ytdlpMenu); no stream address is ever taken from the page.
+var ytState = { videoId: null, model: null };
 
 function ytPostToPage(message) {
   try { if (typeof window !== "undefined" && typeof window.postMessage === "function") window.postMessage({ xdmVideo: 1, ...message }, location.origin); } catch {}
@@ -462,7 +460,7 @@ function ytOnPlayer(response) {
   const previous = ytState.model;
   // A later response for the same video may carry more formats (or addresses); keep the richer one.
   if (previous && previous.videoId === model.videoId && previous.formats.length > model.formats.length && !model.hasUrls) return;
-  if (!previous || previous.videoId !== model.videoId) { ytState.merged = null; ytState.resolvedAt = 0; ytState.error = ""; }
+  if (!previous || previous.videoId !== model.videoId) ytState.videoId = null;
   ytState.videoId = model.videoId;
   ytState.model = model;
   if (model.drm) {
@@ -471,79 +469,23 @@ function ytOnPlayer(response) {
   if (typeof document !== "undefined" && document.documentElement) debouncedInspect(document.documentElement, 50);
 }
 
-function ytMinExpiry(model) {
-  const times = (model?.formats || []).filter(f => f.url && f.expiresAt).map(f => f.expiresAt);
-  return times.length ? Math.min(...times) : Infinity;
-}
-
-// Resolves stream addresses through the page script. Reuses a fresh result; asks again when the addresses
-// are close to (or past) their `expire` time: the "refresh download address" step, done before the request is
-// handed to XDM rather than after a failed one.
-function ytEnsureResolved(force = false) {
-  const base = ytState.model;
-  if (!base) return Promise.resolve(null);
-  const fresh = ytState.merged && ytState.merged.hasUrls && ytState.merged.videoId === base.videoId && ytMinExpiry(ytState.merged) - Date.now() > YT_REFRESH_MARGIN_MS;
-  if (fresh && !force) return Promise.resolve(ytState.merged);
-  if (ytState.pending) return ytState.pending;
-  const requestId = `${Date.now()}-${++ytState.requestSeq}`;
-  const videoId = base.videoId;
-  ytState.pending = new Promise(resolve => {
-    let timer = null;
-    const done = value => {
-      if (timer) clearTimeout(timer);
-      pendingResolves.delete(requestId);
-      ytState.pending = null;
-      resolve(value);
-    };
-    pendingResolves.set(requestId, reply => {
-      if (reply?.ok && reply.response) {
-        const resolved = XdmVideo.normalizePlayerResponse(reply.response);
-        let merged = XdmVideo.mergeUrls(ytState.model && ytState.model.videoId === videoId ? ytState.model : base, resolved ? resolved.formats : []);
-        ytState.error = merged.hasUrls ? "" : "YouTube did not offer downloadable streams for this video.";
-        ytState.merged = merged;
-        ytState.resolvedAt = Date.now();
-        // Addresses the page's own player requested (plain GET videoplayback) fill any itag still missing one.
-        done(merged);
-      } else {
-        ytState.error = reply?.reason ? `YouTube did not offer downloadable streams: ${reply.reason}` : "YouTube did not offer downloadable streams for this video.";
-        done(null);
-      }
-    });
-    timer = setTimeout(() => { ytState.error = "Timed out waiting for YouTube's player."; done(null); }, YT_RESOLVE_TIMEOUT_MS);
-    ytPostToPage({ type: "resolve", videoId, requestId });
-  });
-  return ytState.pending;
-}
-var pendingResolves = new Map();
 var lastVideoMenu = [];
 
-async function ytMenu() {
-  let merged = await ytEnsureResolved();
-  if (merged && api?.runtime?.sendMessage) {
-    const captured = await api.runtime.sendMessage({ type: "video.captured", videoId: merged.videoId }).catch(() => null);
-    if (captured?.formats?.length) {
-      merged = XdmVideo.mergeUrls(merged, captured.formats.map(f => XdmVideo.normalizeFormat(f)).filter(Boolean), { addUnknown: false });
-    }
-  }
-  let options = merged ? XdmVideo.buildMenu(merged) : [];
-  if (!options.length) return { options: [], note: ytState.error || "YouTube did not offer downloadable streams for this video." };
-  // Only formats that are served to the end are offered (see probeOffset in video_core.js).
-  let footnote = "";
-  const verdict = await api.runtime.sendMessage({ type: "video.verify", items: [...new Map(options.flatMap(o => [o.video, o.audio]).filter(Boolean).map(p => [p.url, { url: p.url, at: p.probeAt }])).values()] }).catch(() => null);
-  if (verdict?.ok) {
-    const served = verdict.results || {};
-    const complete = options.filter(o => [o.video, o.audio].filter(Boolean).every(p => served[p.url] === true));
-    if (complete.length < options.length) footnote = complete.length ? "Higher qualities are hidden: YouTube only serves them to its own player." : "";
-    if (!complete.length) return { options: [], note: "YouTube only serves this video's streams to its own player (integrity check); no complete download address is available." };
-    options = complete;
-  }
+// Asks the background script (and through the native host, the daemon and yt-dlp) for the formats of this
+// page's video. Every entry names the yt-dlp format ids it needs; the daemon resolves the addresses when the
+// download runs.
+async function ytdlpMenu(title) {
+  const pageUrl = typeof location !== "undefined" ? location.href : "";
+  const reply = await api.runtime.sendMessage({ type: "video.ytdlp", pageUrl, title: title || (typeof document !== "undefined" ? document.title : "") });
+  if (!reply?.ok) return { options: [], note: reply?.missing ? reply.reason : `Could not get formats: ${reply?.reason || "no answer from XDM"}` };
+  const entries = XdmVideo.buildYtdlpMenu(reply);
+  if (!entries.length) return { options: [], note: reply.live ? "Live streams cannot be downloaded from here." : "yt-dlp found no downloadable formats for this page." };
   return {
-    footnote,
-    options: options.map(choice => ({
-      label: choice.label,
-      detail: choice.detail,
-      audioOnly: !!choice.audioOnly,
-      run: () => api.runtime.sendMessage({ type: "video.download", choice: { ...choice, site: "youtube", title: merged.title }, pageUrl: typeof location !== "undefined" ? location.href : "" })
+    options: entries.map(entry => ({
+      label: entry.label,
+      detail: entry.detail,
+      audioOnly: !!entry.audioOnly,
+      run: () => api.runtime.sendMessage({ type: "video.download", choice: entry.choice, pageUrl })
     }))
   };
 }
@@ -553,7 +495,6 @@ if (typeof window !== "undefined" && window.addEventListener) {
     const m = event?.data;
     if (!m || m.xdmVideo !== 1 || (event.source !== undefined && event.source !== window)) return;
     if (m.type === "player") ytOnPlayer(m.response);
-    else if (m.type === "resolved") pendingResolves.get(m.requestId)?.(m);
     else if (m.type === "ready") ytPostToPage({ type: "hello" });
   });
 }
@@ -583,8 +524,9 @@ function probeStreams(player) {
 // HLS/DASH variants, one entry per resolution) plus the player's own source address.
 async function genericMenu(info) {
   const reply = await api.runtime.sendMessage({ type: "video.options", playerUrl: info.url, title: info.title || document.title, pageUrl: typeof location !== "undefined" ? location.href : "" });
-  if (!reply?.ok || !reply.options?.length) return { options: [], note: reply?.reason || "No downloadable formats found for this video yet." };
+  if (!reply?.ok || !reply.options?.length) return { options: [], moreFormats: true, note: reply?.reason || "No downloadable formats found for this video yet." };
   return {
+    moreFormats: true,
     options: reply.options.map(option => ({
       label: option.label,
       detail: option.detail,
@@ -722,45 +664,71 @@ var playerPanel = (() => {
     const clear = () => { while (menu.children?.length) menu.removeChild(menu.children[0]); };
     clear();
     menu.appendChild(text("head", "Download this video"));
-    const status = text("note", "Loading qualities…");
+    const status = text("note", panel.mediaInfo?.kind === "page-video" ? "Getting formats…" : "Loading qualities…");
     menu.appendChild(status);
     const info = panel.mediaInfo || {};
+    const draw = result => {
+      clear();
+      menu.appendChild(text("head", "Download this video"));
+      if (!result.options.length) menu.appendChild(text("note", result.note || "Nothing to download."));
+      if (result.footnote) menu.appendChild(text("note", result.footnote));
+      const note = text("note", "");
+      note.style.display = "none";
+      for (const option of result.options) {
+        const row = doc.createElement("button");
+        row.className = "opt";
+        row.type = "button";
+        row.setAttribute?.("role", "menuitem");
+        const label = doc.createElement("div");
+        label.textContent = option.label;
+        row.appendChild(label);
+        if (option.detail) { const size = doc.createElement("span"); size.textContent = option.detail; row.appendChild(size); }
+        row.onclick = async event => {
+          event?.stopPropagation?.();
+          event?.preventDefault?.();
+          note.style.display = "block";
+          note.textContent = "Sending to XDM…";
+          let reply;
+          try { reply = await option.run(); } catch (error) { reply = { accepted: false, reason: String(error?.message || error) }; }
+          const accepted = reply?.accepted || reply?.ok === true;
+          note.textContent = accepted ? "Added to XDM" : `Could not hand off: ${reply?.reason || "unknown error"}`;
+          if (accepted) setTimeout(() => closeMenu(playerId), 1500);
+        };
+        menu.appendChild(row);
+      }
+      if (result.moreFormats) {
+        const more = doc.createElement("button");
+        more.className = "opt more";
+        more.type = "button";
+        more.setAttribute?.("role", "menuitem");
+        const label = doc.createElement("div");
+        label.textContent = "More formats…";
+        more.appendChild(label);
+        const hint = doc.createElement("span");
+        hint.textContent = "yt-dlp";
+        more.appendChild(hint);
+        more.onclick = async event => {
+          event?.stopPropagation?.();
+          event?.preventDefault?.();
+          clear();
+          menu.appendChild(text("head", "Download this video"));
+          menu.appendChild(text("note", "Getting formats…"));
+          let more;
+          try { more = await ytdlpMenu(info.title); } catch (error) { more = { options: [], note: `Could not get formats: ${error?.message || error}` }; }
+          if (part.menu === menu) draw(more);
+        };
+        menu.appendChild(more);
+      }
+      menu.appendChild(note);
+    };
     let result;
     try {
-      result = info.kind === "page-video" ? await ytMenu() : await genericMenu(info);
+      result = info.kind === "page-video" ? await ytdlpMenu(info.title) : await genericMenu(info);
     } catch (error) {
       result = { options: [], note: `Could not list qualities: ${error?.message || error}` };
     }
     if (part.menu !== menu) return null;
-    clear();
-    menu.appendChild(text("head", "Download this video"));
-    if (!result.options.length) menu.appendChild(text("note", result.note || "Nothing to download."));
-    if (result.footnote) menu.appendChild(text("note", result.footnote));
-    const note = text("note", "");
-    note.style.display = "none";
-    for (const option of result.options) {
-      const row = doc.createElement("button");
-      row.className = "opt";
-      row.type = "button";
-      row.setAttribute?.("role", "menuitem");
-      const label = doc.createElement("div");
-      label.textContent = option.label;
-      row.appendChild(label);
-      if (option.detail) { const size = doc.createElement("span"); size.textContent = option.detail; row.appendChild(size); }
-      row.onclick = async event => {
-        event?.stopPropagation?.();
-        event?.preventDefault?.();
-        note.style.display = "block";
-        note.textContent = "Sending to XDM…";
-        let reply;
-        try { reply = await option.run(); } catch (error) { reply = { accepted: false, reason: String(error?.message || error) }; }
-        const accepted = reply?.accepted || reply?.ok === true;
-        note.textContent = accepted ? "Added to XDM" : `Could not hand off: ${reply?.reason || "unknown error"}`;
-        if (accepted) setTimeout(() => closeMenu(playerId), 1500);
-      };
-      menu.appendChild(row);
-    }
-    menu.appendChild(note);
+    draw(result);
     return menu;
   }
 
@@ -1133,7 +1101,7 @@ if (api?.runtime?.onMessage?.addListener) {
     if (msg?.type === "page.videoMenu") {
       const entry = [...playerRegistry.entries.values()].find(item => !item.protected);
       if (!entry) { sendResponse({ options: [] }); return false; }
-      (entry.kind === "page-video" ? ytMenu() : genericMenu(entry)).then(result => {
+      (entry.kind === "page-video" ? ytdlpMenu(entry.title) : genericMenu(entry)).then(result => {
         lastVideoMenu = result.options;
         sendResponse({ options: result.options.map((o, key) => ({ key, label: o.label, detail: o.detail })), note: result.note });
       }, () => sendResponse({ options: [] }));

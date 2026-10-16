@@ -40,6 +40,9 @@ with open(os.path.join(state, "calls.jsonl"), "a") as handle:
     handle.write(json.dumps(log) + "\n")
 url = args[-1]
 origin = os.environ["FAKE_ORIGIN"]
+if "-J" in args and "login" in url and "--cookies" not in args:
+    sys.stderr.write("ERROR: [fake] Sign in to confirm your age\n")
+    sys.exit(1)
 if "-J" in args:
     counter = os.path.join(state, "probes-" + hashlib.sha1(url.encode()).hexdigest()[:10])
     n = (int(open(counter).read()) if os.path.exists(counter) else 0) + 1
@@ -241,15 +244,19 @@ def main():
 
             # 5. Cookies: private 0600 file in a private directory, gone afterwards, never on argv or in logs.
             cookie = {"name": "SID", "value": COOKIE_VALUE, "domain": ".video.test", "path": "/", "secure": True, "expires": 1900000000}
-            reply = probe(daemon, "https://video.test/watch?v=cookies", cookies=[cookie])
+            reply = probe(daemon, "https://video.test/watch?v=login-cookies", cookies=[cookie])
             assert reply["ok"], reply
+            assert "cookie_mode" not in calls(state)[-2], "first attempt is cookieless"
             seen = calls(state)[-1]
             assert seen["cookie_mode"] == 0o600 and seen["cookie_dir_mode"] == 0o700, seen
             assert COOKIE_VALUE in seen["cookie_text"] and seen["cookie_text"].startswith("# Netscape HTTP Cookie File")
             assert not Path(seen["cookie_jar"]).exists() and not Path(seen["cookie_jar"]).parent.exists(), "cookie jar deleted"
             assert COOKIE_VALUE not in json.dumps(seen["argv"]), "cookies never on argv"
+            before = len(calls(state))
+            assert probe(daemon, "https://video.test/watch?v=plain-cookies", cookies=[cookie])["ok"]
+            assert len(calls(state)) == before + 1 and "cookie_mode" not in calls(state)[-1], "cookies unused when not needed"
             tampered = {**cookie, "name": "a\tb", "value": "x\ny"}
-            assert probe(daemon, "https://video.test/watch?v=cookies2", cookies=[tampered])["ok"]
+            assert probe(daemon, "https://video.test/watch?v=login-cookies2", cookies=[tampered])["ok"]
             assert "x\ny" not in calls(state)[-1]["cookie_text"], "tab/newline cookies are skipped"
             for log in (daemon.base / "state").rglob("*"):
                 if log.is_file() and log.suffix in {".log", ".txt", ".json"}:

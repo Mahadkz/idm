@@ -505,6 +505,18 @@ async function ytdlpMenu(title) {
   };
 }
 
+// Prefetch from the address as soon as the script runs and on YouTube's in-page navigations, without
+// waiting for the player response.
+function ytPrefetchFromLocation() {
+  if (typeof XdmVideo === "undefined" || typeof location === "undefined") return;
+  const id = XdmVideo.ytVideoId(location.href);
+  if (id) ytPrefetch(id);
+}
+if (typeof window !== "undefined" && window.addEventListener) {
+  ytPrefetchFromLocation();
+  for (const name of ["yt-navigate-finish", "yt-page-data-updated", "popstate"]) window.addEventListener(name, ytPrefetchFromLocation, true);
+}
+
 if (typeof window !== "undefined" && window.addEventListener) {
   window.addEventListener("message", event => {
     const m = event?.data;

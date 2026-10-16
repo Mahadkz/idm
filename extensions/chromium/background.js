@@ -754,7 +754,7 @@ async function offerVideo(payload, fallback) {
 // Formats of the page's video from yt-dlp, through the native host and daemon. The site's cookies go along
 // (to the local native host only, never into a page or a log) so members-only and age-gated videos work.
 // Stream addresses stay in the daemon; the menu only gets what it needs to list the formats.
-async function probeVideoPage(pageUrl, tab) {
+async function probeVideoPageNow(pageUrl, tab) {
   if (tab?.incognito) return { ok: false, reason: "private window" };
   let url;
   try { const u = new URL(pageUrl); u.hash = ""; url = u.toString(); } catch { return { ok: false, reason: "invalid page address" }; }
@@ -771,6 +771,20 @@ async function probeVideoPage(pageUrl, tab) {
   if (!reply?.ok) return { ok: false, reason: String(reply?.reason || "probe failed").slice(0, 400), missing: !!reply?.ytdlpMissing };
   const { ok, title, duration, live, formats } = reply;
   return { ok, title, duration, live, formats };
+}
+
+// One probe in flight per video (YouTube address variants share an id); a click while the prefetch is still
+// running joins it instead of starting a second yt-dlp.
+const probesInFlight = new Map();
+function probeVideoPage(pageUrl, tab) {
+  if (tab?.incognito) return probeVideoPageNow(pageUrl, tab);
+  let key = String(pageUrl);
+  try { const id = typeof XdmVideo !== "undefined" ? XdmVideo.ytVideoId(key) : null; if (id) key = `youtube:${id}`; else key = key.split("#")[0]; } catch {}
+  const running = probesInFlight.get(key);
+  if (running) return running;
+  const promise = probeVideoPageNow(pageUrl, tab).finally(() => probesInFlight.delete(key));
+  probesInFlight.set(key, promise);
+  return promise;
 }
 
 // A yt-dlp menu entry: the page address plus yt-dlp format ids. The daemon resolves the stream addresses

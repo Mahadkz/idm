@@ -126,6 +126,10 @@ pub enum Command {
     GetTask {
         task_id: i64,
     },
+    /// Segment start/end/cursor of a task's checkpoint (progress window).
+    TaskSegments {
+        task_id: i64,
+    },
     Remove {
         task_id: i64,
     },
@@ -985,6 +989,17 @@ pub struct Reply {
     /// IPC protocol number; set by the `Hello` reply.
     #[serde(default)]
     pub protocol: Option<u32>,
+    /// Checkpoint segments of `TaskSegments`.
+    #[serde(default)]
+    pub segments: Vec<SegmentInfo>,
+}
+
+/// One download segment: inclusive byte range and the next byte to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentInfo {
+    pub start: u64,
+    pub end: u64,
+    pub cursor: u64,
 }
 
 /// Snapshot of the daemon's bandwidth governor.
@@ -1040,6 +1055,7 @@ impl Reply {
             bulk: None,
             proxy_note: None,
             protocol: None,
+            segments: Vec::new(),
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -1075,6 +1091,7 @@ impl Reply {
             bulk: None,
             proxy_note: None,
             protocol: None,
+            segments: Vec::new(),
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -1119,6 +1136,7 @@ impl Reply {
             bulk: None,
             proxy_note: None,
             protocol: None,
+            segments: Vec::new(),
         }
     }
 }

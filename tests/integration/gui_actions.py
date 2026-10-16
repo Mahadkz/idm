@@ -832,5 +832,237 @@ def main():
                         process.wait(timeout=5)
 
 
+RANGE_SIZE = 8 * 1024 * 1024
+
+
+class _RangeHandler(BaseHTTPRequestHandler):
+    """Throttled server with byte-range support so downloads use several connections."""
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):
+        start, end = 0, RANGE_SIZE - 1
+        spec = self.headers.get("Range")
+        if spec and spec.startswith("bytes="):
+            first, _, last = spec[6:].partition("-")
+            start = int(first)
+            end = min(int(last), RANGE_SIZE - 1) if last else RANGE_SIZE - 1
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{RANGE_SIZE}")
+        else:
+            self.send_response(200)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", '"fixture"')
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        try:
+            position = start
+            while position <= end:
+                chunk = min(16384, end - position + 1)
+                self.wfile.write(bytes([position % 251]) * chunk)
+                position += chunk
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, *args):
+        pass
+
+
+def dialogs_main():
+    """Add URL -> Download File Info -> progress window -> Download complete, on an isolated Xvfb."""
+    shots = Path(os.environ.get("GUI_DIALOG_SHOTS", "")) if os.environ.get("GUI_DIALOG_SHOTS") else None
+    with tempfile.TemporaryDirectory(prefix="xdm-gui-dialogs-") as directory:
+        base = Path(directory)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _RangeHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        virtual = subprocess.Popen(["Xvfb", "-displayfd", "1", "-screen", "0", "1280x900x24"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        display = virtual.stdout.readline().strip()
+        assert display.isdigit(), "Xvfb did not allocate a display"
+        env = {**os.environ, "DISPLAY": f":{display}", "SLINT_BACKEND": "winit-software",
+               "XDM_DATA_DIR": str(base / "state"), "XDM_FAKE_OS_ACTIONS": "1"}
+        env.pop("WAYLAND_DISPLAY", None)
+        daemon = gui = None
+
+        def cli(*args):
+            result = subprocess.run([str(ROOT / "target/debug/xdm-cli"), "daemon", *map(str, args)],
+                                    env=env, capture_output=True, text=True, timeout=60, check=True)
+            return json.loads(result.stdout)
+
+        def until(action, timeout=60):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if gui and gui.poll() is not None:
+                    raise AssertionError(f"xdm-gui exited prematurely with code {gui.returncode}")
+                value = action()
+                if value:
+                    return value
+                time.sleep(0.1)
+            raise AssertionError(f"GUI condition timed out after {timeout}s")
+
+        def window(name):
+            result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", name], env=env,
+                                    capture_output=True, text=True, timeout=30)
+            return result.stdout.splitlines()[-1] if result.returncode == 0 and result.stdout.strip() else None
+
+        def title(identifier):
+            return subprocess.run(["xdotool", "getwindowname", identifier], env=env, capture_output=True,
+                                  text=True, timeout=30).stdout.strip()
+
+        def click(identifier, x, y):
+            subprocess.run(["xdotool", "windowfocus", identifier], env=env, check=False, timeout=30)
+            subprocess.run(["xdotool", "mousemove", "--window", identifier, str(x), str(y), "click", "1"],
+                           env=env, check=True, timeout=30)
+            time.sleep(0.25)
+
+        def type_text(value):
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], env=env, check=True, timeout=30)
+            subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "0", str(value)], env=env, check=True, timeout=30)
+
+        def shot(name):
+            if shots:
+                shots.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1280x900",
+                                "-i", env["DISPLAY"], "-frames:v", "1", str(shots / f"{name}.png")], env=env, check=True, timeout=30)
+
+        def tasks():
+            return cli("list")["tasks"]
+
+        def add_url(url):
+            main = until(lambda: window("XDM.*Downloads$"))
+            add = None
+            for _ in range(4):
+                subprocess.run(["xdotool", "mousemove", "--window", main, "300", "500"], env=env, check=True, timeout=30)
+                time.sleep(0.3)
+                click(main, ADD_URL_BUTTON[0], ADD_URL_BUTTON[1])
+                try:
+                    add = until(lambda: window("XDM.*Add URL$"), timeout=3)
+                    break
+                except AssertionError:
+                    continue
+            if not add:
+                listing = subprocess.run("for w in $(xdotool search --onlyvisible --name ''); do echo $w $(xdotool getwindowname $w) $(xdotool getwindowgeometry $w | tr '\\n' ' '); done",
+                                         shell=True, env=env, capture_output=True, text=True).stdout
+                print("VISIBLE WINDOWS:\n" + listing)
+                print(subprocess.run(f"ps -L -o tid,stat,pcpu,wchan:20,comm -p {gui.pid}; which gdb", shell=True, capture_output=True, text=True).stdout)
+            assert add, "Add URL dialog did not open"
+            click(add, 340, 79)
+            type_text(url)
+            return add
+
+        try:
+            daemon = subprocess.Popen([str(ROOT / "target/debug/xdm-daemon")], env=env, stderr=subprocess.PIPE, text=True)
+            assert "listening locally" in daemon.stderr.readline()
+            gui = subprocess.Popen([str(ROOT / "target/debug/xdm-gui")], env=env, stderr=open(base / "gui.log", "w"), text=True)
+            until(lambda: window("XDM.*Downloads$"))
+            time.sleep(1)
+            url = f"http://127.0.0.1:{port}/fixture.bin"
+            shot("main")
+
+            # 1. Add URL -> File Info (size probed over HTTP) -> Start Download.
+            add = add_url(url)
+            shot("add-url")
+            click(add, 178, 237)  # OK
+            info = until(lambda: window("Download File Info$"))
+            time.sleep(1)  # size probe
+            shot("file-info")
+            click(info, 278, 190)  # Start Download
+
+            # 2. Progress window: percent advances, connections table shows several segments.
+            progress = until(lambda: window(r"^[0-9.]+% fixture\.bin$"))
+            first = float(title(progress).split("%")[0])
+            until(lambda: float(title(progress).split("%")[0]) > first + 1, timeout=60)
+            time.sleep(1)
+            shot("progress-details")
+            task_id = tasks()[0]["id"]
+
+            # Speed limiter tab: per-task cap reaches the daemon.
+            click(progress, 190, 19)
+            shot("progress-limiter")
+            click(progress, 22, 71)  # Use Speed Limiter
+            click(progress, 50, 120)
+            type_text("900")
+            subprocess.run(["xdotool", "key", "Return"], env=env, check=True, timeout=30)
+            until(lambda: cli("info", task_id)["tasks"][0].get("rate_limit") == 900 * 1024)
+            click(progress, 22, 71)  # unlimit again
+            until(lambda: cli("info", task_id)["tasks"][0].get("rate_limit") in (None, 0))
+            click(progress, 330, 19)
+            shot("progress-options")
+            click(progress, 75, 19)  # back to the status tab
+
+            # Pause / Resume.
+            click(progress, 347, 217)
+            until(lambda: cli("info", task_id)["tasks"][0]["status"] == "paused")
+            time.sleep(0.6)
+            shot("progress-paused")
+            paused_title = title(progress)
+            click(progress, 347, 217)
+            until(lambda: cli("info", task_id)["tasks"][0]["status"] in ("queued", "running"))
+            until(lambda: title(progress) != paused_title)
+
+            # Hide details shrinks the window.
+            click(progress, 92, 217)
+            time.sleep(0.5)
+            shot("progress-hidden")
+            click(progress, 92, 217)
+
+            # 3. Completion: Download complete dialog, Open folder through the faked opener.
+            done = until(lambda: window("^Download complete$"), timeout=120)
+            time.sleep(0.5)
+            shot("complete")
+            assert cli("info", task_id)["tasks"][0]["status"] == "complete"
+            click(done, 55, 167)  # Open
+            open_log = base / "state" / "gui-open.log"
+            until(lambda: open_log.exists() and "fixture.bin" in open_log.read_text())
+            click(done, 263, 167)  # Open folder
+            until(lambda: len(open_log.read_text().splitlines()) >= 2)
+            assert open_log.read_text().splitlines()[1].endswith("downloads"), open_log.read_text()
+            click(done, 30, 197)  # Don't show this dialog again
+            until(lambda: json.loads((base / "state" / "gui-settings.json").read_text()).get("show_complete_dialog") is False)
+            click(done, 397, 167)  # Close
+            until(lambda: window("^Download complete$") is None)
+
+            # 4. Download Later adds a paused task; the same URL again raises the duplicate prompt.
+            add = add_url(f"http://127.0.0.1:{port}/later.bin")
+            click(add, 178, 237)
+            info = until(lambda: window("Download File Info$"))
+            click(info, 151, 190)  # Download Later
+            until(lambda: any(t["url"].endswith("later.bin") and t["status"] == "paused" for t in tasks()))
+            add = add_url(f"http://127.0.0.1:{port}/later.bin")
+            click(add, 178, 237)
+            info = until(lambda: window("Download File Info$"))
+            click(info, 151, 190)
+            time.sleep(1)
+            shot("duplicate")
+            click(info, 128, 150)  # Add numbered copy (overlay button)
+            until(lambda: len([t for t in tasks() if t["url"].endswith("later.bin")]) == 2)
+            copy = max((t for t in tasks() if t["url"].endswith("later.bin")), key=lambda t: t["id"])
+            assert copy["output"].endswith("later (2).bin"), copy["output"]
+            assert gui.poll() is None
+            print("download dialogs: Add URL, File Info, progress window with connections, speed limiter, pause/resume, complete dialog, duplicate handling passed")
+        finally:
+            try:
+                shot("final")
+            except Exception:
+                pass
+            log_path = base / "gui.log"
+            if log_path.exists():
+                print("GUI LOG:\n" + log_path.read_text())
+            for process in [gui, daemon, virtual]:
+                if process and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+
+
+ADD_URL_BUTTON = (72, 80)
+
+
 if __name__ == "__main__":
-    main()
+    if os.environ.get("GUI_ACTIONS_ONLY") != "dialogs":
+        main()
+    dialogs_main()

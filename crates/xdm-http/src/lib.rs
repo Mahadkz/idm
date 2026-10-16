@@ -132,6 +132,16 @@ pub struct TransferControl {
     total_known: AtomicBool,
     sample: Mutex<Sample>,
     size_unverified: AtomicBool,
+    live: OnceLock<LiveSegments>,
+}
+
+/// Reader of a running segmented transfer's per-connection positions.
+struct LiveSegments(Box<dyn Fn() -> Vec<(u64, u64, u64)> + Send + Sync>);
+
+impl std::fmt::Debug for LiveSegments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveSegments")
+    }
 }
 
 /// Shared limits a daemon attaches to a transfer.
@@ -178,7 +188,14 @@ impl TransferControl {
                 speed: 0,
             }),
             size_unverified: AtomicBool::new(false),
+            live: OnceLock::new(),
         })
+    }
+
+    /// Segments `(start, inclusive end, next byte)` of the running transfer,
+    /// including bytes not yet checkpointed; `None` when it is not segmented.
+    pub fn live_segments(&self) -> Option<Vec<(u64, u64, u64)>> {
+        self.live.get().map(|live| (live.0)())
     }
 
     /// True when the last transfer declared no Content-Length and ended at EOF, so
@@ -306,6 +323,13 @@ struct Checkpoint {
 /// Read the latest durable byte count without opening a network connection.
 pub fn checkpoint_progress(output: &Path) -> Option<(u64, u64)> {
     checkpoint_progress_in(output, None)
+}
+
+/// Segments `(start, inclusive end, cursor)` of a task's checkpoint.
+pub fn checkpoint_segments_in(output: &Path, temp: Option<&Path>) -> Option<Vec<(u64, u64, u64)>> {
+    let file = File::open(meta_path(output, temp)).ok()?;
+    let state: Checkpoint = serde_json::from_reader(file).ok()?;
+    Some(state.segments.iter().take(256).map(|s| (s.start, s.end, s.cursor)).collect())
 }
 
 /// Like `checkpoint_progress` for a task whose partials live in `temp`.
@@ -2386,6 +2410,23 @@ fn run_transfer(
         host,
         probe_lease: Mutex::new(probe_lease.take()),
     });
+    {
+        let weak = Arc::downgrade(&shared);
+        let _ = shared.control.live.set(LiveSegments(Box::new(move || {
+            weak.upgrade()
+                .and_then(|shared| {
+                    shared.state.lock().ok().map(|state| {
+                        state
+                            .segments
+                            .iter()
+                            .take(256)
+                            .map(|s| (s.start, s.end, s.cursor.max(s.written)))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default()
+        })));
+    }
     let handles: Vec<_> = (0..options.connections)
         .map(|_| {
             let shared = shared.clone();

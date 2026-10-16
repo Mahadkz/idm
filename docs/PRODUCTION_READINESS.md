@@ -44,4 +44,4 @@ Match IDM's structure and workflows using the mapped dialogs (`docs/idm_control_
 | Performance gate: benchmark in CI with regression thresholds; idle CPU/RAM budgets | Partial | bench/ |
 | Packaging: Linux AppImage and .deb, Windows installer (per-user, upgrade/uninstall), extension packages (.zip/.xpi), third-party license notices | Partial | packaging/ (release.sh, build-deb.sh, build-appimage.sh, windows/build-installer.sh, extensions/build.sh, licenses.sh), install/; .deb/AppImage extracted and CLI run, NSIS installer built but untested on Windows, web-ext lint and lintian not run, packages unsigned |
 | Updates: update check with signed metadata (no silent auto-install) | Not started | |
-| Documentation: user guide, FAQ, troubleshooting, privacy statement, contributor guide | Not started | |
+| Documentation: user guide, FAQ, troubleshooting, privacy statement, contributor guide | Done | docs/user/guide.md, docs/user/faq.md, docs/user/troubleshooting.md, docs/user/privacy.md, CONTRIBUTING.md |

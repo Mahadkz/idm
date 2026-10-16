@@ -251,11 +251,16 @@ mod tests {
             );
         }
         let store = directory.join("credentials.json");
-        let stored = std::fs::read_to_string(&store).unwrap();
-        assert!(
-            stored.contains("s3cret"),
-            "the store is the only place a password appears"
-        );
+        let stored = String::from_utf8_lossy(&std::fs::read(&store).unwrap()).into_owned();
+        if cfg!(windows) {
+            // Windows seals the store with DPAPI, so the password is not readable on disk.
+            assert!(!stored.contains("s3cret"), "the Windows store must be DPAPI-sealed");
+        } else {
+            assert!(
+                stored.contains("s3cret"),
+                "the store is the only place a password appears"
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

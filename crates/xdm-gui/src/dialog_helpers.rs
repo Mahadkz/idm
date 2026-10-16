@@ -724,15 +724,17 @@ mod tests {
 
     #[test]
     fn test_validate_media_destination() {
+        // A rooted path without a drive letter is not absolute on Windows.
+        let root = if cfg!(windows) { "C:/tmp/" } else { "/tmp/" };
         let video_mode = MediaMode::Video {
             video: 0,
             audio: None,
             subtitles: vec![],
         };
-        assert!(validate_media_destination("/tmp/video.mp4", &video_mode).is_ok());
-        assert!(validate_media_destination("/tmp/video.mkv", &video_mode).is_ok());
+        assert!(validate_media_destination(&format!("{root}video.mp4"), &video_mode).is_ok());
+        assert!(validate_media_destination(&format!("{root}video.mkv"), &video_mode).is_ok());
         // Wrong extension for video mode
-        assert!(validate_media_destination("/tmp/video.mp3", &video_mode).is_err());
+        assert!(validate_media_destination(&format!("{root}video.mp3"), &video_mode).is_err());
         // Relative path
         assert!(validate_media_destination("video.mp4", &video_mode).is_err());
     }

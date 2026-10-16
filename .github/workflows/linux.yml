@@ -14,17 +14,45 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb ffmpeg mingw-w64
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool python3-pil fonts-liberation2 libxkbcommon-x11-0 ffmpeg mingw-w64
+      # gui_actions.py clicks at fixed coordinates calibrated on Liberation/Arimo-metric fonts.
+      - name: Pin sans-serif and monospace to Liberation
+        run: |
+          mkdir -p ~/.config/fontconfig
+          cat > ~/.config/fontconfig/fonts.conf <<'XML'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <alias binding="same"><family>sans-serif</family><prefer><family>Liberation Sans</family></prefer></alias>
+            <alias binding="same"><family>monospace</family><prefer><family>Liberation Mono</family></prefer></alias>
+          </fontconfig>
+          XML
+          fc-match sans-serif
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
+      # The media code and suites are developed against a current ffmpeg/ffprobe master build;
+      # Ubuntu's apt ffmpeg 6.1 does not expose the HLS WebVTT subtitle track the tests expect.
+      - name: Current static ffmpeg
+        run: |
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          curl -fsSL --retry 5 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
       - name: Integration suites (strict, every prerequisite installed)
+        env:
+          XDM_TEST_ARTIFACTS: ${{ runner.temp }}/artifacts
         run: python3 tests/run_all.py --strict --skip chromium_real
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gui-failure
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
       - name: Windows cross-build
         run: cargo build --workspace --target x86_64-pc-windows-gnu

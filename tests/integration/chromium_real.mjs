@@ -91,7 +91,7 @@ try {
   const daemon = child(path.join(root, 'target/debug/xdm-daemon'), []);
   assert.match(await lineFrom(daemon, 'stderr'), /listening locally/);
   const chrome = child(chromeBinary, [
-    ...(!process.env.XDM_CHROME_HEADED ? ['--headless=new'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
+    ...(!process.env.XDM_CHROME_HEADED ? ['--headless=new'] : []), ...(process.env.XDM_CHROME_NO_SANDBOX ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0', '--remote-allow-origins=*',
     `--disable-extensions-except=${path.join(root, 'extensions/chromium')}`,
     `--load-extension=${path.join(root, 'extensions/chromium')}`, 'about:blank',

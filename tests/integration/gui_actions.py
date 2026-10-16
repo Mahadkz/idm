@@ -935,7 +935,16 @@ def main():
             assert deep, f"scrolling to the end must fetch deep pages; got {fetched}"
             # Search is pushed to the daemon: 500 rows match one import chunk.
             find_text("g07_")
-            until(lambda: has_total(500), timeout=30)
+            try:
+                until(lambda: has_total(500), timeout=30)
+            except AssertionError:
+                keep = os.environ.get("XDM_TEST_ARTIFACTS")
+                if keep:  # CI uploads this screenshot of the isolated display on failure
+                    Path(keep).mkdir(parents=True, exist_ok=True)
+                    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1200x900",
+                                    "-i", env["DISPLAY"], "-frames:v", "1", str(Path(keep) / "gui-search-failure.png")],
+                                   env=env, check=False, timeout=30)
+                raise
             # Sorting by a column is a daemon sort: the refresh after the header click still reports the filtered total.
             click(main_window, COL_X["filename"], HEADER_Y)
             time.sleep(2.5)

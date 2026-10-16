@@ -3,7 +3,7 @@
   "name": "XDM Browser Bridge",
   "version": "0.1.0",
   "description": "Send eligible browser downloads and clear media URLs to XDM.",
-  "browser_specific_settings": {"gecko": {"id": "xdm@xdm.local", "strict_min_version": "91.0"}},
+  "browser_specific_settings": {"gecko": {"id": "xdm@xdm.local", "strict_min_version": "91.1.0"}},
   "permissions": [
     "downloads",
     "nativeMessaging",

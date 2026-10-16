@@ -3,6 +3,10 @@ targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "x86_64-pc-windo
 
 [advisories]
 version = 2
+ignore = [
+  # Unmaintained, no fix; pulled in by slint/winit's client-side window decorations (sctk-adwaita).
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via winit, no safe upgrade" },
+]
 
 [licenses]
 version = 2

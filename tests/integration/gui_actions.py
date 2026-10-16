@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -876,14 +877,15 @@ def dialogs_main():
         server = ThreadingHTTPServer(("127.0.0.1", 0), _RangeHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         port = server.server_address[1]
-        virtual = subprocess.Popen(["Xvfb", "-displayfd", "1", "-screen", "0", "1280x900x24"],
+        virtual = subprocess.Popen(["Xvfb", "-displayfd", "1", "-nocursor", "-screen", "0", "1280x900x24"],
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         display = virtual.stdout.readline().strip()
         assert display.isdigit(), "Xvfb did not allocate a display"
         env = {**os.environ, "DISPLAY": f":{display}", "SLINT_BACKEND": "winit-software",
                "XDM_DATA_DIR": str(base / "state"), "XDM_FAKE_OS_ACTIONS": "1"}
         env.pop("WAYLAND_DISPLAY", None)
-        daemon = gui = None
+        daemon = gui = fixture = None
+        fixture_log = base / "fixture.log"
 
         def cli(*args):
             result = subprocess.run([str(ROOT / "target/debug/xdm-cli"), "daemon", *map(str, args)],
@@ -923,7 +925,7 @@ def dialogs_main():
         def shot(name):
             if shots:
                 shots.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1280x900",
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0", "-video_size", "1280x900",
                                 "-i", env["DISPLAY"], "-frames:v", "1", str(shots / f"{name}.png")], env=env, check=True, timeout=30)
 
         def tasks():
@@ -976,6 +978,13 @@ def dialogs_main():
             time.sleep(1)
             shot("progress-details")
             task_id = tasks()[0]["id"]
+            # The segment bar fills per connection from bytes received, not only flushed buffers.
+            from PIL import Image
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0", "-video_size", "1280x900",
+                            "-i", env["DISPLAY"], "-frames:v", "1", str(base / "bar.png")], env=env, check=True, timeout=30)
+            bar = Image.open(base / "bar.png").convert("RGB").crop((10, 252, 522, 262))
+            filled = sum(1 for pixel in bar.getdata() if abs(pixel[0] - 0x3f) < 12 and abs(pixel[2] - 0xd8) < 12)
+            assert filled > 100, f"segment bar shows no per-connection fill ({filled} px)"
 
             # Speed limiter tab: per-task cap reaches the daemon.
             click(progress, 190, 19)
@@ -1039,6 +1048,23 @@ def dialogs_main():
             until(lambda: len([t for t in tasks() if t["url"].endswith("later.bin")]) == 2)
             copy = max((t for t in tasks() if t["url"].endswith("later.bin")), key=lambda t: t["id"])
             assert copy["output"].endswith("later (2).bin"), copy["output"]
+
+            # 5. A one-shot link survives File Info: the size probe is a HEAD, never a GET.
+            fixture = subprocess.Popen([sys.executable, str(ROOT / "tests/integration/http_fixture.py"), str(fixture_log)],
+                                       stdout=subprocess.PIPE, text=True)
+            fixture_port = json.loads(fixture.stdout.readline())["port"]
+            add = add_url(f"http://127.0.0.1:{fixture_port}/oneshot.bin")
+            click(add, 178, 237)
+            info = until(lambda: window("Download File Info$"))
+            until(lambda: fixture_log.exists() and "HEAD" in fixture_log.read_text())
+            time.sleep(0.5)
+            logged = [json.loads(line) for line in fixture_log.read_text().splitlines()]
+            assert not [r for r in logged if r["method"] == "GET"], logged
+            click(info, 278, 190)  # Start Download
+            oneshot = until(lambda: next((t for t in tasks() if t["url"].endswith("oneshot.bin") and t["status"] == "complete"), None), timeout=90)
+            assert Path(oneshot["output"]).stat().st_size == 4 * 1024 * 1024
+            logged = [json.loads(line) for line in fixture_log.read_text().splitlines()]
+            assert sum(1 for r in logged if r["method"] == "GET" and r["attempt"] == 1) == 1
             assert gui.poll() is None
             print("download dialogs: Add URL, File Info, progress window with connections, speed limiter, pause/resume, complete dialog, duplicate handling passed")
         finally:
@@ -1049,7 +1075,7 @@ def dialogs_main():
             log_path = base / "gui.log"
             if log_path.exists():
                 print("GUI LOG:\n" + log_path.read_text())
-            for process in [gui, daemon, virtual]:
+            for process in [gui, daemon, fixture, virtual]:
                 if process and process.poll() is None:
                     process.terminate()
                     try:

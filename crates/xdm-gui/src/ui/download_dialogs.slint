@@ -412,10 +412,10 @@ export component ProgressWindow inherits Window {
             background: #dfe6f5; border-width: 1px; border-color: #5a5a7a;
             for seg[i] in root.segments: Rectangle {
                 x: 1px + (parent.width - 2px) * seg.from;
-                y: 1px;
+                y: 4px;
                 width: max(0px, (parent.width - 2px) * (seg.done - seg.from));
-                height: parent.height - 2px;
-                background: #6f93de;
+                height: parent.height - 8px;
+                background: #3f6fd8;
             }
             for seg[i] in root.segments: Rectangle {
                 x: 1px + (parent.width - 2px) * seg.from;

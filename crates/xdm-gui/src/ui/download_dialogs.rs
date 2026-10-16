@@ -159,7 +159,8 @@ pub fn category_dir(
     }
 }
 
-/// Content length from the first bytes of a one-byte ranged GET; `http://` only.
+/// Content length from a HEAD request (never a GET, so one-time links are not
+/// consumed); `http://` only. Any failure means "unknown".
 pub fn probe_size(url: &str) -> Option<u64> {
     use std::io::{Read, Write};
     use std::net::{TcpStream, ToSocketAddrs};
@@ -183,7 +184,7 @@ pub fn probe_size(url: &str) -> Option<u64> {
     };
     write!(
         stream,
-        "GET {target} HTTP/1.1\r\nHost: {host_header}\r\nRange: bytes=0-0\r\nAccept-Encoding: identity\r\nUser-Agent: XDM\r\nConnection: close\r\n\r\n"
+        "HEAD {target} HTTP/1.1\r\nHost: {host_header}\r\nAccept-Encoding: identity\r\nUser-Agent: XDM\r\nConnection: close\r\n\r\n"
     )
     .ok()?;
     let mut head = Vec::new();
@@ -1338,6 +1339,32 @@ mod tests {
         assert_eq!(category_dir(&rules, root, "Video"), PathBuf::from("/srv/videos"));
         assert_eq!(category_dir(&rules, root, "Music"), PathBuf::from("/d/Music"));
         assert_eq!(category_dir(&rules, root, "Other"), PathBuf::from("/d"));
+    }
+
+    #[test]
+    fn the_size_probe_sends_head_and_never_get() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let read = stream.read(&mut buffer).unwrap();
+                methods.push(String::from_utf8_lossy(&buffer[..read]).split(' ').next().unwrap().to_owned());
+                let reply: &[u8] = if methods.len() == 1 {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n"
+                };
+                stream.write_all(reply).unwrap();
+            }
+            methods
+        });
+        assert_eq!(probe_size(&format!("http://127.0.0.1:{port}/a")), Some(1234));
+        assert_eq!(probe_size(&format!("http://127.0.0.1:{port}/b")), None);
+        assert_eq!(server.join().unwrap(), vec!["HEAD", "HEAD"]);
     }
 
     #[test]

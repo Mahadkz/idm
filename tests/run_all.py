@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = ROOT / "tests/integration"
 # Helpers imported by suites or fixtures, not suites themselves.
-HELPERS = {"http_fixture.py", "proxy_fixture.py", "auth_harness.py"}
+HELPERS = {"http_fixture.py", "proxy_fixture.py", "auth_harness.py", "compare_dialogs.py"}
 WINDOWS = os.name == "nt"
 EXE = ".exe" if WINDOWS else ""
 
@@ -50,6 +50,7 @@ WINDOWS_UNSUPPORTED = {
     "media_clear.py": "uses POSIX shell-script ffprobe/ffmpeg stubs",
     "media_live.py": "uses POSIX shell-script ffprobe/ffmpeg stubs",
     "media_live_tasks.py": "uses POSIX shell-script ffprobe/ffmpeg stubs",
+    "media_relay.py": "inspects ffmpeg/ffprobe argv through /proc to prove credentials never reach the command line",
     "media_login_scope.py": "uses POSIX shell-script ffprobe/ffmpeg stubs",
     "ops_hardening.py": "asserts POSIX 0700/0600 file modes and uses the Unix-socket harness",
     "proxy_auth.py": "uses auth_harness.py, which talks to the daemon over a Unix socket",

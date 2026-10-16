@@ -190,11 +190,14 @@ pub fn probe_size(url: &str) -> Option<u64> {
     let mut head = Vec::new();
     let mut buffer = [0u8; 1024];
     while head.len() < 16 * 1024 && !head.windows(4).any(|w| w == b"\r\n\r\n") {
-        let read = stream.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => head.extend_from_slice(&buffer[..read]),
+            // A reset after the reply (Windows reports one when the server closes
+            // without draining) still leaves a usable head.
+            Err(_) if !head.is_empty() => break,
+            Err(_) => return None,
         }
-        head.extend_from_slice(&buffer[..read]);
     }
     parse_probe_head(&String::from_utf8_lossy(&head))
 }
@@ -1350,15 +1353,21 @@ mod tests {
             let mut methods = Vec::new();
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
                 let mut buffer = [0u8; 1024];
-                let read = stream.read(&mut buffer).unwrap();
-                methods.push(String::from_utf8_lossy(&buffer[..read]).split(' ').next().unwrap().to_owned());
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0, "client closed before sending its request");
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                methods.push(String::from_utf8_lossy(&request).split(' ').next().unwrap().to_owned());
                 let reply: &[u8] = if methods.len() == 1 {
                     b"HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n"
                 } else {
                     b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n"
                 };
                 stream.write_all(reply).unwrap();
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
             }
             methods
         });

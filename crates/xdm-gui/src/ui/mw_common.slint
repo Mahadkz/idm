@@ -1,0 +1,66 @@
+import { Palette } from "std-widgets.slint";
+
+export global Tr {
+    in-out property <string> lang: "en";
+    pure callback t(string, string) -> string;
+}
+
+export struct TaskRow {
+    id: int,
+    filename: string,
+    size: string,
+    status: string,
+    time_left: string,
+    transfer_rate: string,
+    last_try_date: string,
+    description: string,
+    category: string,
+    queue: string,
+    progress: float,
+    selected: bool,
+    raw_status: string,
+    queued: bool,
+}
+
+// One row of a menu. `y` is the row's top inside its popup (laid out by Rust).
+export struct MenuEntry {
+    label: string,
+    shortcut: string,
+    action: string,
+    enabled: bool,
+    separator: bool,
+    checked: bool,
+    submenu: bool,
+    y: length,
+}
+
+// One visible row of the category tree.
+export struct TreeNode {
+    id: string,
+    label: string,
+    depth: int,
+    icon: string,
+    expandable: bool,
+    expanded: bool,
+    selected: bool,
+}
+
+export struct ColumnSpec {
+    id: string,
+    width: length,
+}
+
+export global Pal {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> window-bg: dark ? #2b2f36 : #f0f0f0;
+    out property <color> toolbar-bg: dark ? #323740 : #f6f6f6;
+    out property <color> panel-bg: dark ? #1e2227 : #ffffff;
+    out property <color> text: dark ? #d7dae0 : #000000;
+    out property <color> text-dim: dark ? #7d8590 : #a0a0a0;
+    out property <color> border: dark ? #4a5058 : #a0a0a0;
+    out property <color> grid: dark ? #2a2f36 : #ececec;
+    out property <color> hover: dark ? #3a4250 : #dcebfa;
+    out property <color> sel-bg: #3399ff;
+    out property <color> menu-bg: dark ? #282c34 : #ffffff;
+    out property <color> menu-border: dark ? #4a5058 : #a0a0a0;
+}

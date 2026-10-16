@@ -72,9 +72,9 @@ pub struct ColumnSettings {
     pub last_try_date: bool,
     #[serde(default = "default_true")]
     pub description: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub category: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub queue: bool,
 }
 
@@ -88,8 +88,8 @@ impl Default for ColumnSettings {
             transfer_rate: true,
             last_try_date: true,
             description: true,
-            category: true,
-            queue: true,
+            category: false,
+            queue: false,
         }
     }
 }

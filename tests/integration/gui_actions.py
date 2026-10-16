@@ -148,17 +148,91 @@ def main():
             """Screenshot of the isolated display cropped to box=(x0,y0,x1,y1); returns PNG bytes."""
             from PIL import Image
             path = base / f"{name}.png"
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1200x900",
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0", "-video_size", "1200x900",
                             "-i", env["DISPLAY"], "-frames:v", "1", str(path)], env=env, check=True, timeout=30)
             return Image.open(path).convert("RGB").crop(box).tobytes()
+
+        # ---- main-window geometry (900x600 window at 0,0 in the isolated display) ----
+        MENU_LEFT = {"tasks": 0, "file": 41, "downloads": 72, "view": 139, "help": 177}
+        MENU_WIDTH = {"tasks": 250, "file": 250, "downloads": 250, "view": 230, "help": 200}
+        MENUS = {
+            "tasks": ["add-url", "add-batch", "add-media", "grabber", "-", "import-export", "-", "exit"],
+            "file": ["download-now", "stop", "remove", "redownload", "restart", "-", "open", "open-folder",
+                     "move-rename", "-", "sub:priority", "sub:queueorder", "-", "properties"],
+            "downloads": ["start-all", "stop-all", "delete-completed", "-", "find", "-", "scheduler", "queues",
+                          "sub:startq", "sub:stopq", "schedule-start", "schedule-stop", "-", "sub:speed",
+                          "partials", "-", "categories", "connection", "options"],
+            "view": ["toggle-sidebar", "-", "sub:arrange", "columns", "-", "toolbar-large", "toolbar-small", "-",
+                     "refresh"],
+        }
+        SUBS = {
+            "sub:priority": ["prio:2", "prio:1", "prio:0"],
+            "sub:queueorder": ["move:top", "move:up", "move:down", "move:bottom"],
+            "sub:speed": ["speed:on", "speed:off", "speed:settings"],
+            "sub:arrange": ["sort:id", "sort:filename", "sort:size", "sort:status", "sort:time_left",
+                            "sort:transfer_rate", "sort:last_try_date", "sort:description"],
+        }
+        CONTEXT = ["open", "open-folder", "-", "move-rename", "-", "redownload", "-", "download-now", "stop",
+                   "restart", "-", "remove", "-", "sub:addq", "delq", "-", "sub:dblclick", "-", "properties"]
+        TOOL = {"add": 37, "resume": 111, "stop": 185, "stopall": 259, "delete": 333, "delcompleted": 407,
+                "options": 481, "scheduler": 555, "startq": 629, "stopq": 713}
+        TOOL_Y = 51
+        COL_X = {"filename": 230, "q": 316, "size": 363, "status": 433, "time_left": 503,
+                 "transfer_rate": 588, "last_try_date": 668, "description": 796}
+        HEADER_Y = 99
+        ROW_X = 300
+
+        def entry_y(items, key, top):
+            y = top + 2
+            for item in items:
+                if item == key:
+                    return y + 8
+                y += 9 if item == "-" else 17
+            raise AssertionError(f"{key} not in {items}")
+
+        def menu_item(window_id, menu, key):
+            click(window_id, MENU_LEFT[menu] + 20, 10)
+            time.sleep(0.3)
+            click(window_id, MENU_LEFT[menu] + 60, entry_y(MENUS[menu], key, 21))
+
+        def submenu_item(window_id, menu, parent, key):  # cascades open on hover
+            click(window_id, MENU_LEFT[menu] + 20, 10)
+            time.sleep(0.3)
+            parent_y = entry_y(MENUS[menu], parent, 21)
+            subprocess.run(["xdotool", "mousemove", "--window", window_id, str(MENU_LEFT[menu] + 60),
+                            str(parent_y)], env=env, check=True, timeout=30)  # hovering opens the cascade
+            time.sleep(0.2)
+            subprocess.run(["xdotool", "mousemove_relative", "--", "2", "0"], env=env, check=True, timeout=30)
+            time.sleep(0.4)
+            sub_top = parent_y - 8  # row top equals the cascade's top edge
+            click(window_id, MENU_LEFT[menu] + MENU_WIDTH[menu] - 4 + 60, entry_y(SUBS[parent], key, sub_top))
+
+        def find_text(text):
+            menu_item(main_window, "downloads", "find")
+            finder = until(lambda: window("XDM.*Find file$"))
+            type_field(finder, 170, 50, text)
+            if not text:
+                key("BackSpace")  # the selection from ctrl+a is still there
+            key("Return")
+            until(lambda: window("XDM.*Find file$") is None)
+
+        def tool(window_id, name):
+            click(window_id, TOOL[name], TOOL_Y)
+
+        def refresh_view(window_id):
+            menu_item(window_id, "view", "refresh")
+            time.sleep(0.4)
+
+        def row_at(index):
+            return 117 + 17 * index
 
         def statuses():
             return {t["id"]: t["status"] for t in cli("list")["tasks"]}
 
         def row_y(task_id):
-            # Rows are listed by ascending id, 40px each, first row centred at y=457.
+            # Rows are listed by ascending id, 17px each, first row centred at y=117.
             ids = sorted(t["id"] for t in cli("list")["tasks"])
-            return 457 + 40 * ids.index(task_id)
+            return row_at(ids.index(task_id))
 
         def type_field(identifier, x, y, value):
             subprocess.run(["xdotool", "windowfocus", identifier], env=env, check=True, timeout=30)
@@ -177,26 +251,26 @@ def main():
                                    stderr=gui_log, text=True)
             main_window = until(lambda: window("XDM.*Downloads$"))
             time.sleep(1)
-            click(main_window, 120, 457)
-            click(main_window, 72, 138)
+            click(main_window, ROW_X, 117)
+            menu_item(main_window, "file", "properties")
             details = until(lambda: window("XDM.*Download details$"))
             click(details, 320, 450)
             until(lambda: window("XDM.*Download details$") is None)
-            click(main_window, 203, 138)
+            menu_item(main_window, "file", "redownload")
             redownload = until(lambda: window("XDM.*Redownload$"))
             click(redownload, 160, 228)
             rows = until(lambda: cli("list")["tasks"] if len(cli("list")["tasks"]) == 2 else None)
             clone = next(row for row in rows if row["id"] != source)
             assert clone["output"] == str(base / "file-again.bin") and clone["status"] == "queued"
-            click(main_window, 120, row_y(clone["id"]))
-            click(main_window, 375, 138)
+            click(main_window, ROW_X, row_y(clone["id"]))
+            tool(main_window, "delete")
             remove = until(lambda: window("XDM.*Remove task$"))
             click(remove, 120, 188)
             until(lambda: len(cli("list")["tasks"]) == 1)
             assert cli("list")["tasks"][0]["id"] == source
             urls = base / "urls.txt"
             urls.write_text("http://example.invalid/b.bin\nhttp://example.invalid/c.bin\n")
-            click(main_window, 342, 196)
+            menu_item(main_window, "tasks", "import-export")
             lists = until(lambda: window("XDM.*Import and export$"))
             type_field(lists, 200, 70, urls)
             type_field(lists, 200, 118, base / "batch")
@@ -212,8 +286,8 @@ def main():
             click(lists, 580, 486)
             until(lambda: window("XDM.*Import and export$") is None)
             selected = cli("list")["tasks"][0]["id"]
-            click(main_window, 120, row_y(selected))
-            click(main_window, 740, 30)
+            click(main_window, ROW_X, row_y(selected))
+            menu_item(main_window, "downloads", "queues")
             queues = until(lambda: window("XDM.*Queues$"))
             type_field(queues, 160, 286, "Work")
             type_field(queues, 480, 286, "1")
@@ -272,7 +346,7 @@ def main():
             second = cli("submit", "http://example.invalid/second.bin", base / "second.bin")["task_id"]
             cli("queue", "assign", custom["id"], second)
 
-            def move_task(btn_x, btn_y, target_pos):
+            def move_task(key, target_pos):
                 def get_pos():
                     tasks = cli("list")["tasks"]
                     t = next((t for t in tasks if t["id"] == second), None)
@@ -286,10 +360,10 @@ def main():
                     if get_pos() == target_pos:
                         return
                     cur_pos = get_pos()
-                    row_y_now = 457 if cur_pos == 1 else 497  # queue-filtered list, ordered by position
-                    click(main_window, 835, 76)  # Refresh button (toolbar row 2 since the Add media button)
-                    click(main_window, 120, row_y_now)  # Select second task's current row
-                    click(main_window, btn_x, btn_y)  # Click move button
+                    row_y_now = 117 if cur_pos == 1 else 134  # queue-filtered list, ordered by position
+                    refresh_view(main_window)
+                    click(main_window, ROW_X, row_y_now)  # Select second task's current row
+                    submenu_item(main_window, "file", "sub:queueorder", key)
                     step_end = time.monotonic() + 2.0
                     while time.monotonic() < step_end:
                         if get_pos() == target_pos:
@@ -297,13 +371,13 @@ def main():
                         time.sleep(0.1)
                 raise AssertionError(f"Task move to position {target_pos} timed out after 60s")
 
-            move_task(668, 373, 1)  # Up
-            move_task(746, 373, 2)  # Down
-            move_task(596, 373, 1)  # Top
-            move_task(840, 373, 2)  # Bottom
+            move_task("move:up", 1)
+            move_task("move:down", 2)
+            move_task("move:top", 1)
+            move_task("move:bottom", 2)
 
             # Exercise Batch download dialog
-            click(main_window, 194, 76)  # "Batch…" button in row 2
+            menu_item(main_window, "tasks", "add-batch")
             batch_win = until(lambda: window("XDM.*Add batch download$"))
             type_field(batch_win, 300, 95, "http://example.invalid/batch[01-03].bin")
             type_field(batch_win, 300, 265, base / "batch_out")
@@ -312,7 +386,7 @@ def main():
             until(lambda: len([t for t in cli("list")["tasks"] if "batch" in t["url"]]) == 3)
 
             # Exercise Categories editor dialog
-            click(main_window, 398, 76)  # "Categories…" button in row 2
+            menu_item(main_window, "downloads", "categories")
             cats_win = until(lambda: window("XDM.*Categories$"))
             until(lambda: len(cli("category", "list")["categories"]) >= 6)
             type_field(cats_win, 300, 285, "Archives")
@@ -327,7 +401,7 @@ def main():
             until(lambda: window("XDM.*Categories$") is None)
 
             # Exercise Connection settings page
-            click(main_window, 532, 76)  # "Connection…" button in row 2
+            menu_item(main_window, "downloads", "connection")
             conn_win = until(lambda: window("XDM.*Connection settings$"))
             click(conn_win, 390, 105)   # "Direct (No Proxy)" button
             type_field(conn_win, 500, 368, "4")  # Default connections field
@@ -341,7 +415,7 @@ def main():
             until(lambda: window("XDM.*Connection settings$") is None)
 
             # Exercise Preferences dialog (toggle dark theme and verify persistence)
-            click(main_window, 820, 245)  # "Preferences…" button in search row
+            menu_item(main_window, "downloads", "options")
             pref_win = until(lambda: window("XDM.*Preferences$"))
             click(pref_win, 580, 95)      # "Dark" theme button
             click(pref_win, 180, 570)     # "Save preferences" button
@@ -350,7 +424,7 @@ def main():
             until(lambda: window("XDM.*Preferences$") is None)
 
             # Exercise Add media dialog with HLS inspection and audio-only job submission
-            click(main_window, 508, 196)  # "Add media…" button in toolbar
+            menu_item(main_window, "tasks", "add-media")
             media_win = until(lambda: window("XDM.*Add media$"))
             type_field(media_win, 400, 70, f"http://127.0.0.1:{port}/hls/master.m3u8")
             type_field(media_win, 400, 130, "Cookie: xdm=audio_test\nReferer: http://127.0.0.1/")
@@ -372,14 +446,14 @@ def main():
             live_dest = base / "live-rec.mp4"
             live_task_id = cli("media-job", f"http://127.0.0.1:{port}/hls/master.m3u8", str(live_dest),
                                "live", "2", "0", "--max-seconds", "30")["task_id"]
-            click(main_window, 835, 76)  # Refresh button
+            refresh_view(main_window)
             live_task = until(lambda: next((t for t in cli("list")["tasks"] if t["id"] == live_task_id), None))
             assert live_task["kind"] == "media"
             # In main window, select live task in tasks listview
-            click(main_window, 120, 497)
+            click(main_window, ROW_X, 134)
             time.sleep(0.5)
             # Click row 1 to select standard task
-            click(main_window, 120, 457)
+            click(main_window, ROW_X, 117)
             time.sleep(0.5)
 
             # Exercise Countdown banner and Cancel button in main window
@@ -403,7 +477,7 @@ def main():
                 if daemon and daemon.poll() is not None:
                     raise AssertionError(f"xdm-daemon exited prematurely with code {daemon.returncode}")
                 time.sleep(0.8)
-                click(main_window, 838, 38)
+                click(main_window, 850, 38)
                 if not [r for r in cli("completion", "status")["completion_pending"] if r["queue_id"] == banner_queue]:
                     cancelled = True
                     break
@@ -420,63 +494,63 @@ def main():
             if stray:
                 click(stray, 390, 622)  # Close any Queues dialog left open by the banner polling above
                 until(lambda: window("XDM.*Queues$") is None)
-            click(main_window, 435, 30)  # "All queues" clears the queue filter
+            click(main_window, 80, 118)  # "All Downloads" clears the queue filter
             zeta = cli("submit", "http://example.invalid/zeta.bin", base / "zeta.bin")["task_id"]
             alpha = cli("submit", "http://example.invalid/alpha.bin", base / "alpha.bin")["task_id"]
             mid = cli("submit", "http://example.invalid/mid.bin", base / "mid.bin")["task_id"]
-            click(main_window, 833, 76)  # Refresh
+            refresh_view(main_window)
             time.sleep(0.5)
 
             # Sorting: header click sorts ascending by file name, second click flips to descending.
-            click(main_window, 70, 413)  # "File name" header
+            click(main_window, COL_X["filename"], HEADER_Y)  # "File name" header
             time.sleep(0.5)
-            click(main_window, 120, 457)  # first visible row
-            click(main_window, 642, 80)   # Pause
+            click(main_window, ROW_X, 117)  # first visible row
+            tool(main_window, "stop")
             until(lambda: statuses()[alpha] == "paused")
             assert statuses()[zeta] == "queued" and statuses()[mid] == "queued"
-            click(main_window, 70, 413)  # descending
+            click(main_window, COL_X["filename"], HEADER_Y)  # descending
             time.sleep(0.5)
-            click(main_window, 120, 457)
-            click(main_window, 642, 80)
+            click(main_window, ROW_X, 117)
+            tool(main_window, "stop")
             until(lambda: statuses()[zeta] == "paused")
             assert statuses()[mid] == "queued"
 
             # Multi-select with Ctrl+A, then pause everything and resume via Ctrl/Shift click.
-            click(main_window, 120, 497)
+            click(main_window, ROW_X, 134)
             key("ctrl+a")
-            click(main_window, 642, 80)
+            tool(main_window, "stop")
             until(lambda: set(statuses().values()) == {"paused"})
-            click(main_window, 120, 457)
-            click_mod(main_window, 120, 537, "shift")  # shift-range: rows 1..3
-            click(main_window, 735, 80)  # Resume
+            click(main_window, ROW_X, 117)
+            click_mod(main_window, ROW_X, 151, "shift")  # shift-range: rows 1..3
+            tool(main_window, "resume")
             until(lambda: "paused" not in statuses().values())
-            click(main_window, 120, 457)
-            click_mod(main_window, 120, 537, "ctrl")  # ctrl-toggle: rows 1 and 3 only
-            click(main_window, 642, 80)
+            click(main_window, ROW_X, 117)
+            click_mod(main_window, ROW_X, 151, "ctrl")  # ctrl-toggle: rows 1 and 3 only
+            tool(main_window, "stop")
             until(lambda: sum(1 for v in statuses().values() if v == "paused") == 2)
             ordered = sorted(cli("list")["tasks"], key=lambda t: t["output"], reverse=True)  # GUI order: desc by name
             assert [t["status"] for t in ordered] == ["paused", "queued", "paused"], ordered
 
             # Keyboard: Enter opens properties, arrows move the selection, Delete asks for confirmation.
-            click(main_window, 120, 457)
+            click(main_window, ROW_X, 117)
             key("Return")
             details = until(lambda: window("XDM.*Download details$"))
             click(details, 320, 450)
             until(lambda: window("XDM.*Download details$") is None)
-            click(main_window, 120, 457)
+            click(main_window, ROW_X, 117)
             key("Down")
             key("Delete")
             remove = until(lambda: window("XDM.*Remove task$"))
             click(remove, 330, 188)  # Cancel keeps the task
             until(lambda: window("XDM.*Remove task$") is None)
             assert len(cli("list")["tasks"]) == 3
-            click(main_window, 120, 497)  # refocus the list (selection is still the arrow-selected row)
+            click(main_window, ROW_X, 134)  # refocus the list (selection is still the arrow-selected row)
             key("Delete")
             remove = until(lambda: window("XDM.*Remove task$"))
             click(remove, 120, 188)  # confirm
             until(lambda: len(cli("list")["tasks"]) == 2)
             assert mid not in {t["id"] for t in cli("list")["tasks"]}, "arrow-selected row (mid) should be removed"
-            click(main_window, 120, 457)
+            click(main_window, ROW_X, 117)
             key("ctrl+a")
             key("Delete")
             remove = until(lambda: window("XDM.*Remove task$"))
@@ -491,11 +565,11 @@ def main():
             db.execute("UPDATE tasks SET status='complete' WHERE id=?", (opened,))
             db.commit()
             db.close()
-            click(main_window, 833, 76)
+            refresh_view(main_window)
             time.sleep(0.5)
-            click(main_window, 120, 457)
-            click(main_window, 516, 138)  # Open
-            click(main_window, 634, 138)  # Open folder
+            click(main_window, ROW_X, 117)
+            menu_item(main_window, "file", "open")
+            menu_item(main_window, "file", "open-folder")
             open_log = base / "state" / "gui-open.log"
             until(lambda: open_log.exists() and len(open_log.read_text().splitlines()) >= 2)
             lines = open_log.read_text().splitlines()
@@ -503,7 +577,7 @@ def main():
 
             # Move / Rename of the completed download.
             moved = base / "moved" / "renamed.bin"
-            click(main_window, 793, 138)  # Move / Rename...
+            menu_item(main_window, "file", "move-rename")
             mover = until(lambda: window("XDM.*Move / Rename completed download$"))
             type_field(mover, 300, 95, moved)
             click(mover, 150, 190)
@@ -519,8 +593,8 @@ def main():
             # An existing destination is refused by the daemon: nothing moves and the dialog stays open.
             taken = base / "moved" / "taken.bin"
             taken.write_bytes(b"keep me")
-            click(main_window, 120, 457)
-            click(main_window, 793, 138)
+            click(main_window, ROW_X, 117)
+            menu_item(main_window, "file", "move-rename")
             mover = until(lambda: window("XDM.*Move / Rename completed download$"))
             type_field(mover, 300, 95, taken)
             click(mover, 150, 190)
@@ -532,21 +606,21 @@ def main():
             until(lambda: window("XDM.*Move / Rename completed download$") is None)
 
             # Column visibility persists to gui-settings.json.
-            before = grab("cols-before", (0, 395, 900, 560))
-            click(main_window, 704, 254)  # Columns...
+            before = grab("cols-before", (154, 109, 900, 270))
+            menu_item(main_window, "view", "columns")
             columns = until(lambda: window("XDM.*Customize columns$"))
             click(columns, 25, 148)  # uncheck Size
-            click(columns, 25, 304)  # uncheck Category
+            click(columns, 25, 304)  # show Category (hidden by default)
             click(columns, 104, 405)  # Save
             until(lambda: json.loads(gui_settings_file.read_text())["columns"]["size"] is False)
             saved = json.loads(gui_settings_file.read_text())["columns"]
-            assert saved["category"] is False and saved["filename"] is True, saved
+            assert saved["category"] is True and saved["filename"] is True, saved
             time.sleep(0.5)
-            assert grab("cols-after", (0, 395, 900, 560)) != before, "hiding columns must change the table"
+            assert grab("cols-after", (154, 109, 900, 270)) != before, "hiding columns must change the table"
 
             # Language selection in Preferences persists and re-renders the main window.
-            english = grab("lang-en", (0, 0, 900, 200))
-            click(main_window, 820, 254)
+            english = grab("lang-en", (0, 0, 900, 21))
+            menu_item(main_window, "downloads", "options")
             pref_win = until(lambda: window("XDM.*Preferences$"))
             subprocess.run(["xdotool", "mousemove", "--window", pref_win, "300", "300", "click", "--repeat", "20",
                             "--delay", "50", "5"], env=env, check=True, timeout=30)
@@ -557,24 +631,134 @@ def main():
             click(pref_win, 550, 560)  # Close
             until(lambda: window("XDM.*Preferences$") is None)
             time.sleep(0.5)
-            urdu = grab("lang-ur", (0, 0, 900, 200))
-            assert urdu != english, "Urdu catalog must change the toolbar labels"
-            header = grab("header-before-restart", (222, 395, 900, 430))
+            urdu = grab("lang-ur", (0, 0, 900, 21))
+            assert urdu != english, "Urdu catalog must change the menu bar labels"
+            header = grab("header-before-restart", (306, 90, 900, 108))
 
             # Restart: columns and language are restored from settings.
             gui.terminate()
             gui.wait(timeout=15)
-            gui = subprocess.Popen([str(ROOT / "target/debug/xdm-gui")], env=env, stderr=gui_log, text=True)
+            gui = subprocess.Popen([str(ROOT / "target/debug/xdm-gui")], env={**env, "XDM_GUI_PERF": "1"},
+                                   stderr=gui_log, text=True)
             main_window = until(lambda: window("XDM.*Downloads$"))
             time.sleep(1.5)
-            assert grab("restart-ur", (0, 0, 900, 200)) == urdu, "language must persist across restart"
-            assert grab("restart-header", (222, 395, 900, 430)) == header, "hidden columns must persist across restart"
+            assert grab("restart-ur", (0, 0, 900, 21)) == urdu, "language must persist across restart"
+            from PIL import Image as _I
+            now = grab("restart-header", (306, 90, 900, 108))
+            if now != header:
+                _I.frombytes("RGB", (594, 18), header).save("/tmp/recon/hdr-before.png")
+                _I.frombytes("RGB", (594, 18), now).save("/tmp/recon/hdr-after.png")
+                shutil.copy(base / "state" / "gui-layout.json", "/tmp/recon/layout.json")
+            assert now == header, "hidden columns must persist across restart"
+
+
+            # ---- IDM-style shell: category tree filters, toolbar states, menus, context menu ----
+            import re
+            for t in cli("list")["tasks"]:
+                cli("remove", t["id"])
+            until(lambda: not cli("list")["tasks"])
+            shell_video = cli("submit", "http://example.invalid/clip.mp4", base / "clip.mp4")["task_id"]
+            shell_doc = cli("submit", "http://example.invalid/paper.pdf", base / "paper.pdf")["task_id"]
+            shell_done = cli("submit", "http://example.invalid/done.zip", base / "done.zip")["task_id"]
+            cli("pause", shell_doc)
+            db = sqlite3.connect(base / "state" / "tasks.sqlite3")
+            db.execute("UPDATE tasks SET status='complete' WHERE id=?", (shell_done,))
+            db.commit()
+            db.close()
+            refresh_view(main_window)
+
+            def refresh_totals():
+                gui_log.flush()
+                return [int(m) for m in re.findall(r"\[xdm-gui\] refresh .*?total=(\d+) ", (base / "gui.log").read_text())]
+
+            def tree_y(index):
+                return 118 + 16 * index
+
+            TREE = ["all", "Compressed", "Documents", "Music", "Programs", "Video", "Other", "Archives",
+                    "unfinished", "finished", "grabber", "queues"]
+
+            def tree_click(name):
+                seen = len(refresh_totals())
+                click(main_window, 90, tree_y(TREE.index(name)))
+                until(lambda: len(refresh_totals()) > seen)
+
+            def tree_total(name, expected):
+                tree_click(name)
+                until(lambda: refresh_totals()[-1] == expected)
+
+            tree_total("finished", 1)
+            tree_total("unfinished", 2)
+            tree_total("Video", 1)
+            tree_total("Documents", 1)
+            tree_total("Archives", 1)  # the user category created earlier claims .zip
+            tree_total("all", 3)
+            layout_file = base / "state" / "gui-layout.json"
+            if "queues" not in json.loads(layout_file.read_text())["expanded"]:  # the Queues dialog may have opened it
+                click(main_window, 15, tree_y(TREE.index("queues")))  # expand Queues
+                until(lambda: "queues" in json.loads(layout_file.read_text())["expanded"], timeout=15)
+            extra_queue = cli("queue", "create", "ShellQ", 1)["queue_id"]
+            cli("queue", "assign", extra_queue, shell_video)
+            time.sleep(25)  # the queue list refreshes every fifth poll (2 s each, slower under load)
+            queue_rows = [q["id"] for q in cli("list")["queues"]]
+            click(main_window, 90, tree_y(len(TREE) + queue_rows.index(extra_queue)))
+            until(lambda: refresh_totals()[-1] == 1)
+            tree_total("all", 3)
+            assert statuses()[shell_done] == "complete"
+
+            # Toolbar enable states follow the selection (Resume is only live for paused/failed tasks).
+            resume_box = (75, 25, 150, 62)
+            click(main_window, 80, 600 - 10)  # click the empty status bar: nothing selected
+            idle = grab("tool-idle", resume_box)
+            click(main_window, ROW_X, row_y(shell_doc))
+            time.sleep(0.6)
+            paused_look = grab("tool-paused", resume_box)
+            assert paused_look != idle, "Resume must enable for a paused task"
+            click(main_window, ROW_X, row_y(shell_done))
+            time.sleep(0.6)
+            assert grab("tool-complete", resume_box) == idle, "Resume stays disabled for a completed task"
+
+            # Menus: view toggles persist in gui-layout.json.
+            layout_file = base / "state" / "gui-layout.json"
+            menu_item(main_window, "view", "toggle-sidebar")
+            until(lambda: layout_file.exists() and json.loads(layout_file.read_text())["show_sidebar"] is False, timeout=15)
+            menu_item(main_window, "view", "toggle-sidebar")
+            until(lambda: json.loads(layout_file.read_text())["show_sidebar"] is True, timeout=15)
+            menu_item(main_window, "view", "toolbar-small")
+            until(lambda: json.loads(layout_file.read_text())["small_toolbar"] is True, timeout=15)
+            menu_item(main_window, "view", "toolbar-large")
+            until(lambda: json.loads(layout_file.read_text())["small_toolbar"] is False, timeout=15)
+            assert json.loads(layout_file.read_text())["width"] == 900
+
+            # Context menu on the paused task: Resume Download, Stop Download, then Add to queue.
+            rclick(main_window, ROW_X, row_y(shell_doc))
+            click(main_window, ROW_X + 60, entry_y(CONTEXT, "download-now", row_y(shell_doc)))
+            until(lambda: statuses()[shell_doc] == "queued")
+            rclick(main_window, ROW_X, row_y(shell_doc))
+            click(main_window, ROW_X + 60, entry_y(CONTEXT, "stop", row_y(shell_doc)))
+            until(lambda: statuses()[shell_doc] == "paused")
+            rclick(main_window, ROW_X, row_y(shell_doc))
+            ctx_top = row_y(shell_doc)
+            addq_y = entry_y(CONTEXT, "sub:addq", ctx_top)
+            subprocess.run(["xdotool", "mousemove", "--window", main_window, str(ROW_X + 60), str(addq_y)],
+                           env=env, check=True, timeout=30)
+            time.sleep(0.2)
+            subprocess.run(["xdotool", "mousemove_relative", "--", "2", "0"], env=env, check=True, timeout=30)
+            time.sleep(0.4)
+            click(main_window, ROW_X + 180 - 4 + 60, addq_y - 8 + 2 + 17 * queue_rows.index(extra_queue) + 8)
+            until(lambda: cli("info", shell_doc)["tasks"][0]["queue_id"] == extra_queue)
+
+            # Delete Completed (toolbar) confirms, then removes only the finished task.
+            tool(main_window, "delcompleted")
+            confirm = until(lambda: window("^XDM$"))
+            click(confirm, 276, 96)
+            until(lambda: shell_done not in {t["id"] for t in cli("list")["tasks"]})
+            assert {shell_doc, shell_video} <= {t["id"] for t in cli("list")["tasks"]}
 
             # ---- Daemon-wired dialogs: remove with partial, cleanup, bandwidth, sync queue, restart ----
             for t in cli("list")["tasks"]:
                 cli("remove", t["id"])
             until(lambda: not cli("list")["tasks"])
-            click(main_window, 833, 76)  # Refresh
+            refresh_view(main_window)
             time.sleep(0.5)
 
             # Remove dialog: "Also delete partial file" is offered for unfinished tasks and maps to TaskRemoveEx.
@@ -585,18 +769,18 @@ def main():
             for name in ("kept.bin", "gone.bin"):
                 (keep / f"{name}.part").write_bytes(b"p" * 50)
                 (keep / f"{name}.part.meta").write_text(CHECKPOINT)
-            click(main_window, 833, 76)
+            refresh_view(main_window)
             time.sleep(0.8)
-            click(main_window, 120, row_y(kept_task))
-            click(main_window, 375, 138)
+            click(main_window, ROW_X, row_y(kept_task))
+            tool(main_window, "delete")
             remove = until(lambda: window("XDM.*Remove task$"))
             click(remove, 120, 206)  # unticked: only the list entry goes
             until(lambda: len(cli("list")["tasks"]) == 1)
             assert (keep / "kept.bin.part").exists() and (keep / "kept.bin.part.meta").exists()
-            click(main_window, 833, 76)
+            refresh_view(main_window)
             time.sleep(0.8)
-            click(main_window, 120, 457)
-            click(main_window, 375, 138)
+            click(main_window, ROW_X, 117)
+            tool(main_window, "delete")
             remove = until(lambda: window("XDM.*Remove task$"))
             click(remove, 170, 141)  # "Also delete partial file"
             click(remove, 120, 206)
@@ -614,8 +798,7 @@ def main():
             (work / "foo.zip.part").write_bytes(b"browser partial")
             (work / "other.bin.part").write_bytes(b"x")
             (work / "other.bin.part.meta").write_text('{"hello": 1}')
-            click(main_window, 805, 196)  # More controls
-            click(main_window, 546, 258)  # Clean up partial files...
+            menu_item(main_window, "downloads", "partials")
             cleanup = until(lambda: window("XDM.*Clean up partial files$"))
             type_field(cleanup, 370, 67, work)
             click(cleanup, 709, 67)  # Scan
@@ -631,11 +814,10 @@ def main():
             assert leftovers == ["foo.zip.part", "g2.bin.part.meta", "other.bin.part", "other.bin.part.meta"], leftovers
             click(cleanup, 380, 530)  # Close
             until(lambda: window("XDM.*Clean up partial files$") is None)
-            click(main_window, 805, 196)  # Hide controls
 
             # Bandwidth settings (reached from Connection settings): global limit, quota and host limit
             # are applied through the daemon and read back with BandwidthStatus.
-            click(main_window, 532, 76)
+            menu_item(main_window, "downloads", "connection")
             conn_win = until(lambda: window("XDM.*Connection settings$"))
             click(conn_win, 350, 484)  # Bandwidth limits and quota...
             bandwidth = until(lambda: window("XDM.*Bandwidth$"))
@@ -660,7 +842,7 @@ def main():
             cli("quota", "off")
 
             # Synchronization queue: create, set interval, check now.
-            click(main_window, 740, 30)
+            menu_item(main_window, "downloads", "queues")
             queues = until(lambda: window("XDM.*Queues$"))
             type_field(queues, 160, 286, "Mirror")
             type_field(queues, 480, 286, "1")
@@ -681,31 +863,31 @@ def main():
             # A real quota: a 2 MiB download exceeds a 1 MiB quota and parks in quota_wait.
             cli("quota", 1, 1)
             probe = cli("submit", f"http://127.0.0.1:{port}/big.bin", base / "big.bin")["task_id"]
-            click(main_window, 833, 76)
+            refresh_view(main_window)
             time.sleep(0.8)
             assert statuses()[probe] == "queued"
-            queued_status = grab("status-queued", (130, 437, 330, 477))
+            queued_status = grab("status-queued", (306, 109, 560, 126))
             cli("queue", "start")
             until(lambda: statuses().get(probe) == "quota_wait", timeout=60)
             cli("queue", "stop")
             until(lambda: cli("list")["queue_running"] is False)
             assert cli("bandwidth")["bandwidth"]["quota_exceeded"] is True
-            click(main_window, 833, 76)
+            refresh_view(main_window)
             time.sleep(0.8)
-            quota_status = grab("status-quota", (130, 437, 330, 477))
+            quota_status = grab("status-quota", (306, 109, 560, 126))
             assert quota_status != queued_status, "quota_wait must be shown in the Status column"
             # restart_required is shown too, and the Restart row action requeues it via TaskRestart.
             db = sqlite3.connect(base / "state" / "tasks.sqlite3")
             db.execute("UPDATE tasks SET status='restart_required', restart_reason='remote changed' WHERE id=?", (probe,))
             db.commit()
             db.close()
-            click(main_window, 833, 76)
+            refresh_view(main_window)
             time.sleep(0.8)
-            restart_status = grab("status-restart", (130, 437, 330, 477))
+            restart_status = grab("status-restart", (306, 109, 560, 126))
             assert restart_status not in (queued_status, quota_status), "restart_required must be shown"
-            click(main_window, 120, 457)
-            rclick(main_window, 120, 457)
-            click(main_window, 205, 613)  # context menu: Restart
+            click(main_window, ROW_X, 117)
+            rclick(main_window, ROW_X, 117)
+            click(main_window, ROW_X + 60, entry_y(CONTEXT, "restart", 117))  # context menu: Restart
             until(lambda: statuses().get(probe) == "queued")
             cli("quota", "off")
 
@@ -745,18 +927,17 @@ def main():
             main_window = until(lambda: window("XDM"))
             time.sleep(1.0)
             # Scroll far down with the scrollbar: the rows there arrive as page fetches.
-            subprocess.run(["xdotool", "mousemove", "--window", main_window, "881", "450", "mousedown", "1",
-                            "mousemove_relative", "--", "0", "280", "mouseup", "1"], env=env, check=True, timeout=30)
+            subprocess.run(["xdotool", "mousemove", "--window", main_window, "888", "120", "mousedown", "1",
+                            "mousemove_relative", "--", "0", "450", "mouseup", "1"], env=env, check=True, timeout=30)
             time.sleep(2.0)
             fetched = perf_lines("page-fetch")
             deep = [line for line in fetched if int(re.search(r"page=(\d+)", line).group(1)) >= 50]
             assert deep, f"scrolling to the end must fetch deep pages; got {fetched}"
             # Search is pushed to the daemon: 500 rows match one import chunk.
-            type_field(main_window, 270, 254, "g07_")
-            click(main_window, 556, 254)  # Find
+            find_text("g07_")
             until(lambda: has_total(500), timeout=30)
             # Sorting by a column is a daemon sort: the refresh after the header click still reports the filtered total.
-            click(main_window, 70, 413)
+            click(main_window, COL_X["filename"], HEADER_Y)
             time.sleep(2.5)
             assert not [line for line in perf_lines("refresh") if "total=0 " in line]
             assert [line for line in perf_lines("refresh") if "total=500 sort=output " in line], \
@@ -765,32 +946,34 @@ def main():
             # Header sorts for columns without a stored column now use the daemon's keys.
             def sorted_by(key, header_x):
                 before = len(perf_lines("refresh"))
-                click(main_window, header_x, 413)
+                click(main_window, header_x, HEADER_Y)
                 until(lambda: any(f"sort={key} " in line for line in perf_lines("refresh")[before:]), timeout=30)
-            sorted_by("size", 200)
-            sorted_by("-size", 200)
-            sorted_by("progress", 403)
-            sorted_by("rate", 488)
-            sorted_by("queue", 836)
-            sorted_by("output", 70)  # back to File name
+            sorted_by("size", COL_X["size"])
+            sorted_by("-size", COL_X["size"])
+            sorted_by("progress", COL_X["time_left"])
+            sorted_by("rate", COL_X["transfer_rate"])
+            sorted_by("queue", COL_X["q"])
+            sorted_by("output", COL_X["filename"])  # back to File name
 
             # Ctrl+A selects every task matching the filter, beyond the loaded rows.
-            click(main_window, 620, 254)  # Clear the search
+            find_text("")  # an empty query shows everything again
             until(lambda: "total=20000 " in (perf_lines("refresh") or [""])[-1], timeout=30)
-            click(main_window, 120, 457)
+            click(main_window, ROW_X, 117)
             key("ctrl+a")
             time.sleep(0.5)
             gui_log.flush()
             started = time.monotonic()
-            click(main_window, 735, 80)  # Resume -> TaskBulk resume with the filter and expected total
+            tool(main_window, "resume")
             until(lambda: cli("list", "--limit", 1, "--status", "queued")["total"] == 20000, timeout=300)
-            click(main_window, 642, 80)  # Pause
+            seen_refreshes = len(perf_lines("refresh"))
+            until(lambda: len(perf_lines("refresh")) > seen_refreshes + 1, timeout=60)  # Stop enables from loaded statuses
+            tool(main_window, "stop")
             until(lambda: cli("list", "--limit", 1, "--status", "paused")["total"] == 20000, timeout=300)
             assert cli("list", "--limit", 1, "--status", "queued")["total"] == 0
             print(f"select-all resume+pause of 20000 tasks through the GUI: {time.monotonic() - started:.1f}s")
 
             # Queues dialog: daemon calls run off the UI thread and still work, including bulk assign.
-            click(main_window, 739, 30)
+            menu_item(main_window, "downloads", "queues")
             queues_win = until(lambda: window("XDM.*Queues$"))
             type_field(queues_win, 160, 286, "Bulk")
             type_field(queues_win, 480, 286, "2")
@@ -818,7 +1001,7 @@ def main():
             print("isolated GUI task actions, batch dialog, categories editor, connection settings, preferences dialog, add media dialog, and completion actions passed")
         finally:
             if os.environ.get("GUI_ACTIONS_SHOT"):  # debugging aid: screenshot of the isolated display
-                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1200x900",
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "0", "-video_size", "1200x900",
                                 "-i", env["DISPLAY"], "-frames:v", "1", os.environ["GUI_ACTIONS_SHOT"]], env=env)
             log_path = base / "gui.log"
             if log_path.exists():
@@ -1085,7 +1268,7 @@ def dialogs_main():
                         process.wait(timeout=5)
 
 
-ADD_URL_BUTTON = (72, 80)
+ADD_URL_BUTTON = (37, 51)  # toolbar "Add URL"
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@ mod dialog_helpers;
 #[path = "ui/download_dialogs.rs"]
 mod download_dialogs;
 mod i18n;
+mod layout;
+mod mainwin;
 mod maintenance;
 mod paged;
 mod scheduler;
@@ -24,496 +26,12 @@ use xdm_ipc::{Command, CompletionAction, MoveTarget, Paths, TaskSummary};
 slint::slint! {
     import { Button, CheckBox, LineEdit, ListView, ScrollView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
     import "assets/DejaVuSans.ttf";
+    import "assets/fonts/tahoma.ttf";
+    import "assets/fonts/tahomabd.ttf";
 
-    export global Tr {
-        in-out property <string> lang: "en";
-        pure callback t(string, string) -> string;
-    }
-
-    export struct TaskRow {
-        id: int,
-        filename: string,
-        size: string,
-        status: string,
-        time_left: string,
-        transfer_rate: string,
-        last_try_date: string,
-        description: string,
-        category: string,
-        queue: string,
-        progress: float,
-        selected: bool,
-    }
-
-    component HeaderCell inherits Rectangle {
-        in property <string> text;
-        callback clicked;
-        height: 28px;
-        border-radius: 3px;
-        background: ta.has-hover ? (Palette.color-scheme == ColorScheme.dark ? #3a4250 : #d3dcea) : (Palette.color-scheme == ColorScheme.dark ? #2c313a : #e3e9f2);
-        Text {
-            x: 6px;
-            width: parent.width - 12px;
-            text: root.text;
-            overflow: elide;
-            vertical-alignment: center;
-            font-weight: 700;
-            color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-        }
-        ta := TouchArea { clicked => { root.clicked(); } }
-    }
-
-    export component MainWindow inherits Window {
-        title: "XDM — Downloads";
-        width: 900px;
-        height: 780px;
-        background: Palette.color-scheme == ColorScheme.dark ? #1e2227 : #f2f4f7;
-        default-font-family: "DejaVu Sans";
-        public function apply-theme(theme: string) {
-            if (theme == "dark") {
-                Palette.color-scheme = ColorScheme.dark;
-            } else if (theme == "light") {
-                Palette.color-scheme = ColorScheme.light;
-            } else {
-                Palette.color-scheme = ColorScheme.unknown;
-            }
-        }
-        in property <[TaskRow]> tasks;
-        in-out property <string> url;
-        in-out property <string> destination;
-        in-out property <string> message: "Connecting to daemon…";
-        in-out property <string> queue-state: "Queue status unknown";
-        in-out property <string> schedule-start;
-        in-out property <string> schedule-stop;
-        in-out property <int> selected: -1;
-        in-out property <string> category-filter: "All";
-        in-out property <string> search-query;
-        in-out property <string> rate-kib: "512";
-        in-out property <bool> tools-expanded: false;
-        in-out property <string> queue-filter-id: "0";
-        in-out property <string> queue-caption: "All queues";
-        in-out property <bool> has-pending-completion: false;
-        in-out property <string> pending-action-text: "";
-        in-out property <int> pending-queue-id: 0;
-        in-out property <int> pending-seconds-remaining: 0;
-        in-out property <string> pause-button-text: "Pause";
-        in-out property <bool> col-filename: true;
-        in-out property <bool> col-size: true;
-        in-out property <bool> col-status: true;
-        in-out property <bool> col-time-left: true;
-        in-out property <bool> col-transfer-rate: true;
-        in-out property <bool> col-last-try-date: true;
-        in-out property <bool> col-description: true;
-        in-out property <bool> col-category: true;
-        in-out property <bool> col-queue: true;
-        in-out property <string> sort-column: "id";
-        in-out property <bool> sort-asc: true;
-        in-out property <length> context-menu-x: 100px;
-        in-out property <length> context-menu-y: 200px;
-        callback cancel-completion(int);
-        callback add-task();
-        callback pause-task();
-        callback resume-task();
-        callback set-priority(int);
-        callback set-task-rate(bool);
-        callback task-details();
-        callback redownload-task();
-        callback remove-task();
-        callback transfer-lists();
-        callback manage-queues();
-        callback refresh();
-        callback queue-start();
-        callback queue-stop();
-        callback schedule-queue-start();
-        callback schedule-queue-stop();
-        callback move-task(string);
-        callback queue-start-one();
-        callback queue-stop-one();
-        callback queue-settings();
-        callback open-batch();
-        callback open-grabber();
-        callback open-categories();
-        callback open-connection();
-        callback open-preferences();
-        callback open-add-url();
-        callback open-add-media();
-        callback task-selected(int);
-        callback show-clipboard-prompt(string);
-        callback sort-by-column(string);
-        callback open-columns();
-        callback open-task();
-        callback open-task-folder();
-        callback move-rename-task();
-        callback restart-task();
-        callback open-partials();
-        callback open-bandwidth();
-        callback task-clicked(int, bool, bool);
-        callback task-right-clicked(int, length, length);
-        callback key-delete();
-        callback key-enter();
-        callback key-up();
-        callback key-down();
-        callback key-select-all();
-
-        forward-focus: fs;
-        fs := FocusScope {
-            key-pressed(event) => {
-                if (event.text == Key.Delete) {
-                    root.key-delete();
-                    return accept;
-                }
-                if (event.text == Key.Return) {
-                    root.key-enter();
-                    return accept;
-                }
-                if (event.text == Key.UpArrow) {
-                    root.key-up();
-                    return accept;
-                }
-                if (event.text == Key.DownArrow) {
-                    root.key-down();
-                    return accept;
-                }
-                if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
-                    root.key-select-all();
-                    return accept;
-                }
-                return reject;
-            }
-            VerticalBox {
-                padding: 14px;
-                spacing: 10px;
-                if root.has-pending-completion: Rectangle {
-                    background: #ffcdd2;
-                    border-width: 2px;
-                    border-color: #b71c1c;
-                    border-radius: 4px;
-                    height: 44px;
-                    HorizontalBox {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 16px;
-                        alignment: space-between;
-                        Text {
-                            text: "⚠ WARNING: " + root.pending-action-text;
-                            font-size: 13px;
-                            font-weight: 700;
-                            color: #b71c1c;
-                            vertical-alignment: center;
-                        }
-                        Button {
-                            text: "Cancel";
-                            clicked => { root.cancel-completion(root.pending-queue-id); }
-                        }
-                    }
-                }
-                HorizontalBox {
-                    padding: 0px;
-                    Text { text: Tr.t(@tr("XDM"), Tr.lang); font-size: 26px; font-weight: 700; color: #143f73; }
-                    Button { text: Tr.t(@tr("All queues"), Tr.lang); clicked => { root.queue-filter-id = "0"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Queues…"), Tr.lang); clicked => { root.manage-queues(); } }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    Button { text: Tr.t(@tr("Add URL"), Tr.lang); clicked => { root.open-add-url(); } }
-                    Button { text: Tr.t(@tr("Batch…"), Tr.lang); clicked => { root.open-batch(); } }
-                    Button { text: Tr.t(@tr("Grabber…"), Tr.lang); clicked => { root.open-grabber(); } }
-                    Button { text: Tr.t(@tr("Categories…"), Tr.lang); clicked => { root.open-categories(); } }
-                    Button { text: Tr.t(@tr("Connection…"), Tr.lang); clicked => { root.open-connection(); } }
-                    Button { text: root.pause-button-text == "Pause" ? Tr.t(@tr("Pause"), Tr.lang) : Tr.t(@tr("Stop and save"), Tr.lang); clicked => { root.pause-task(); } }
-                    Button { text: Tr.t(@tr("Resume"), Tr.lang); clicked => { root.resume-task(); } }
-                    Button { text: Tr.t(@tr("Refresh"), Tr.lang); clicked => { root.refresh(); } }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    Button { text: Tr.t(@tr("Details"), Tr.lang); clicked => { root.task-details(); } }
-                    Button { text: Tr.t(@tr("Redownload…"), Tr.lang); clicked => { root.redownload-task(); } }
-                    Button { text: Tr.t(@tr("Remove from list…"), Tr.lang); clicked => { root.remove-task(); } }
-                    Button { text: Tr.t(@tr("Open"), Tr.lang); clicked => { root.open-task(); } }
-                    Button { text: Tr.t(@tr("Open folder"), Tr.lang); clicked => { root.open-task-folder(); } }
-                    Button { text: Tr.t(@tr("Move / Rename…"), Tr.lang); clicked => { root.move-rename-task(); } }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    Button { text: Tr.t(@tr("Start all"), Tr.lang); clicked => { root.queue-start(); } }
-                    Button { text: Tr.t(@tr("Stop all"), Tr.lang); clicked => { root.queue-stop(); } }
-                    Button { text: Tr.t(@tr("Import / Export…"), Tr.lang); clicked => { root.transfer-lists(); } }
-                    Button { text: Tr.t(@tr("Add media…"), Tr.lang); clicked => { root.open-add-media(); } }
-                    Text { text: root.queue-state; color: #38536f; vertical-alignment: center; }
-                    Button { text: root.tools-expanded ? Tr.t(@tr("Hide controls"), Tr.lang) : Tr.t(@tr("More controls"), Tr.lang); clicked => { root.tools-expanded = !root.tools-expanded; } }
-                }
-                if root.tools-expanded: Rectangle {
-                    height: 220px;
-                    ScrollView {
-                        VerticalBox {
-                            padding: 4px;
-                            spacing: 6px;
-                            HorizontalBox {
-                                Text { text: "Tools:"; vertical-alignment: center; }
-                                Button { text: Tr.t(@tr("Bandwidth…"), Tr.lang); clicked => { root.open-bandwidth(); } }
-                                Button { text: Tr.t(@tr("Clean up partial files…"), Tr.lang); clicked => { root.open-partials(); } }
-                                Button { text: Tr.t(@tr("Restart"), Tr.lang); clicked => { root.restart-task(); } }
-                            }
-                            HorizontalBox {
-                                Text { text: "URL"; vertical-alignment: center; }
-                                LineEdit { text <=> root.url; placeholder-text: "https://example.com/file.zip or ftp://..."; }
-                            }
-                            HorizontalBox {
-                                Text { text: "Save as"; vertical-alignment: center; }
-                                LineEdit { text <=> root.destination; placeholder-text: "/home/user/Downloads/file.zip"; }
-                                Button { text: Tr.t(@tr("Download"), Tr.lang); clicked => { root.add-task(); } }
-                            }
-                            HorizontalBox {
-                                Text { text: "Priority:"; vertical-alignment: center; }
-                                Button { text: Tr.t(@tr("Immediate"), Tr.lang); clicked => { root.set-priority(2); } }
-                                Button { text: Tr.t(@tr("Normal"), Tr.lang); clicked => { root.set-priority(1); } }
-                                Button { text: Tr.t(@tr("Low"), Tr.lang); clicked => { root.set-priority(0); } }
-                            }
-                            HorizontalBox {
-                                LineEdit { text <=> root.schedule-start; placeholder-text: "YYYY-MM-DD HH:MM"; }
-                                Button { text: Tr.t(@tr("Schedule start"), Tr.lang); clicked => { root.schedule-queue-start(); } }
-                                LineEdit { text <=> root.schedule-stop; placeholder-text: "Stop at YYYY-MM-DD HH:MM"; }
-                                Button { text: Tr.t(@tr("Schedule stop"), Tr.lang); clicked => { root.schedule-queue-stop(); } }
-                            }
-                            HorizontalBox {
-                                Text { text: "Selected limit (KiB/s)"; vertical-alignment: center; }
-                                LineEdit { text <=> root.rate-kib; }
-                                Button { text: Tr.t(@tr("Apply limit"), Tr.lang); clicked => { root.set-task-rate(true); } }
-                                Button { text: Tr.t(@tr("Unlimited"), Tr.lang); clicked => { root.set-task-rate(false); } }
-                            }
-                        }
-                    }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    LineEdit { text <=> root.search-query; placeholder-text: "Find URL or file name (status:paused filters by status)"; }
-                    Button { text: Tr.t(@tr("Find"), Tr.lang); clicked => { root.refresh(); } }
-                    Button { text: Tr.t(@tr("Clear"), Tr.lang); clicked => { root.search-query = ""; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Columns…"), Tr.lang); clicked => { root.open-columns(); } }
-                    Button { text: Tr.t(@tr("Preferences…"), Tr.lang); clicked => { root.open-preferences(); } }
-                }
-                Rectangle { height: 1px; background: #c8d0db; }
-                HorizontalBox {
-                    spacing: 4px;
-                    Button { text: Tr.t(@tr("All"), Tr.lang); clicked => { root.category-filter = "All"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Video"), Tr.lang); clicked => { root.category-filter = "Video"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Music"), Tr.lang); clicked => { root.category-filter = "Music"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Documents"), Tr.lang); clicked => { root.category-filter = "Documents"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Compressed"), Tr.lang); clicked => { root.category-filter = "Compressed"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Programs"), Tr.lang); clicked => { root.category-filter = "Programs"; root.refresh(); } }
-                    Button { text: Tr.t(@tr("Other"), Tr.lang); clicked => { root.category-filter = "Other"; root.refresh(); } }
-                }
-                HorizontalBox {
-                    padding: 0px;
-                    spacing: 8px;
-                    Text { text: Tr.t(@tr("Downloads"), Tr.lang) + "  ·  " + root.queue-caption; font-size: 14px; color: #38536f; vertical-alignment: center; }
-                    Button { text: Tr.t(@tr("Start queue"), Tr.lang); enabled: root.queue-filter-id != "0"; clicked => { root.queue-start-one(); } }
-                    Button { text: Tr.t(@tr("Stop queue"), Tr.lang); enabled: root.queue-filter-id != "0"; clicked => { root.queue-stop-one(); } }
-                    Button { text: Tr.t(@tr("Scheduler…"), Tr.lang); clicked => { root.queue-settings(); } }
-                    Button { text: Tr.t(@tr("Top"), Tr.lang); clicked => { root.move-task("top"); } }
-                    Button { text: Tr.t(@tr("Up"), Tr.lang); clicked => { root.move-task("up"); } }
-                    Button { text: Tr.t(@tr("Down"), Tr.lang); clicked => { root.move-task("down"); } }
-                    Button { text: Tr.t(@tr("Bottom"), Tr.lang); clicked => { root.move-task("bottom"); } }
-                }
-                HorizontalLayout {
-                    height: 28px;
-                    padding-left: 6px;
-                    padding-right: 20px;
-                    spacing: 6px;
-                    if root.col-filename: HeaderCell {
-                        text: Tr.t(@tr("File name"), Tr.lang) + (root.sort-column == "filename" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        horizontal-stretch: 3;
-                        clicked => { root.sort-by-column("filename"); }
-                    }
-                    if root.col-size: HeaderCell {
-                        text: Tr.t(@tr("Size"), Tr.lang) + (root.sort-column == "size" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 70px;
-                        max-width: 70px;
-                        clicked => { root.sort-by-column("size"); }
-                    }
-                    if root.col-status: HeaderCell {
-                        text: Tr.t(@tr("Status"), Tr.lang) + (root.sort-column == "status" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 120px;
-                        max-width: 120px;
-                        clicked => { root.sort-by-column("status"); }
-                    }
-                    if root.col-time-left: HeaderCell {
-                        text: Tr.t(@tr("Time left"), Tr.lang) + (root.sort-column == "time_left" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 70px;
-                        max-width: 70px;
-                        clicked => { root.sort-by-column("time_left"); }
-                    }
-                    if root.col-transfer-rate: HeaderCell {
-                        text: Tr.t(@tr("Transfer rate"), Tr.lang) + (root.sort-column == "transfer_rate" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 90px;
-                        max-width: 90px;
-                        clicked => { root.sort-by-column("transfer_rate"); }
-                    }
-                    if root.col-last-try-date: HeaderCell {
-                        text: Tr.t(@tr("Last try date"), Tr.lang) + (root.sort-column == "last_try_date" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 160px;
-                        max-width: 160px;
-                        clicked => { root.sort-by-column("last_try_date"); }
-                    }
-                    if root.col-description: HeaderCell {
-                        text: Tr.t(@tr("Description"), Tr.lang) + (root.sort-column == "description" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        horizontal-stretch: 2;
-                        clicked => { root.sort-by-column("description"); }
-                    }
-                    if root.col-category: HeaderCell {
-                        text: Tr.t(@tr("Category"), Tr.lang) + (root.sort-column == "category" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 70px;
-                        max-width: 70px;
-                        clicked => { root.sort-by-column("category"); }
-                    }
-                    if root.col-queue: HeaderCell {
-                        text: Tr.t(@tr("Queue"), Tr.lang) + (root.sort-column == "queue" ? (root.sort-asc ? " ▲" : " ▼") : "");
-                        min-width: 60px;
-                        max-width: 60px;
-                        clicked => { root.sort-by-column("queue"); }
-                    }
-                    
-                }
-                ListView {
-                    for task[index] in root.tasks: Rectangle {
-                        height: 40px;
-                        background: task.selected ? (Palette.color-scheme == ColorScheme.dark ? #2c4260 : #d8eaff)
-                            : (root.selected == index ? (Palette.color-scheme == ColorScheme.dark ? #28374a : #eef4fc)
-                            : (Math.mod(index, 2) == 0 ? (Palette.color-scheme == ColorScheme.dark ? #1e2227 : #ffffff)
-                                                       : (Palette.color-scheme == ColorScheme.dark ? #21252b : #f7f9fc)));
-                        HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            spacing: 6px;
-                            if root.col-filename: Text {
-                                horizontal-stretch: 3;
-                                preferred-width: 1px;
-                                text: task.filename;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-size: Text {
-                                min-width: 70px;
-                                max-width: 70px;
-                                text: task.size;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-status: Text {
-                                min-width: 120px;
-                                max-width: 120px;
-                                text: task.status;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-time-left: Text {
-                                min-width: 70px;
-                                max-width: 70px;
-                                text: task.time-left;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-transfer-rate: Text {
-                                min-width: 90px;
-                                max-width: 90px;
-                                text: task.transfer-rate;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-last-try-date: Text {
-                                min-width: 160px;
-                                max-width: 160px;
-                                text: task.last-try-date;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-description: Text {
-                                horizontal-stretch: 2;
-                                preferred-width: 1px;
-                                text: task.description;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-category: Text {
-                                min-width: 70px;
-                                max-width: 70px;
-                                text: task.category;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            if root.col-queue: Text {
-                                min-width: 60px;
-                                max-width: 60px;
-                                text: task.queue;
-                                color: Palette.color-scheme == ColorScheme.dark ? #abb2bf : #172a3f;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                        }
-                        Rectangle {
-                            y: parent.height - 3px;
-                            width: parent.width * task.progress / 100;
-                            height: 3px;
-                            background: #2874c7;
-                        }
-                        TouchArea {
-                            pointer-event(event) => {
-                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                                    root.selected = index;
-                                    fs.focus();
-                                    root.task-clicked(index, event.modifiers.control, event.modifiers.shift);
-                                    root.task-selected(index);
-                                }
-                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                                    root.selected = index;
-                                    root.context-menu-x = min(root.width - 180px, max(10px, self.absolute-position.x + self.mouse-x - root.absolute-position.x));
-                                    root.context-menu-y = min(root.height - 260px, max(10px, self.absolute-position.y + self.mouse-y - root.absolute-position.y));
-                                    root.task-right-clicked(index, self.mouse-x, self.mouse-y);
-                                    context-popup.show();
-                                }
-                            }
-                        }
-                    }
-                }
-                Text { text: root.message; color: #52677c; }
-            }
-        }
-
-        context-popup := PopupWindow {
-            x: root.context-menu-x;
-            y: root.context-menu-y;
-            width: 170px;
-            height: 240px;
-            close-policy: close-on-click-outside;
-            Rectangle {
-                background: Palette.color-scheme == ColorScheme.dark ? #282c34 : #ffffff;
-                border-width: 1px;
-                border-color: Palette.color-scheme == ColorScheme.dark ? #3e4451 : #c8d0db;
-                border-radius: 4px;
-                drop-shadow-blur: 8px;
-                drop-shadow-color: #00000033;
-                VerticalBox {
-                    padding: 4px;
-                    spacing: 2px;
-                    Button { text: Tr.t(@tr("Open"), Tr.lang); clicked => { context-popup.close(); root.open-task(); } }
-                    Button { text: Tr.t(@tr("Open folder"), Tr.lang); clicked => { context-popup.close(); root.open-task-folder(); } }
-                    Button { text: Tr.t(@tr("Move / Rename…"), Tr.lang); clicked => { context-popup.close(); root.move-rename-task(); } }
-                    Button { text: Tr.t(@tr("Redownload…"), Tr.lang); clicked => { context-popup.close(); root.redownload-task(); } }
-                    Button { text: Tr.t(@tr("Restart"), Tr.lang); clicked => { context-popup.close(); root.restart-task(); } }
-                    Button { text: Tr.t(@tr("Delete"), Tr.lang); clicked => { context-popup.close(); root.remove-task(); } }
-                    Button { text: Tr.t(@tr("Properties"), Tr.lang); clicked => { context-popup.close(); root.task-details(); } }
-                }
-            }
-        }
-    }
+    import { Tr, TaskRow, MenuEntry, TreeNode, ColumnSpec, MainWindow } from "ui/main_window.slint";
+    import { FindWindow, PromptWindow, ConfirmWindow, AboutWindow } from "ui/main_dialogs.slint";
+    export { Tr, TaskRow, MenuEntry, TreeNode, ColumnSpec, MainWindow, FindWindow, PromptWindow, ConfirmWindow, AboutWindow }
 
     export component DetailsWindow inherits Window {
         title: "XDM — Download details";
@@ -2262,6 +1780,8 @@ fn loading_row() -> TaskRow {
         queue: "".into(),
         progress: 0.0,
         selected: false,
+        raw_status: "".into(),
+        queued: false,
     }
 }
 
@@ -2290,11 +1810,13 @@ fn row_from_summary(
         time_left: task_table::format_time_left(&task.status, task.eta_seconds).into(),
         transfer_rate: task_table::format_rate(task.bytes_per_second).into(),
         last_try_date: task_table::format_date(&task.updated_at, &task.created_at).into(),
-        description: (if !task.output.is_empty() { task.output } else { task.url }).into(),
+        description: "".into(),
         category: task.category.into(),
         queue: q_name.into(),
         progress: progress as f32,
         selected: is_selected,
+        queued: task.status == "queued" || task.queue_id != 1,
+        raw_status: task.status.clone().into(),
     }
 }
 
@@ -2322,7 +1844,8 @@ fn daemon_sort(column: &str, asc: bool, queue_filtered: bool) -> Option<String> 
 fn build_query(ui: &MainWindow, sort: &(String, bool)) -> Query {
     let queue_id = ui.get_queue_filter_id().as_str().parse::<i64>().unwrap_or(0);
     let category = ui.get_category_filter().to_string();
-    let mut status = None;
+    let tree_status = ui.get_status_filter().to_string();
+    let mut status = (!tree_status.is_empty()).then_some(tree_status);
     let mut words = Vec::new();
     for word in ui.get_search_query().to_string().split_whitespace() {
         match word.strip_prefix("status:") {
@@ -2466,6 +1989,15 @@ impl TableShared {
         })
         .unwrap_or(false)
     }
+}
+
+fn install_tr_window<'a, T: ComponentHandle>(window: &'a T)
+where
+    Tr<'a>: slint::Global<'a, T>,
+{
+    let tr = window.global::<Tr>();
+    tr.on_t(|text, _lang| i18n::translate(text.as_str()).into());
+    tr.set_lang(i18n::current_language().into());
 }
 
 macro_rules! install_tr {
@@ -2689,6 +2221,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         None
                     };
+                    let categories_res = if want_state {
+                        paths.request(Command::CategoryList).ok().filter(|reply| reply.ok).map(|reply| reply.categories)
+                    } else {
+                        None
+                    };
                     let _ = slint::invoke_from_event_loop(move || {
                         let ui_start = std::time::Instant::now();
                         refreshing.store(false, Ordering::SeqCst);
@@ -2704,6 +2241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 if let Some(reply) = &state_res {
                                     ui.set_queue_state(queue_state_text(reply).into());
+                                    mainwin::on_list_reply(&ui, reply, categories_res.as_deref());
                                 }
                                 if let (Ok(mut pt), Ok(mut pq)) = (prev_tasks.lock(), prev_queues.lock()) {
                                     let is_first = !initialized_statuses.swap(true, Ordering::SeqCst);
@@ -6486,6 +6024,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
+    mainwin::install(
+        &ui,
+        mainwin::Ctx {
+            ipc: ipc.clone(),
+            refresh: refresh.clone(),
+            shared: table_shared.clone(),
+            dir: paths.dir.clone(),
+            sort_state: sort_state.clone(),
+        },
+    );
     refresh();
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, Duration::from_secs(2), move || {

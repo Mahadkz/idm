@@ -51,7 +51,7 @@ msgstr "تفصیلات"
 msgid "Downloads"
 msgstr "ڈاؤن لوڈز"
 
-msgid "File name"
+msgid "File Name"
 msgstr "فائل کا نام"
 
 msgid "Find"
@@ -66,7 +66,7 @@ msgstr "کنٹرولز چھپائیں"
 msgid "Import / Export…"
 msgstr "درآمد / برآمد…"
 
-msgid "Last try date"
+msgid "Last Try Date"
 msgstr "آخری کوشش"
 
 msgid "More controls"
@@ -137,3 +137,51 @@ msgstr "رفتار"
 
 msgid "XDM"
 msgstr "ایکس ڈی ایم"
+
+msgid "Tasks"
+msgstr "کام"
+
+msgid "File"
+msgstr "فائل"
+
+msgid "View"
+msgstr "منظر"
+
+msgid "Help"
+msgstr "مدد"
+
+msgid "Stop"
+msgstr "روکیں"
+
+msgid "Stop All"
+msgstr "سب روکیں"
+
+msgid "Delete Completed"
+msgstr "مکمل شدہ حذف کریں"
+
+msgid "Options"
+msgstr "اختیارات"
+
+msgid "Scheduler"
+msgstr "شیڈیولر"
+
+msgid "Start Queue"
+msgstr "قطار شروع کریں"
+
+msgid "Stop Queue"
+msgstr "قطار روکیں"
+
+msgid "Categories"
+msgstr "زمرے"
+
+msgid "All Downloads"
+msgstr "تمام ڈاؤن لوڈز"
+
+msgid "Unfinished"
+msgstr "نامکمل"
+
+msgid "Finished"
+msgstr "مکمل"
+
+msgid "Queues"
+msgstr "قطاریں"

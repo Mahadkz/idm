@@ -1,0 +1,883 @@
+// XDM main window: menu bar, large-icon toolbar, category tree, download table.
+// Layout follows the structure of a classic download-manager shell; all artwork is original.
+import { Button, CheckBox, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { Tr, TaskRow, MenuEntry, TreeNode, ColumnSpec, Pal } from "mw_common.slint";
+import { ToolIcon, TinyIcon } from "mw_icons.slint";
+export { Tr, TaskRow, MenuEntry, TreeNode, ColumnSpec }
+
+component MenuList inherits Rectangle {
+    in property <[MenuEntry]> entries;
+    callback activated(string);
+    callback submenu(string, length);
+    background: Pal.menu-bg;
+    border-width: 1px;
+    border-color: Pal.menu-border;
+        for e[i] in root.entries: Rectangle {
+            x: 2px;
+            y: e.y;
+            width: parent.width - 4px;
+            height: e.separator ? 9px : 17px;
+            if e.separator: Rectangle {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 12px;
+                height: 1px;
+                background: Pal.border;
+            }
+            if !e.separator: Rectangle {
+                background: (item.has-hover && e.enabled) ? Pal.hover : transparent;
+                Text {
+                    x: 4px;
+                    width: 12px;
+                    text: e.checked ? "✓" : "";
+                    color: Pal.text;
+                    vertical-alignment: center;
+                    font-size: 11px;
+                }
+                Text {
+                    x: 17px;
+                    width: parent.width - 17px - (e.shortcut != "" ? 80px : 22px);
+                    text: e.label;
+                    color: e.enabled ? Pal.text : Pal.text-dim;
+                    vertical-alignment: center;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+                Text {
+                    x: parent.width - 86px;
+                    width: 80px;
+                    text: e.submenu ? "▸" : e.shortcut;
+                    color: e.enabled ? Pal.text : Pal.text-dim;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    font-size: 11px;
+                }
+                item := TouchArea {
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.move && e.submenu && e.enabled) {
+                            root.submenu(e.action, e.y);
+                        }
+                    }
+                    clicked => {
+                        if (!e.enabled) {
+                            return;
+                        }
+                        // Cascades open on hover; a click on the parent row only keeps the menu open.
+                        if (!e.submenu) {
+                            root.activated(e.action);
+                        }
+                    }
+                }
+            }
+        }
+}
+
+component SubPopup inherits PopupWindow {
+    in property <[MenuEntry]> entries;
+    in property <length> menu-width: 210px;
+    in property <length> menu-height: 100px;
+    callback activated(string);
+    width: root.menu-width;
+    height: root.menu-height;
+    close-policy: close-on-click-outside;
+    MenuList {
+        entries: root.entries;
+        activated(a) => { root.activated(a); }
+    }
+}
+
+component MenuPopup inherits PopupWindow {
+    in property <[MenuEntry]> entries;
+    in property <length> menu-width: 230px;
+    in property <length> menu-height: 100px;
+    in property <[MenuEntry]> sub-entries;
+    in property <length> sub-height: 100px;
+    callback activated(string);
+    callback submenu-requested(string);
+    property <length> sub-y: 0px;
+    width: root.menu-width;
+    height: root.menu-height;
+    close-policy: close-on-click-outside;
+    MenuList {
+        entries: root.entries;
+        activated(a) => { root.activated(a); root.close(); }
+        submenu(a, y) => {
+            root.sub-y = y;
+            root.submenu-requested(a);
+            sub.show();
+        }
+    }
+    sub := SubPopup {
+        x: root.menu-width - 4px;
+        y: root.sub-y;
+        entries: root.sub-entries;
+        menu-height: root.sub-height;
+        activated(a) => { root.activated(a); root.close(); }
+    }
+}
+
+component BarItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> open;
+    callback clicked;
+    width: label.preferred-width + 14px;
+    background: (ta.has-hover || root.open) ? Pal.hover : transparent;
+    label := Text {
+        text: root.text;
+        color: Pal.text;
+        font-size: 11px;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> active: true;
+    in property <bool> small: false;
+    in property <length> button-width: 74px;
+    in property <bool> dropdown: false;
+    callback clicked;
+    callback dropdown-clicked;
+    width: root.button-width + (root.dropdown ? 10px : 0px);
+    background: (main.has-hover && root.active) ? Pal.hover : transparent;
+    border-radius: 3px;
+    ToolIcon {
+        x: (root.button-width - self.width) / 2;
+        y: root.small ? 4px : 8px;
+        size: root.small ? 20px : 32px;
+        kind: root.icon;
+        dim: !root.active;
+    }
+    if !root.small: Text {
+        x: 0px;
+        y: 45px;
+        width: root.button-width;
+        height: 16px;
+        text: root.text;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+        color: root.active ? Pal.text : Pal.text-dim;
+    }
+    main := TouchArea {
+        width: root.button-width;
+        enabled: root.active;
+        clicked => { root.clicked(); }
+    }
+    if root.dropdown: Rectangle {
+        x: root.button-width - 4px;
+        width: 14px;
+        background: arrow.has-hover ? Pal.hover : transparent;
+        Text { text: "⌄"; font-size: 11px; color: Pal.text; horizontal-alignment: center; y: 8px; }
+        arrow := TouchArea { clicked => { root.dropdown-clicked(); } }
+    }
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <string> arrow;
+    in-out property <bool> dragging;
+    callback clicked;
+    callback resized(length);
+    callback released(length);
+    background: Pal.panel-bg;
+    clip: true;
+    Text {
+        x: 5px;
+        width: parent.width - 8px - (root.arrow != "" ? 12px : 0px);
+        text: root.text;
+        overflow: elide;
+        vertical-alignment: center;
+        font-size: 11px;
+        color: Pal.text;
+    }
+    Text {
+        x: parent.width - 16px;
+        width: 12px;
+        text: root.arrow;
+        font-size: 8px;
+        vertical-alignment: center;
+        color: Pal.text-dim;
+    }
+    Rectangle { x: parent.width - 1px; width: 1px; background: Pal.grid; }
+    Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+    body := TouchArea {
+        width: parent.width - 6px;
+        moved => {
+            if (abs(self.mouse-x - self.pressed-x) > 8px) {
+                root.dragging = true;
+            }
+        }
+        clicked => {
+            if (!root.dragging) {
+                root.clicked();
+            }
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.dragging = false;
+            }
+            if (event.kind == PointerEventKind.up && root.dragging) {
+                root.released(self.mouse-x - self.pressed-x);
+            }
+        }
+    }
+    grip := TouchArea {
+        x: parent.width - 6px;
+        width: 6px;
+        mouse-cursor: col-resize;
+        moved => { root.resized(self.mouse-x - self.pressed-x); }
+    }
+}
+
+component TreeRow inherits Rectangle {
+    in property <TreeNode> node;
+    callback clicked;
+    callback toggled;
+    height: 16px;
+    Rectangle {
+        x: 4px + root.node.depth * 19px;
+        width: parent.width - self.x;
+        Rectangle {
+            x: 0px;
+            y: 3px;
+            width: 9px;
+            height: 9px;
+            border-width: root.node.expandable ? 1px : 0px;
+            border-color: Pal.border;
+            background: Pal.panel-bg;
+            Text {
+                text: root.node.expanded ? "−" : "+";
+                visible: root.node.expandable;
+                font-size: 9px;
+                color: Pal.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea { enabled: root.node.expandable; clicked => { root.toggled(); } }
+        }
+        TinyIcon { x: 13px; kind: root.node.icon; }
+        Rectangle {
+            x: 31px;
+            width: min(parent.width - 31px, lbl.preferred-width + 6px);
+            background: root.node.selected ? Pal.sel-bg : transparent;
+            lbl := Text {
+                x: 3px;
+                text: root.node.label;
+                font-size: 11px;
+                color: root.node.selected ? #ffffff : Pal.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+    TouchArea { x: 25px + root.node.depth * 19px; clicked => { root.clicked(); } }
+}
+
+export component MainWindow inherits Window {
+    title: "XDM — Downloads";
+    preferred-width: 900px;
+    preferred-height: 600px;
+    min-width: 520px;
+    min-height: 360px;
+    background: Pal.window-bg;
+    default-font-family: "Tahoma";
+    public function apply-theme(theme: string) {
+        if (theme == "dark") {
+            Palette.color-scheme = ColorScheme.dark;
+        } else if (theme == "light") {
+            Palette.color-scheme = ColorScheme.light;
+        } else {
+            Palette.color-scheme = ColorScheme.unknown;
+        }
+    }
+    in property <[TaskRow]> tasks;
+    in property <[TreeNode]> tree;
+    in-out property <[ColumnSpec]> columns;
+    in-out property <[MenuEntry]> m-tasks;
+    in-out property <[MenuEntry]> m-file;
+    in-out property <[MenuEntry]> m-downloads;
+    in-out property <[MenuEntry]> m-view;
+    in-out property <[MenuEntry]> m-help;
+    in-out property <[MenuEntry]> m-context;
+    in-out property <[MenuEntry]> m-startq;
+    in-out property <[MenuEntry]> m-stopq;
+    in-out property <[MenuEntry]> m-sub;
+    in-out property <length> h-tasks: 100px;
+    in-out property <length> h-file: 100px;
+    in-out property <length> h-downloads: 100px;
+    in-out property <length> h-view: 100px;
+    in-out property <length> h-help: 100px;
+    in-out property <length> h-context: 100px;
+    in-out property <length> h-startq: 100px;
+    in-out property <length> h-stopq: 100px;
+    in-out property <length> h-sub: 100px;
+    in-out property <string> url;
+    in-out property <string> destination;
+    in-out property <string> message: "Connecting to daemon…";
+    in-out property <string> queue-state: "Queue status unknown";
+    in-out property <string> schedule-start;
+    in-out property <string> schedule-stop;
+    in-out property <int> selected: -1;
+    in-out property <string> category-filter: "All";
+    in-out property <string> status-filter: "";
+    in-out property <string> search-query;
+    in-out property <string> rate-kib: "512";
+    in-out property <string> queue-filter-id: "0";
+    in-out property <string> queue-caption: "All queues";
+    in-out property <bool> has-pending-completion: false;
+    in-out property <string> pending-action-text: "";
+    in-out property <int> pending-queue-id: 0;
+    in-out property <int> pending-seconds-remaining: 0;
+    in-out property <string> pause-button-text: "Pause";
+    in-out property <bool> col-filename: true;
+    in-out property <bool> col-size: true;
+    in-out property <bool> col-status: true;
+    in-out property <bool> col-time-left: true;
+    in-out property <bool> col-transfer-rate: true;
+    in-out property <bool> col-last-try-date: true;
+    in-out property <bool> col-description: true;
+    in-out property <bool> col-category: true;
+    in-out property <bool> col-queue: true;
+    in-out property <string> sort-column: "id";
+    in-out property <bool> sort-asc: true;
+    in-out property <length> context-menu-x: 100px;
+    in-out property <length> context-menu-y: 200px;
+    in-out property <bool> show-sidebar: true;
+    in-out property <length> sidebar-width: 142px;
+    in-out property <bool> small-toolbar: false;
+    in-out property <bool> can-resume: false;
+    in-out property <bool> can-stop: false;
+    in-out property <bool> can-stop-all: false;
+    in-out property <bool> can-delete: false;
+    in-out property <bool> can-delete-completed: false;
+    in-out property <bool> can-start-queue: true;
+    in-out property <bool> can-stop-queue: false;
+    in-out property <string> open-menu-name: "";
+    callback cancel-completion(int);
+    callback add-task();
+    callback pause-task();
+    callback resume-task();
+    callback set-priority(int);
+    callback set-task-rate(bool);
+    callback task-details();
+    callback redownload-task();
+    callback remove-task();
+    callback transfer-lists();
+    callback manage-queues();
+    callback refresh();
+    callback queue-start();
+    callback queue-stop();
+    callback schedule-queue-start();
+    callback schedule-queue-stop();
+    callback move-task(string);
+    callback queue-start-one();
+    callback queue-stop-one();
+    callback queue-settings();
+    callback open-batch();
+    callback open-grabber();
+    callback open-categories();
+    callback open-connection();
+    callback open-preferences();
+    callback open-add-url();
+    callback open-add-media();
+    callback task-selected(int);
+    callback show-clipboard-prompt(string);
+    callback sort-by-column(string);
+    callback open-columns();
+    callback open-task();
+    callback open-task-folder();
+    callback move-rename-task();
+    callback restart-task();
+    callback open-partials();
+    callback open-bandwidth();
+    callback task-clicked(int, bool, bool);
+    callback task-right-clicked(int, length, length);
+    callback task-double-clicked(int);
+    callback key-delete();
+    callback key-enter();
+    callback key-up();
+    callback key-down();
+    callback key-select-all();
+    // New in the IDM-style shell.
+    callback open-menu(string);
+    callback menu-action(string);
+    callback submenu-requested(string);
+    callback tree-clicked(string);
+    callback tree-toggled(string);
+    callback columns-changed();
+    callback column-dragged(int, length);
+    callback delete-completed();
+    callback open-find();
+    callback toolbar-queue(bool);
+    callback hide-sidebar();
+
+    public function show-menu(name: string) {
+        if (name == "tasks") { tasks-menu.show(); }
+        else if (name == "file") { file-menu.show(); }
+        else if (name == "downloads") { downloads-menu.show(); }
+        else if (name == "view") { view-menu.show(); }
+        else if (name == "help") { help-menu.show(); }
+        else if (name == "startq") { startq-menu.show(); }
+        else if (name == "stopq") { stopq-menu.show(); }
+    }
+    public function close-menus() {
+        tasks-menu.close();
+        file-menu.close();
+        downloads-menu.close();
+        view-menu.close();
+        help-menu.close();
+        context-popup.close();
+        startq-menu.close();
+        stopq-menu.close();
+    }
+    public function show-context() {
+        context-popup.show();
+    }
+
+    function col-visible(id: string) -> bool {
+        if (id == "filename") { return root.col-filename; }
+        if (id == "size") { return root.col-size; }
+        if (id == "status") { return root.col-status; }
+        if (id == "time_left") { return root.col-time-left; }
+        if (id == "transfer_rate") { return root.col-transfer-rate; }
+        if (id == "last_try_date") { return root.col-last-try-date; }
+        if (id == "description") { return root.col-description; }
+        if (id == "category") { return root.col-category; }
+        if (id == "queue") { return root.col-queue; }
+        return true;
+    }
+    function col-title(id: string) -> string {
+        if (id == "filename") { return Tr.t(@tr("File Name"), Tr.lang); }
+        if (id == "q") { return Tr.t(@tr("Q"), Tr.lang); }
+        if (id == "size") { return Tr.t(@tr("Size"), Tr.lang); }
+        if (id == "status") { return Tr.t(@tr("Status"), Tr.lang); }
+        if (id == "time_left") { return Tr.t(@tr("Time left"), Tr.lang); }
+        if (id == "transfer_rate") { return Tr.t(@tr("Transfer rate"), Tr.lang); }
+        if (id == "last_try_date") { return Tr.t(@tr("Last Try Date"), Tr.lang); }
+        if (id == "description") { return Tr.t(@tr("Description"), Tr.lang); }
+        if (id == "category") { return Tr.t(@tr("Category"), Tr.lang); }
+        return Tr.t(@tr("Queue"), Tr.lang);
+    }
+    function sort-key(id: string) -> string {
+        if (id == "q") { return "queue"; }
+        return id;
+    }
+    function cell-text(task: TaskRow, id: string) -> string {
+        if (id == "filename") { return task.filename; }
+        if (id == "size") { return task.size; }
+        if (id == "status") { return task.status; }
+        if (id == "time_left") { return task.time-left; }
+        if (id == "transfer_rate") { return task.transfer-rate; }
+        if (id == "last_try_date") { return task.last-try-date; }
+        if (id == "description") { return task.description; }
+        if (id == "category") { return task.category; }
+        if (id == "queue") { return task.queue; }
+        return "";
+    }
+    function cat-icon(category: string) -> string {
+        if (category == "Compressed") { return "cat-compressed"; }
+        if (category == "Documents") { return "cat-documents"; }
+        if (category == "Music") { return "cat-music"; }
+        if (category == "Programs") { return "cat-programs"; }
+        if (category == "Video") { return "cat-video"; }
+        return "cat-other";
+    }
+    function open-bar-menu(name: string) {
+        root.open-menu(name);
+        root.show-menu(name);
+    }
+
+    forward-focus: fs;
+    fs := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Delete) {
+                root.key-delete();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.key-enter();
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.key-up();
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.key-down();
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                root.key-select-all();
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "m" || event.text == "M")) {
+                root.move-rename-task();
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
+                root.open-find();
+                return accept;
+            }
+            return reject;
+        }
+
+        // ---- menu bar ----
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: 21px;
+            background: Pal.window-bg;
+            HorizontalLayout {
+                alignment: start;
+                bar-tasks := BarItem { text: Tr.t(@tr("Tasks"), Tr.lang); clicked => { root.open-bar-menu("tasks"); } }
+                bar-file := BarItem { text: Tr.t(@tr("File"), Tr.lang); clicked => { root.open-bar-menu("file"); } }
+                bar-downloads := BarItem { text: Tr.t(@tr("Downloads"), Tr.lang); clicked => { root.open-bar-menu("downloads"); } }
+                bar-view := BarItem { text: Tr.t(@tr("View"), Tr.lang); clicked => { root.open-bar-menu("view"); } }
+                bar-help := BarItem { text: Tr.t(@tr("Help"), Tr.lang); clicked => { root.open-bar-menu("help"); } }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+        }
+
+        // ---- completion countdown banner ----
+        if root.has-pending-completion: Rectangle {
+            x: 0px;
+            y: 21px;
+            width: parent.width;
+            height: 34px;
+            background: #ffcdd2;
+            border-width: 2px;
+            border-color: #b71c1c;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 16px;
+                alignment: space-between;
+                Text {
+                    text: "⚠ WARNING: " + root.pending-action-text;
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #b71c1c;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel-completion(root.pending-queue-id); }
+                }
+            }
+        }
+
+        // ---- toolbar ----
+        toolbar := Rectangle {
+            x: 0px;
+            y: root.has-pending-completion ? 55px : 21px;
+            width: parent.width;
+            height: root.small-toolbar ? 30px : 69px;
+            background: Pal.toolbar-bg;
+            clip: true;
+            HorizontalLayout {
+                spacing: 0px;
+                alignment: start;
+                ToolButton { icon: "add"; text: Tr.t(@tr("Add URL"), Tr.lang); small: root.small-toolbar; clicked => { root.open-add-url(); } }
+                ToolButton { icon: "resume"; text: Tr.t(@tr("Resume"), Tr.lang); small: root.small-toolbar; active: root.can-resume; clicked => { root.resume-task(); } }
+                ToolButton { icon: "stop"; text: Tr.t(@tr("Stop"), Tr.lang); small: root.small-toolbar; active: root.can-stop; clicked => { root.pause-task(); } }
+                ToolButton { icon: "stopall"; text: Tr.t(@tr("Stop All"), Tr.lang); small: root.small-toolbar; active: root.can-stop-all; clicked => { root.queue-stop(); } }
+                ToolButton { icon: "delete"; text: Tr.t(@tr("Delete"), Tr.lang); small: root.small-toolbar; active: root.can-delete; clicked => { root.remove-task(); } }
+                ToolButton { icon: "delcompleted"; text: Tr.t(@tr("Delete Completed"), Tr.lang); small: root.small-toolbar; active: root.can-delete-completed; clicked => { root.delete-completed(); } }
+                ToolButton { icon: "options"; text: Tr.t(@tr("Options"), Tr.lang); small: root.small-toolbar; clicked => { root.open-preferences(); } }
+                ToolButton { icon: "scheduler"; text: Tr.t(@tr("Scheduler"), Tr.lang); small: root.small-toolbar; clicked => { root.queue-settings(); } }
+                startq-btn := ToolButton {
+                    icon: "startqueue";
+                    text: Tr.t(@tr("Start Queue"), Tr.lang);
+                    small: root.small-toolbar;
+                    dropdown: true;
+                    active: root.can-start-queue;
+                    clicked => { root.toolbar-queue(true); }
+                    dropdown-clicked => { root.open-bar-menu("startq"); }
+                }
+                stopq-btn := ToolButton {
+                    icon: "stopqueue";
+                    text: Tr.t(@tr("Stop Queue"), Tr.lang);
+                    small: root.small-toolbar;
+                    dropdown: true;
+                    active: root.can-stop-queue;
+                    clicked => { root.toolbar-queue(false); }
+                    dropdown-clicked => { root.open-bar-menu("stopq"); }
+                }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+        }
+
+        // ---- body: category tree | table ----
+        body := Rectangle {
+            x: 0px;
+            y: toolbar.y + toolbar.height;
+            width: parent.width;
+            height: parent.height - self.y - 20px;
+
+            if root.show-sidebar: Rectangle {
+                x: 7px;
+                y: 0px;
+                width: root.sidebar-width;
+                height: parent.height - 3px;
+                background: Pal.panel-bg;
+                border-width: 1px;
+                border-color: Pal.border;
+                clip: true;
+                Text {
+                    x: 5px;
+                    y: 0px;
+                    height: 18px;
+                    text: Tr.t(@tr("Categories"), Tr.lang);
+                    font-size: 11px;
+                    color: Pal.text;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    x: parent.width - 20px;
+                    y: 0px;
+                    width: 18px;
+                    height: 18px;
+                    background: close-ta.has-hover ? Pal.hover : transparent;
+                    Text { text: "✕"; font-size: 10px; color: Pal.text; horizontal-alignment: center; vertical-alignment: center; }
+                    close-ta := TouchArea { clicked => { root.hide-sidebar(); } }
+                }
+                ListView {
+                    y: 20px;
+                    height: parent.height - 20px;
+                    for node in root.tree: TreeRow {
+                        node: node;
+                        clicked => { root.tree-clicked(node.id); }
+                        toggled => { root.tree-toggled(node.id); }
+                    }
+                }
+            }
+            if root.show-sidebar: Rectangle {
+                x: root.sidebar-width + 7px;
+                y: 0px;
+                width: 5px;
+                height: parent.height - 3px;
+                TouchArea {
+                    mouse-cursor: col-resize;
+                    moved => {
+                        root.sidebar-width = max(90px, min(root.width - 200px, root.sidebar-width + (self.mouse-x - self.pressed-x)));
+                    }
+                }
+            }
+
+            table := Rectangle {
+                x: root.show-sidebar ? root.sidebar-width + 12px : 7px;
+                y: 0px;
+                width: parent.width - self.x - 8px;
+                height: parent.height - 3px;
+                background: Pal.panel-bg;
+                border-width: 1px;
+                border-color: Pal.border;
+                clip: true;
+
+                HorizontalLayout {
+                    y: 0px;
+                    height: 19px;
+                    alignment: start;
+                    spacing: 0px;
+                    for col[ci] in root.columns: Rectangle {
+                        if root.col-visible(col.id): HeaderCell {
+                            width: col.width;
+                            text: root.col-title(col.id);
+                            arrow: root.sort-column == root.sort-key(col.id) ? (root.sort-asc ? "▲" : "▼") : "";
+                            clicked => { root.sort-by-column(root.sort-key(col.id)); }
+                            resized(dx) => {
+                                root.columns[ci].width = max(24px, root.columns[ci].width + dx);
+                                root.columns-changed();
+                            }
+                            released(dx) => { root.column-dragged(ci, dx); }
+                        }
+                        width: root.col-visible(col.id) ? col.width : 0px;
+                    }
+                }
+                ListView {
+                    y: 19px;
+                    height: parent.height - 19px;
+                    for task[index] in root.tasks: Rectangle {
+                        height: 17px;
+                        background: (task.selected || root.selected == index) ? Pal.sel-bg : transparent;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 0px;
+                            for col in root.columns: Rectangle {
+                                width: root.col-visible(col.id) ? col.width : 0px;
+                                clip: true;
+                                if root.col-visible(col.id) && col.id == "filename": Rectangle {
+                                    TinyIcon { x: 3px; y: 0.5px; kind: root.cat-icon(task.category); }
+                                    Text {
+                                        x: 23px;
+                                        width: parent.width - 26px;
+                                        text: task.filename;
+                                        font-size: 11px;
+                                        color: (task.selected || root.selected == index) ? #ffffff : Pal.text;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                if root.col-visible(col.id) && col.id == "q": Rectangle {
+                                    if task.queued: Rectangle {
+                                        x: (parent.width - 8px) / 2;
+                                        y: 4.5px;
+                                        width: 8px;
+                                        height: 8px;
+                                        border-width: 1.5px;
+                                        border-color: (task.selected || root.selected == index) ? #ffffff : #3b82c4;
+                                    }
+                                }
+                                if root.col-visible(col.id) && col.id != "filename" && col.id != "q": Text {
+                                    x: 5px;
+                                    width: parent.width - 8px;
+                                    text: root.cell-text(task, col.id);
+                                    font-size: 11px;
+                                    color: (task.selected || root.selected == index) ? #ffffff : Pal.text;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { x: parent.width - 1px; width: 1px; background: Pal.grid; }
+                            }
+                        }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Pal.grid; }
+                        TouchArea {
+                            double-clicked => { root.task-double-clicked(index); }
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                    root.selected = index;
+                                    fs.focus();
+                                    root.task-clicked(index, event.modifiers.control, event.modifiers.shift);
+                                    root.task-selected(index);
+                                }
+                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.selected = index;
+                                    fs.focus();
+                                    root.context-menu-x = min(root.width - 182px, max(2px, self.absolute-position.x + self.mouse-x - root.absolute-position.x));
+                                    root.context-menu-y = min(root.height - root.h-context - 2px, max(2px, self.absolute-position.y + self.mouse-y - root.absolute-position.y));
+                                    root.task-right-clicked(index, self.mouse-x, self.mouse-y);
+                                    root.show-context();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- status bar ----
+        Rectangle {
+            x: 0px;
+            y: parent.height - 20px;
+            width: parent.width;
+            height: 20px;
+            background: Pal.window-bg;
+            Rectangle { height: 1px; background: Pal.border; }
+            Text {
+                x: 8px;
+                width: parent.width * 0.62;
+                text: root.message;
+                font-size: 11px;
+                color: Pal.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: parent.width * 0.62 + 8px;
+                width: parent.width * 0.38 - 16px;
+                text: root.queue-caption + "  ·  " + root.queue-state;
+                font-size: 11px;
+                color: Pal.text-dim;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    tasks-menu := MenuPopup {
+        x: bar-tasks.absolute-position.x;
+        y: 21px;
+        menu-width: 250px;
+        menu-height: root.h-tasks;
+        entries: root.m-tasks;
+        activated(a) => { root.menu-action(a); }
+        sub-entries: root.m-sub;
+        sub-height: root.h-sub;
+        submenu-requested(a) => { root.submenu-requested(a); }
+    }
+    file-menu := MenuPopup {
+        x: bar-file.absolute-position.x;
+        y: 21px;
+        menu-width: 250px;
+        menu-height: root.h-file;
+        entries: root.m-file;
+        activated(a) => { root.menu-action(a); }
+        sub-entries: root.m-sub;
+        sub-height: root.h-sub;
+        submenu-requested(a) => { root.submenu-requested(a); }
+    }
+    downloads-menu := MenuPopup {
+        x: bar-downloads.absolute-position.x;
+        y: 21px;
+        menu-width: 250px;
+        menu-height: root.h-downloads;
+        entries: root.m-downloads;
+        activated(a) => { root.menu-action(a); }
+        sub-entries: root.m-sub;
+        sub-height: root.h-sub;
+        submenu-requested(a) => { root.submenu-requested(a); }
+    }
+    view-menu := MenuPopup {
+        x: bar-view.absolute-position.x;
+        y: 21px;
+        menu-width: 230px;
+        menu-height: root.h-view;
+        entries: root.m-view;
+        activated(a) => { root.menu-action(a); }
+        sub-entries: root.m-sub;
+        sub-height: root.h-sub;
+        submenu-requested(a) => { root.submenu-requested(a); }
+    }
+    help-menu := MenuPopup {
+        x: bar-help.absolute-position.x;
+        y: 21px;
+        menu-width: 200px;
+        menu-height: root.h-help;
+        entries: root.m-help;
+        activated(a) => { root.menu-action(a); }
+    }
+    startq-menu := MenuPopup {
+        x: startq-btn.absolute-position.x + startq-btn.button-width - 60px;
+        y: toolbar.y + toolbar.height;
+        menu-width: 200px;
+        menu-height: root.h-startq;
+        entries: root.m-startq;
+        activated(a) => { root.menu-action(a); }
+    }
+    stopq-menu := MenuPopup {
+        x: stopq-btn.absolute-position.x + stopq-btn.button-width - 60px;
+        y: toolbar.y + toolbar.height;
+        menu-width: 200px;
+        menu-height: root.h-stopq;
+        entries: root.m-stopq;
+        activated(a) => { root.menu-action(a); }
+    }
+    context-popup := MenuPopup {
+        x: root.context-menu-x;
+        y: root.context-menu-y;
+        menu-width: 180px;
+        menu-height: root.h-context;
+        entries: root.m-context;
+        activated(a) => { root.menu-action(a); }
+        sub-entries: root.m-sub;
+        sub-height: root.h-sub;
+        submenu-requested(a) => { root.submenu-requested(a); }
+    }
+}

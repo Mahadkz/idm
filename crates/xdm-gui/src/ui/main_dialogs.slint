@@ -1,0 +1,107 @@
+// Small dialogs owned by the main window shell.
+import { Button, LineEdit } from "std-widgets.slint";
+import { Tr, Pal } from "mw_common.slint";
+
+// "Find" (Ctrl+F): a text query pushed to the daemon search.
+export component FindWindow inherits Window {
+    title: "XDM — Find file";
+    width: 340px;
+    height: 150px;
+    background: Pal.window-bg;
+    default-font-family: "Tahoma";
+    in-out property <string> query;
+    callback find();
+    callback show-all();
+    callback dismiss();
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text { text: Tr.t(@tr("Find:"), Tr.lang); color: Pal.text; font-size: 11px; }
+        edit := LineEdit {
+            text <=> root.query;
+            accepted => { root.find(); }
+        }
+        Text {
+            text: Tr.t(@tr("Matches the file name or the download link."), Tr.lang);
+            color: Pal.text-dim;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button { text: Tr.t(@tr("Show all"), Tr.lang); clicked => { root.show-all(); } }
+            Button { text: Tr.t(@tr("Find"), Tr.lang); primary: true; clicked => { root.find(); } }
+            Button { text: Tr.t(@tr("Cancel"), Tr.lang); clicked => { root.dismiss(); } }
+        }
+    }
+}
+
+// One-field prompt (speed limit, queue schedule).
+export component PromptWindow inherits Window {
+    title: "XDM";
+    width: 380px;
+    height: 150px;
+    background: Pal.window-bg;
+    default-font-family: "Tahoma";
+    in property <string> caption;
+    in property <string> hint;
+    in-out property <string> value;
+    callback accepted();
+    callback dismiss();
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text { text: root.caption; color: Pal.text; font-size: 11px; wrap: word-wrap; }
+        LineEdit { text <=> root.value; placeholder-text: root.hint; accepted => { root.accepted(); } }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button { text: Tr.t(@tr("OK"), Tr.lang); primary: true; clicked => { root.accepted(); } }
+            Button { text: Tr.t(@tr("Cancel"), Tr.lang); clicked => { root.dismiss(); } }
+        }
+    }
+}
+
+export component ConfirmWindow inherits Window {
+    title: "XDM";
+    width: 380px;
+    height: 140px;
+    background: Pal.window-bg;
+    default-font-family: "Tahoma";
+    in property <string> caption;
+    callback accepted();
+    callback dismiss();
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text { text: root.caption; color: Pal.text; font-size: 11px; wrap: word-wrap; vertical-alignment: center; }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button { text: Tr.t(@tr("OK"), Tr.lang); primary: true; clicked => { root.accepted(); } }
+            Button { text: Tr.t(@tr("Cancel"), Tr.lang); clicked => { root.dismiss(); } }
+        }
+    }
+}
+
+export component AboutWindow inherits Window {
+    title: "XDM — About";
+    width: 380px;
+    height: 170px;
+    background: Pal.window-bg;
+    default-font-family: "Tahoma";
+    in property <string> version;
+    callback dismiss();
+    VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        Text { text: "XDM"; font-size: 22px; font-weight: 700; color: #143f73; }
+        Text { text: root.version; color: Pal.text; font-size: 11px; wrap: word-wrap; }
+        Text { text: "Open-source download manager. GPL-3.0-only."; color: Pal.text-dim; font-size: 11px; }
+        HorizontalLayout {
+            alignment: end;
+            Button { text: Tr.t(@tr("Close"), Tr.lang); clicked => { root.dismiss(); } }
+        }
+    }
+}

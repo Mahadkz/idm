@@ -54,6 +54,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_request(self, body):
         path = urlsplit(self.path).path
+        if self.command == 'HEAD':
+            # Size probes by clients are logged but never use up a one-shot link.
+            with lock, args.log.open('a') as file:
+                file.write(json.dumps({'path': path, 'method': 'HEAD', 'attempt': 0, 'range': None,
+                                       'cookie': None, 'body': ''}) + '\n')
+            return self.plain(405)
         with lock:
             attempts[path] = attempts.get(path, 0) + 1
             attempt = attempts[path]
@@ -62,8 +68,6 @@ class Handler(BaseHTTPRequestHandler):
                                        'range': self.headers.get('Range'),
                                        'cookie': self.headers.get('Cookie'),
                                        'body': body.decode('latin-1')}) + '\n')
-        if self.command == 'HEAD':
-            return self.plain(405)
         ranged = path not in ['/norange.bin', '/flaky-norange.bin', '/oneshot-norange.bin']
         size = 0 if path == '/empty.bin' else SIZE
         if path in ['/oneshot.bin', '/oneshot-norange.bin'] and attempt > 1:

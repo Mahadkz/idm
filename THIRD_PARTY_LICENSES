@@ -1,0 +1,8 @@
+XDM third-party material bundled in the repository
+
+crates/xdm-gui/assets/DejaVuSans.ttf
+  DejaVu Fonts License; see crates/xdm-gui/assets/FONT-LICENSE.txt.
+
+crates/xdm-gui/assets/fonts/tahoma.ttf, tahomabd.ttf
+  Tahoma-compatible fonts from the Wine project, GNU LGPL 2.1.
+  See crates/xdm-gui/assets/fonts/LICENSE-wine-fonts.txt.

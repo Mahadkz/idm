@@ -124,6 +124,18 @@ pub struct GuiSettings {
     pub columns: ColumnSettings,
     #[serde(default = "default_language_value")]
     pub language: String,
+    /// Show the "Download File Info" dialog after Add URL.
+    #[serde(default = "default_true")]
+    pub show_file_info: bool,
+    /// Open the per-download progress window when a download starts.
+    #[serde(default = "default_true")]
+    pub show_progress_window: bool,
+    /// Show the "Download complete" dialog (cleared by "Don't show again").
+    #[serde(default = "default_true")]
+    pub show_complete_dialog: bool,
+    /// Recently used Save As paths, newest first.
+    #[serde(default)]
+    pub save_history: Vec<String>,
 }
 
 impl GuiSettings {
@@ -157,6 +169,10 @@ impl Default for GuiSettings {
             clipboard_extensions: default_clipboard_extensions_value(),
             columns: ColumnSettings::default(),
             language: default_language_value(),
+            show_file_info: true,
+            show_progress_window: true,
+            show_complete_dialog: true,
+            save_history: Vec::new(),
         }
     }
 }
@@ -244,6 +260,10 @@ mod tests {
             clipboard_extensions: vec!["iso".into(), "dmg".into()],
             columns: cols,
             language: "ur".into(),
+            show_file_info: false,
+            show_progress_window: false,
+            show_complete_dialog: false,
+            save_history: vec!["/tmp/a.bin".into()],
         };
         save_settings(&dir, &s).unwrap();
         let loaded = load_settings(&dir);
@@ -252,6 +272,8 @@ mod tests {
         assert!(!loaded.columns.description);
         assert!(loaded.columns.filename);
         assert_eq!(loaded.language, "ur");
+        assert!(!loaded.show_file_info && !loaded.show_progress_window && !loaded.show_complete_dialog);
+        assert_eq!(loaded.save_history, vec!["/tmp/a.bin".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -282,6 +304,8 @@ mod tests {
         assert!(loaded.columns.filename);
         assert!(loaded.columns.size);
         assert!(loaded.confirm_remove);
+        assert!(loaded.show_file_info && loaded.show_progress_window && loaded.show_complete_dialog);
+        assert!(loaded.save_history.is_empty());
         assert!(!loaded.start_minimized);
         assert!(!loaded.monitor_clipboard);
         assert_eq!(loaded.clipboard_extensions.len(), 10);

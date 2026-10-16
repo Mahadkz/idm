@@ -1,5 +1,7 @@
 mod clipboard;
 mod dialog_helpers;
+#[path = "ui/download_dialogs.rs"]
+mod download_dialogs;
 mod i18n;
 mod maintenance;
 mod paged;
@@ -1985,6 +1987,127 @@ fn target_ids(
         .collect()
 }
 
+/// "Select all" meaning every task matching the filter that was shown, not
+/// only the loaded rows; `total` is what the user saw.
+#[derive(Clone)]
+struct AllMatching {
+    filter: xdm_ipc::TaskFilter,
+    total: u64,
+}
+
+type AllSel = Arc<Mutex<Option<AllMatching>>>;
+
+/// What a toolbar action applies to.
+#[derive(Clone)]
+enum Target {
+    Ids(Vec<i64>),
+    All(AllMatching),
+}
+
+impl Target {
+    fn count(&self) -> usize {
+        match self {
+            Target::Ids(ids) => ids.len(),
+            Target::All(all) => all.total as usize,
+        }
+    }
+}
+
+fn current_filter(ui: &MainWindow) -> xdm_ipc::TaskFilter {
+    build_query(ui, &("id".to_string(), true)).filter
+}
+
+/// The selection an action should use: all-matching mode while the filter is
+/// still the one that was selected, otherwise the row selection.
+fn resolve_target(
+    ui: &MainWindow,
+    ids: &Arc<Mutex<Vec<i64>>>,
+    set: &Arc<Mutex<std::collections::HashSet<usize>>>,
+    all: &AllSel,
+) -> Target {
+    if let Ok(mut guard) = all.lock() {
+        match guard.as_ref() {
+            Some(sel) if sel.filter == current_filter(ui) => return Target::All(sel.clone()),
+            Some(_) => *guard = None,
+            None => {}
+        }
+    }
+    Target::Ids(target_ids(ui, ids, set))
+}
+
+fn bulk_command(all: &AllMatching, action: xdm_ipc::BulkAction) -> Command {
+    Command::TaskBulk {
+        action,
+        selection: xdm_ipc::BulkSelection::Filter(all.filter.clone()),
+        expected_total: Some(all.total),
+    }
+}
+
+/// One-line outcome of a `TaskBulk` reply.
+fn bulk_message(result: Result<xdm_ipc::Reply, String>, verb: &str) -> String {
+    match result {
+        Ok(reply) if reply.ok => {
+            let report = reply.bulk.unwrap_or_default();
+            if report.failed == 0 {
+                format!("{verb} {} task(s)", report.done)
+            } else {
+                let first = report.failures.first().map(|f| format!(" (#{}: {})", f.task_id, f.error)).unwrap_or_default();
+                format!("{verb} {} task(s); {} could not be changed{first}", report.done, report.failed)
+            }
+        }
+        Ok(reply) => reply.error.unwrap_or_else(|| "Daemon rejected request".into()),
+        Err(error) => format!("Daemon unavailable: {error}"),
+    }
+}
+
+/// Removes `target` on the daemon; the message is the user-facing outcome.
+fn run_remove(
+    paths: &Paths,
+    target: &Target,
+    partial: &std::collections::HashSet<i64>,
+    partial_all: bool,
+) -> Result<String, String> {
+    match target {
+        Target::All(all) => {
+            let action = if partial_all {
+                xdm_ipc::BulkAction::RemoveWithPartials
+            } else {
+                xdm_ipc::BulkAction::Remove
+            };
+            let reply = paths.request(bulk_command(all, action)).map_err(|e| e.to_string())?;
+            if !reply.ok {
+                return Err(reply.error.unwrap_or_else(|| "Remove rejected".into()));
+            }
+            let report = reply.bulk.unwrap_or_default();
+            if report.failed > 0 {
+                let first = report.failures.first().map(|f| format!(" (#{}: {})", f.task_id, f.error)).unwrap_or_default();
+                Err(format!("{} removed; {} could not be removed{first}", report.done, report.failed))
+            } else {
+                Ok(format!("{} tasks removed", report.done))
+            }
+        }
+        Target::Ids(targets) => {
+            for task_id in targets {
+                let command = if partial.contains(task_id) {
+                    Command::TaskRemoveEx { task_id: *task_id, delete_partial: true }
+                } else {
+                    Command::Remove { task_id: *task_id }
+                };
+                match paths.request(command) {
+                    Ok(reply) if reply.ok => {}
+                    Ok(reply) => return Err(reply.error.unwrap_or_else(|| "Remove rejected".into())),
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Ok(if targets.len() == 1 {
+                format!("Task #{} removed; files kept", targets[0])
+            } else {
+                format!("{} tasks removed; files kept", targets.len())
+            })
+        }
+    }
+}
+
 /// Runs `f` on the paged table model behind the main window.
 fn with_model<R>(ui: &MainWindow, f: impl FnOnce(&PagedModel<TaskRow>) -> R) -> Option<R> {
     let model_rc = ui.get_tasks();
@@ -2026,6 +2149,64 @@ impl IpcClient {
         F: FnOnce(&Paths) + Send + 'static,
     {
         let _ = self.tx.send(Box::new(job));
+    }
+}
+
+/// Runs `work` on the IPC worker thread and `done` on the UI thread, where it
+/// may use non-`Send` window state. Keeps dialogs from freezing on the daemon.
+fn ipc_then<T: Send + 'static>(
+    ipc: &IpcClient,
+    work: impl FnOnce(&Paths) -> T + Send + 'static,
+    done: impl FnOnce(T) + 'static,
+) {
+    struct Shot<T> {
+        value: Option<T>,
+        waker: Option<std::task::Waker>,
+    }
+    struct Wait<T>(Arc<Mutex<Shot<T>>>);
+    impl<T> std::future::Future for Wait<T> {
+        type Output = Option<T>;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<T>> {
+            let Ok(mut shot) = self.0.lock() else {
+                return std::task::Poll::Ready(None);
+            };
+            match shot.value.take() {
+                Some(value) => std::task::Poll::Ready(Some(value)),
+                None => {
+                    shot.waker = Some(cx.waker().clone());
+                    std::task::Poll::Pending
+                }
+            }
+        }
+    }
+    let shot = Arc::new(Mutex::new(Shot { value: None, waker: None }));
+    let sender = shot.clone();
+    ipc.execute(move |paths| {
+        let value = work(paths);
+        let waker = sender.lock().ok().and_then(|mut shot| {
+            shot.value = Some(value);
+            shot.waker.take()
+        });
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    });
+    let _ = slint::spawn_local(async move {
+        if let Some(value) = Wait(shot).await {
+            done(value);
+        }
+    });
+}
+
+/// `GetTask` result as `Ok(task)` or a user-facing message.
+fn fetch_task(paths: &Paths, task_id: i64) -> Result<TaskSummary, String> {
+    match paths.request(Command::GetTask { task_id }) {
+        Ok(reply) if reply.ok => reply.tasks.into_iter().next().ok_or_else(|| "Task not found".to_owned()),
+        Ok(reply) => Err(reply.error.unwrap_or_else(|| "Task not found".into())),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -2117,8 +2298,8 @@ fn row_from_summary(
     }
 }
 
-/// Daemon sort key for a header column, or `None` when the daemon cannot sort
-/// by it (size, time left, rate and queue name are not stored columns).
+/// Daemon sort key for a header column. Time left sorts by progress, the
+/// closest stored value to remaining work.
 fn daemon_sort(column: &str, asc: bool, queue_filtered: bool) -> Option<String> {
     let key = match column {
         "id" if queue_filtered => "position",
@@ -2127,6 +2308,10 @@ fn daemon_sort(column: &str, asc: bool, queue_filtered: bool) -> Option<String> 
         "status" => "status",
         "category" => "category",
         "last_try_date" => "updated",
+        "size" => "size",
+        "time_left" => "progress",
+        "transfer_rate" => "rate",
+        "queue" => "queue",
         _ => return None,
     };
     Some(format!("{}{key}", if asc { "" } else { "-" }))
@@ -2217,6 +2402,8 @@ struct TableShared {
     ids: Arc<Mutex<Vec<i64>>>,
     /// Raw daemon status and live-recording seconds of every loaded task.
     statuses: Arc<Mutex<std::collections::HashMap<i64, (String, Option<u64>)>>>,
+    /// Set while "all matching the filter" is selected.
+    all: AllSel,
 }
 
 impl TableShared {
@@ -2241,6 +2428,7 @@ impl TableShared {
     fn install(&self, ui: &MainWindow, epoch: u64, result: PageResult, replace_all: bool) -> bool {
         let queues = self.queues.lock().map(|g| g.clone()).unwrap_or_default();
         let selected = self.selected.lock().map(|g| g.clone()).unwrap_or_default();
+        let all_selected = self.all.lock().map(|g| g.is_some()).unwrap_or(false);
         if let Ok(mut statuses) = self.statuses.lock() {
             if statuses.len() > 50_000 {
                 statuses.clear();
@@ -2256,7 +2444,14 @@ impl TableShared {
             .pages
             .into_iter()
             .map(|(page, tasks)| {
-                let rows = tasks.into_iter().map(|task| row_from_summary(task, &queues, &selected)).collect();
+                let rows = tasks
+                    .into_iter()
+                    .map(|task| {
+                        let mut row = row_from_summary(task, &queues, &selected);
+                        row.selected |= all_selected;
+                        row
+                    })
+                    .collect();
                 (page, rows)
             })
             .collect();
@@ -2319,6 +2514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected: selected_task_ids.clone(),
         ids: task_ids.clone(),
         statuses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        all: Arc::new(Mutex::new(None)),
     };
     {
         // A rendered row on an uncached page fetches just that page.
@@ -2864,6 +3060,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let ids = task_ids.clone();
         let sel_set = selected_task_ids.clone();
+        let all_sel = table_shared.all.clone();
         let ipc = ipc.clone();
         let refresh = refresh.clone();
         callback(
@@ -2872,27 +3069,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(ui) = weak.upgrade() else {
                     return;
                 };
-                let targets = target_ids(&ui, &ids, &sel_set);
-                if targets.is_empty() {
+                let target = resolve_target(&ui, &ids, &sel_set, &all_sel);
+                if target.count() == 0 {
                     ui.set_message("Select a task first".into());
                     return;
                 }
                 let weak = weak.clone();
                 let refresh = refresh.clone();
                 ipc.execute(move |paths| {
-                    let mut last = String::new();
-                    for id in &targets {
-                        let command = if pause {
-                            Command::Pause { task_id: *id }
-                        } else {
-                            Command::Resume { task_id: *id }
-                        };
-                        last = request(paths, command);
-                    }
-                    let result = if targets.len() > 1 {
-                        format!("{} {} task(s)", if pause { "Paused" } else { "Resumed" }, targets.len())
-                    } else {
-                        last
+                    let result = match target {
+                        Target::All(all) => bulk_message(
+                            paths
+                                .request(bulk_command(
+                                    &all,
+                                    if pause { xdm_ipc::BulkAction::Pause } else { xdm_ipc::BulkAction::Resume },
+                                ))
+                                .map_err(|e| e.to_string()),
+                            if pause { "Paused" } else { "Resumed" },
+                        ),
+                        Target::Ids(targets) => {
+                            let mut last = String::new();
+                            for id in &targets {
+                                let command = if pause {
+                                    Command::Pause { task_id: *id }
+                                } else {
+                                    Command::Resume { task_id: *id }
+                                };
+                                last = request(paths, command);
+                            }
+                            if targets.len() > 1 {
+                                format!("{} {} task(s)", if pause { "Paused" } else { "Resumed" }, targets.len())
+                            } else {
+                                last
+                            }
+                        }
                     };
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -2907,30 +3117,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let weak = ui.as_weak();
     let ids_priority = task_ids.clone();
+    let sel_priority = selected_task_ids.clone();
+    let all_priority = table_shared.all.clone();
     let ipc_priority = ipc.clone();
     let refresh_priority = refresh.clone();
     ui.on_set_priority(move |priority| {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let index = ui.get_selected();
-        let Some(task_id) = usize::try_from(index)
-            .ok()
-            .and_then(|index| ids_priority.lock().ok().and_then(|guard| id_at(&guard, index)))
-        else {
-            ui.set_message("Select a task first".into());
-            return;
+        let target = match resolve_target(&ui, &ids_priority, &sel_priority, &all_priority) {
+            Target::Ids(_) => {
+                let Some(task_id) = usize::try_from(ui.get_selected())
+                    .ok()
+                    .and_then(|index| ids_priority.lock().ok().and_then(|guard| id_at(&guard, index)))
+                else {
+                    ui.set_message("Select a task first".into());
+                    return;
+                };
+                Target::Ids(vec![task_id])
+            }
+            all => all,
         };
         let weak = weak.clone();
         let refresh = refresh_priority.clone();
         ipc_priority.execute(move |paths| {
-            let result = request(
-                paths,
-                Command::SetPriority {
-                    task_id,
-                    priority: priority as i64,
-                },
-            );
+            let result = match target {
+                Target::All(all) => bulk_message(
+                    paths
+                        .request(bulk_command(&all, xdm_ipc::BulkAction::Priority { level: priority as i64 }))
+                        .map_err(|e| e.to_string()),
+                    "Changed priority of",
+                ),
+                Target::Ids(ids) => request(
+                    paths,
+                    Command::SetPriority {
+                        task_id: ids[0],
+                        priority: priority as i64,
+                    },
+                ),
+            };
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.set_message(result.into());
@@ -2996,9 +3221,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ids = task_ids.clone();
         let set = selected_task_ids.clone();
         let anchor = anchor.clone();
+        let all_click = table_shared.all.clone();
         let weak = ui.as_weak();
         ui.on_task_clicked(move |index, ctrl, shift| {
             let Some(ui) = weak.upgrade() else { return; };
+            if let Ok(mut all) = all_click.lock() {
+                *all = None;
+            }
             let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
             let Some(id) = usize::try_from(index).ok().and_then(|i| id_at(&ids, i)) else { return; };
             let Ok(mut set) = set.lock() else { return; };
@@ -3064,16 +3293,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ids = task_ids.clone();
         let set = selected_task_ids.clone();
         let anchor_all = anchor.clone();
+        let all_key = table_shared.all.clone();
         ui.on_key_select_all(move || {
             let Some(ui) = weak.upgrade() else { return; };
             let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
+            if ids.is_empty() {
+                return;
+            }
+            // Every task matching the current filter, not just the loaded pages;
+            // the daemon re-checks the count the user saw.
+            if let Ok(mut all) = all_key.lock() {
+                *all = Some(AllMatching { filter: current_filter(&ui), total: ids.len() as u64 });
+            }
             if let Ok(mut set) = set.lock() {
-                // Only rows whose page is loaded can be selected (the table is paged).
                 *set = ids.iter().filter(|id| **id > 0).map(|id| *id as usize).collect();
                 sync_selection(&ui, &set);
-                ui.set_message(format!("{} of {} task(s) selected (loaded rows)", set.len(), ids.len()).into());
             }
-            if !ids.is_empty() && ui.get_selected() < 0 {
+            ui.set_message(format!("All {} task(s) matching the filter selected", ids.len()).into());
+            if ui.get_selected() < 0 {
                 ui.set_selected(0);
                 anchor_all.set(0);
             }
@@ -3083,8 +3320,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ids = task_ids.clone();
             let set = selected_task_ids.clone();
             let anchor = anchor.clone();
+            let all_nav = table_shared.all.clone();
             let handler = move || {
                 let Some(ui) = weak.upgrade() else { return; };
+                if let Ok(mut all) = all_nav.lock() {
+                    *all = None;
+                }
                 let ids = ids.lock().map(|g| g.clone()).unwrap_or_default();
                 if ids.is_empty() {
                     return;
@@ -3117,29 +3358,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- open / open folder / move-rename ---------------------------------
     for folder in [false, true] {
         let weak = ui.as_weak();
-        let paths_open = paths.clone();
+        let ipc_open = ipc.clone();
         let ids_open = task_ids.clone();
         let handler = move || {
             let Some(ui) = weak.upgrade() else { return; };
             let Some(task_id) = selected_task(&ui, &ids_open) else { return; };
-            match paths_open.request(Command::GetTask { task_id }) {
-                Ok(reply) if reply.ok => {
-                    let Some(task) = reply.tasks.first() else { return; };
-                    if task.output.is_empty() {
-                        ui.set_message("Task has no output path".into());
-                    } else if folder {
-                        task_table::open_folder(&task.output);
-                        ui.set_message(format!("Opening folder of {}", task.output).into());
-                    } else if !task_table::is_complete(&task.status) {
-                        ui.set_message("Only completed downloads can be opened".into());
-                    } else {
-                        task_table::open_file(&task.output);
-                        ui.set_message(format!("Opening {}", task.output).into());
+            let weak = weak.clone();
+            ipc_then(&ipc_open, move |paths| fetch_task(paths, task_id), move |result| {
+                let Some(ui) = weak.upgrade() else { return; };
+                match result {
+                    Ok(task) => {
+                        if task.output.is_empty() {
+                            ui.set_message("Task has no output path".into());
+                        } else if folder {
+                            task_table::open_folder(&task.output);
+                            ui.set_message(format!("Opening folder of {}", task.output).into());
+                        } else if !task_table::is_complete(&task.status) {
+                            ui.set_message("Only completed downloads can be opened".into());
+                        } else {
+                            task_table::open_file(&task.output);
+                            ui.set_message(format!("Opening {}", task.output).into());
+                        }
                     }
+                    Err(message) => ui.set_message(message.into()),
                 }
-                Ok(reply) => ui.set_message(reply.error.unwrap_or_else(|| "Task not found".into()).into()),
-                Err(error) => ui.set_message(error.to_string().into()),
-            }
+            });
         };
         if folder {
             ui.on_open_task_folder(handler);
@@ -3151,25 +3394,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let move_window = Rc::new(RefCell::new(None::<MoveRenameWindow>));
     {
         let weak = ui.as_weak();
-        let paths_move = paths.clone();
         let ids_move = task_ids.clone();
         let ipc_move = ipc.clone();
         let refresh_move = refresh.clone();
         ui.on_move_rename_task(move || {
             let Some(ui) = weak.upgrade() else { return; };
             let Some(task_id) = selected_task(&ui, &ids_move) else { return; };
-            let task = match paths_move.request(Command::GetTask { task_id }) {
-                Ok(reply) if reply.ok => reply.tasks.into_iter().next(),
-                Ok(reply) => {
-                    ui.set_message(reply.error.unwrap_or_else(|| "Task not found".into()).into());
-                    return;
-                }
-                Err(error) => {
-                    ui.set_message(error.to_string().into());
+            let weak_outer = weak.clone();
+            let refresh_move = refresh_move.clone();
+            let ipc_move = ipc_move.clone();
+            let move_window = move_window.clone();
+            ipc_then(&ipc_move.clone(), move |paths| fetch_task(paths, task_id), move |result| {
+            let Some(ui) = weak_outer.upgrade() else { return; };
+            let task = match result {
+                Ok(task) => task,
+                Err(message) => {
+                    ui.set_message(message.into());
                     return;
                 }
             };
-            let Some(task) = task else { return; };
             if !task_table::is_complete(&task.status) {
                 ui.set_message("Move / Rename is only available for completed downloads".into());
                 return;
@@ -3234,6 +3477,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_message(error.to_string().into());
             }
             *move_window.borrow_mut() = Some(dialog);
+            });
         });
     }
 
@@ -3243,17 +3487,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ipc_restart = ipc.clone();
         let ids = task_ids.clone();
         let sel = selected_task_ids.clone();
+        let all_restart = table_shared.all.clone();
         let refresh_restart = refresh.clone();
         ui.on_restart_task(move || {
             let Some(ui) = weak.upgrade() else { return; };
-            let targets = target_ids(&ui, &ids, &sel);
-            if targets.is_empty() {
+            let target = resolve_target(&ui, &ids, &sel, &all_restart);
+            if target.count() == 0 {
                 ui.set_message("Select a task first".into());
                 return;
             }
             let weak = weak.clone();
             let refresh = refresh_restart.clone();
             ipc_restart.execute(move |paths| {
+                let targets = match target {
+                    Target::Ids(ids) => ids,
+                    Target::All(all) => {
+                        let message = bulk_message(
+                            paths.request(bulk_command(&all, xdm_ipc::BulkAction::Restart)).map_err(|e| e.to_string()),
+                            "Restarted",
+                        );
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                refresh();
+                                ui.set_message(message.into());
+                            }
+                        });
+                        return;
+                    }
+                };
                 let mut message = format!("Restarted {} task(s) from byte zero", targets.len());
                 for task_id in &targets {
                     match paths.request(Command::TaskRestart { task_id: *task_id }) {
@@ -3754,7 +4015,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let details_window = Rc::new(RefCell::new(None::<DetailsWindow>));
     let weak = ui.as_weak();
-    let paths_details = paths.clone();
+    let ipc_details = ipc.clone();
     let ids_details = task_ids.clone();
     ui.on_task_details(move || {
         let Some(ui) = weak.upgrade() else {
@@ -3763,44 +4024,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(task_id) = selected_task(&ui, &ids_details) else {
             return;
         };
-        match paths_details.request(Command::GetTask { task_id }) {
-            Ok(reply) if reply.ok => {
-                let Some(task) = reply.tasks.first() else {
+        let weak = weak.clone();
+        let details_window = details_window.clone();
+        ipc_then(&ipc_details, move |paths| fetch_task(paths, task_id), move |result| {
+            let Some(ui) = weak.upgrade() else { return; };
+            let task = match result {
+                Ok(task) => task,
+                Err(message) => {
+                    ui.set_message(message.into());
                     return;
-                };
-                match DetailsWindow::new() {
-                    Ok(dialog) => {
-                        dialog.set_details(task_details(task).into());
-                        let weak = dialog.as_weak();
-                        dialog.on_dismiss(move || {
-                            if let Some(dialog) = weak.upgrade() {
-                                let _ = dialog.hide();
-                            }
-                        });
-                        if let Some(previous) = details_window.borrow_mut().take() {
-                            let _ = previous.hide();
-                        }
-                        if let Err(error) = dialog.show() {
-                            ui.set_message(error.to_string().into());
-                        }
-                        *details_window.borrow_mut() = Some(dialog);
-                    }
-                    Err(error) => ui.set_message(error.to_string().into()),
                 }
+            };
+            match DetailsWindow::new() {
+                Ok(dialog) => {
+                    dialog.set_details(task_details(&task).into());
+                    let weak = dialog.as_weak();
+                    dialog.on_dismiss(move || {
+                        if let Some(dialog) = weak.upgrade() {
+                            let _ = dialog.hide();
+                        }
+                    });
+                    if let Some(previous) = details_window.borrow_mut().take() {
+                        let _ = previous.hide();
+                    }
+                    if let Err(error) = dialog.show() {
+                        ui.set_message(error.to_string().into());
+                    }
+                    *details_window.borrow_mut() = Some(dialog);
+                }
+                Err(error) => ui.set_message(error.to_string().into()),
             }
-            Ok(reply) => ui.set_message(
-                reply
-                    .error
-                    .unwrap_or_else(|| "Task not found".into())
-                    .into(),
-            ),
-            Err(error) => ui.set_message(error.to_string().into()),
-        }
+        });
     });
 
     let redownload_window = Rc::new(RefCell::new(None::<RedownloadWindow>));
     let weak = ui.as_weak();
-    let paths_redownload = paths.clone();
+    let ipc_redownload = ipc.clone();
     let ids_redownload = task_ids.clone();
     let refresh_redownload = refresh.clone();
     ui.on_redownload_task(move || {
@@ -3810,24 +4069,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(task_id) = selected_task(&ui, &ids_redownload) else {
             return;
         };
-        let task = match paths_redownload.request(Command::GetTask { task_id }) {
-            Ok(reply) if reply.ok => reply.tasks.into_iter().next(),
-            Ok(reply) => {
-                ui.set_message(
-                    reply
-                        .error
-                        .unwrap_or_else(|| "Task not found".into())
-                        .into(),
-                );
+        let weak_outer = weak.clone();
+        let ipc_redownload = ipc_redownload.clone();
+        let refresh_redownload = refresh_redownload.clone();
+        let redownload_window = redownload_window.clone();
+        ipc_then(&ipc_redownload.clone(), move |paths| fetch_task(paths, task_id), move |result| {
+        let Some(ui) = weak_outer.upgrade() else { return; };
+        let task = match result {
+            Ok(task) => task,
+            Err(message) => {
+                ui.set_message(message.into());
                 return;
             }
-            Err(error) => {
-                ui.set_message(error.to_string().into());
-                return;
-            }
-        };
-        let Some(task) = task else {
-            return;
         };
         let dialog = match RedownloadWindow::new() {
             Ok(dialog) => dialog,
@@ -3848,7 +4101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into_owned()
                 .into(),
         );
-        let paths = paths_redownload.clone();
+        let ipc_submit = ipc_redownload.clone();
         let refresh = refresh_redownload.clone();
         let weak_dialog = dialog.as_weak();
         let weak_ui = ui.as_weak();
@@ -3864,32 +4117,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(dialog) = weak_dialog.upgrade() else {
                 return;
             };
-            match paths.request(Command::Redownload {
+            dialog.set_message("Queueing…".into());
+            let command = Command::Redownload {
                 task_id,
                 request_id: request_id.clone(),
                 output: dialog.get_output().to_string(),
-            }) {
-                Ok(reply) if reply.ok => {
-                    let _ = dialog.hide();
-                    refresh();
-                    if let Some(ui) = weak_ui.upgrade() {
-                        ui.set_message(
-                            format!(
-                                "Redownload queued as task #{}",
-                                reply.task_id.unwrap_or_default()
-                            )
-                            .into(),
-                        );
+            };
+            let weak_dialog = weak_dialog.clone();
+            let weak_ui = weak_ui.clone();
+            let refresh = refresh.clone();
+            ipc_then(&ipc_submit, move |paths| paths.request(command).map_err(|e| e.to_string()), move |result| {
+                let Some(dialog) = weak_dialog.upgrade() else { return; };
+                match result {
+                    Ok(reply) if reply.ok => {
+                        let _ = dialog.hide();
+                        refresh();
+                        if let Some(ui) = weak_ui.upgrade() {
+                            ui.set_message(
+                                format!("Redownload queued as task #{}", reply.task_id.unwrap_or_default())
+                                    .into(),
+                            );
+                        }
                     }
+                    Ok(reply) => dialog.set_message(
+                        reply.error.unwrap_or_else(|| "Redownload rejected".into()).into(),
+                    ),
+                    Err(error) => dialog.set_message(error.into()),
                 }
-                Ok(reply) => dialog.set_message(
-                    reply
-                        .error
-                        .unwrap_or_else(|| "Redownload rejected".into())
-                        .into(),
-                ),
-                Err(error) => dialog.set_message(error.to_string().into()),
-            }
+            });
         });
         let weak_dialog = dialog.as_weak();
         dialog.on_dismiss(move || {
@@ -3904,11 +4159,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_message(error.to_string().into());
         }
         *redownload_window.borrow_mut() = Some(dialog);
+        });
     });
 
     let remove_window = Rc::new(RefCell::new(None::<RemoveWindow>));
     let weak = ui.as_weak();
-    let paths_remove = paths.clone();
+    let ipc_remove = ipc.clone();
     let ids_remove = task_ids.clone();
     let sel_remove = selected_task_ids.clone();
     let shared_remove = table_shared.clone();
@@ -3918,54 +4174,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let targets = target_ids(&ui, &ids_remove, &sel_remove);
-        if targets.is_empty() {
+        let target = resolve_target(&ui, &ids_remove, &sel_remove, &shared_remove.all);
+        let count = target.count();
+        if count == 0 {
             ui.set_message("Select a task first".into());
             return;
         }
         // Unfinished tasks whose own .part/.part.meta the user may also delete.
-        let unfinished: std::collections::HashSet<i64> = targets
-            .iter()
-            .copied()
-            .filter(|id| shared_remove.status_of(*id).is_some_and(|status| !task_table::is_complete(&status)))
-            .collect();
-        let remove_all = |paths: &Paths, targets: &[i64], partial: &std::collections::HashSet<i64>| -> Result<(), String> {
-            for task_id in targets {
-                let command = if partial.contains(task_id) {
-                    Command::TaskRemoveEx { task_id: *task_id, delete_partial: true }
-                } else {
-                    Command::Remove { task_id: *task_id }
-                };
-                match paths.request(command) {
-                    Ok(reply) if reply.ok => {}
-                    Ok(reply) => {
-                        return Err(reply.error.unwrap_or_else(|| "Remove rejected".into()));
-                    }
-                    Err(error) => return Err(error.to_string()),
-                }
-            }
-            Ok(())
+        let unfinished: std::collections::HashSet<i64> = match &target {
+            Target::Ids(ids) => ids
+                .iter()
+                .copied()
+                .filter(|id| shared_remove.status_of(*id).is_some_and(|status| !task_table::is_complete(&status)))
+                .collect(),
+            Target::All(_) => std::collections::HashSet::new(),
         };
-        let done_message = |targets: &[i64]| {
-            if targets.len() == 1 {
-                format!("Task #{} removed; files kept", targets[0])
-            } else {
-                format!("{} tasks removed; files kept", targets.len())
+        let partial_visible = matches!(target, Target::All(_)) || !unfinished.is_empty();
+        // Runs the removal off the UI thread; `dialog` is the confirmation to close.
+        let start = {
+            let ipc = ipc_remove.clone();
+            let sel = sel_remove.clone();
+            let all_slot = shared_remove.all.clone();
+            let refresh = refresh_remove.clone();
+            let weak_ui = ui.as_weak();
+            let target = target.clone();
+            move |partial: std::collections::HashSet<i64>, partial_all: bool, dialog: Option<slint::Weak<RemoveWindow>>| {
+                let job_target = target.clone();
+                let (sel, all_slot, refresh, weak_ui) = (sel.clone(), all_slot.clone(), refresh.clone(), weak_ui.clone());
+                ipc_then(
+                    &ipc,
+                    move |paths| run_remove(paths, &job_target, &partial, partial_all),
+                    move |result| {
+                        match result {
+                            Ok(message) => {
+                                if let Some(dialog) = dialog.as_ref().and_then(|d| d.upgrade()) {
+                                    let _ = dialog.hide();
+                                }
+                                if let Ok(mut set) = sel.lock() {
+                                    set.clear();
+                                }
+                                if let Ok(mut all) = all_slot.lock() {
+                                    *all = None;
+                                }
+                                if let Some(ui) = weak_ui.upgrade() {
+                                    ui.set_selected(-1);
+                                    ui.set_message(message.into());
+                                }
+                                refresh();
+                            }
+                            Err(error) => {
+                                if let Some(dialog) = dialog.as_ref().and_then(|d| d.upgrade()) {
+                                    dialog.set_message(error.into());
+                                } else if let Some(ui) = weak_ui.upgrade() {
+                                    ui.set_message(error.into());
+                                }
+                                refresh();
+                            }
+                        }
+                    },
+                );
             }
         };
         let confirm = settings_remove.lock().map(|s| s.confirm_remove).unwrap_or(true);
         if !confirm {
-            match remove_all(&paths_remove, &targets, &std::collections::HashSet::new()) {
-                Ok(()) => {
-                    if let Ok(mut set) = sel_remove.lock() {
-                        set.clear();
-                    }
-                    ui.set_selected(-1);
-                    refresh_remove();
-                    ui.set_message(done_message(&targets).into());
-                }
-                Err(error) => ui.set_message(error.into()),
-            }
+            start(std::collections::HashSet::new(), false, None);
             return;
         }
         let dialog = match RemoveWindow::new() {
@@ -3976,38 +4248,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         dialog.set_message(
-            if targets.len() == 1 {
-                format!("Remove task #{} from the download list?", targets[0])
-            } else {
-                format!("Remove {} tasks from the download list?", targets.len())
+            match &target {
+                Target::Ids(ids) if ids.len() == 1 => format!("Remove task #{} from the download list?", ids[0]),
+                _ => format!("Remove {count} tasks from the download list?"),
             }
             .into(),
         );
-        dialog.set_partial_visible(!unfinished.is_empty());
-        let paths = paths_remove.clone();
-        let refresh = refresh_remove.clone();
-        let sel_confirm = sel_remove.clone();
+        dialog.set_partial_visible(partial_visible);
         let weak_dialog = dialog.as_weak();
-        let weak_ui = ui.as_weak();
+        let is_all = matches!(target, Target::All(_));
         dialog.on_confirm(move || {
             let Some(dialog) = weak_dialog.upgrade() else {
                 return;
             };
-            let partial = if dialog.get_delete_partial() { unfinished.clone() } else { std::collections::HashSet::new() };
-            match remove_all(&paths, &targets, &partial) {
-                Ok(()) => {
-                    let _ = dialog.hide();
-                    if let Ok(mut set) = sel_confirm.lock() {
-                        set.clear();
-                    }
-                    if let Some(ui) = weak_ui.upgrade() {
-                        ui.set_selected(-1);
-                        ui.set_message(done_message(&targets).into());
-                    }
-                    refresh();
-                }
-                Err(error) => dialog.set_message(error.into()),
-            }
+            let delete = dialog.get_delete_partial();
+            dialog.set_message("Removing…".into());
+            let partial = if delete { unfinished.clone() } else { std::collections::HashSet::new() };
+            start(partial, delete && is_all, Some(weak_dialog.clone()));
         });
         let weak_dialog = dialog.as_weak();
         dialog.on_dismiss(move || {
@@ -4025,7 +4282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let lists_window = Rc::new(RefCell::new(None::<ListsWindow>));
-    let paths_lists = paths.clone();
+    let ipc_lists = ipc.clone();
     let refresh_lists = refresh.clone();
     let weak = ui.as_weak();
     ui.on_transfer_lists(move || {
@@ -4099,7 +4356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
         let weak_dialog = dialog.as_weak();
-        let paths_import = paths_lists.clone();
+        let ipc_import = ipc_lists.clone();
         let refresh_import = refresh_lists.clone();
         dialog.on_import_list(move |enqueue| {
             let Some(dialog) = weak_dialog.upgrade() else {
@@ -4116,48 +4373,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dialog.set_message("Preview again after changing the file or destination".into());
                 return;
             }
-            match paths_import.request(Command::ImportList {
+            let command = Command::ImportList {
                 request_id: request_id.clone(),
                 directory: directory.clone(),
                 entries: list.entries.clone(),
                 enqueue,
-            }) {
-                Ok(reply) if reply.ok => {
-                    dialog.set_preview_ready(false);
-                    dialog.set_message(
-                        format!(
-                            "Imported {} tasks {}",
-                            reply.task_ids.len(),
-                            if enqueue { "into the queue" } else { "paused" }
-                        )
-                        .into(),
-                    );
-                    refresh_import();
+            };
+            dialog.set_message("Importing…".into());
+            let weak_dialog = weak_dialog.clone();
+            let refresh_import = refresh_import.clone();
+            ipc_then(&ipc_import, move |paths| paths.request(command).map_err(|e| e.to_string()), move |result| {
+                let Some(dialog) = weak_dialog.upgrade() else { return; };
+                match result {
+                    Ok(reply) if reply.ok => {
+                        dialog.set_preview_ready(false);
+                        dialog.set_message(
+                            format!(
+                                "Imported {} tasks {}",
+                                reply.task_ids.len(),
+                                if enqueue { "into the queue" } else { "paused" }
+                            )
+                            .into(),
+                        );
+                        refresh_import();
+                    }
+                    Ok(reply) => dialog.set_message(
+                        reply.error.unwrap_or_else(|| "Import rejected".into()).into(),
+                    ),
+                    Err(error) => dialog.set_message(error.into()),
                 }
-                Ok(reply) => dialog.set_message(
-                    reply
-                        .error
-                        .unwrap_or_else(|| "Import rejected".into())
-                        .into(),
-                ),
-                Err(error) => dialog.set_message(error.to_string().into()),
-            }
+            });
         });
         let weak_dialog = dialog.as_weak();
-        let paths_export = paths_lists.clone();
+        let ipc_export = ipc_lists.clone();
         dialog.on_export_list(move |json| {
             let Some(dialog) = weak_dialog.upgrade() else {
                 return;
             };
-            match xdm_transfer_list::export(
-                &paths_export,
-                std::path::Path::new(dialog.get_export_file().as_str()),
-                if json { "json" } else { "urls" },
-            ) {
-                Ok(count) => dialog
-                    .set_message(format!("Exported {count} tasks; request headers omitted").into()),
-                Err(error) => dialog.set_message(error.into()),
-            }
+            let file = std::path::PathBuf::from(dialog.get_export_file().as_str());
+            let format = if json { "json" } else { "urls" };
+            dialog.set_message("Exporting…".into());
+            let weak_dialog = weak_dialog.clone();
+            ipc_then(&ipc_export, move |paths| xdm_transfer_list::export(paths, &file, format), move |result| {
+                let Some(dialog) = weak_dialog.upgrade() else { return; };
+                match result {
+                    Ok(count) => dialog
+                        .set_message(format!("Exported {count} tasks; request headers omitted").into()),
+                    Err(error) => dialog.set_message(error.into()),
+                }
+            });
         });
         let weak_dialog = dialog.as_weak();
         dialog.on_dismiss(move || {
@@ -4716,51 +4980,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let queues_window = Rc::new(RefCell::new(None::<QueuesWindow>));
-    let paths_queues = paths.clone();
+    let ipc_queues = ipc.clone();
+    let sel_main_queues = selected_task_ids.clone();
+    let all_main_queues = table_shared.all.clone();
     let refresh_main_queues = refresh.clone();
     let ids_main_queues = task_ids.clone();
     let weak_main = ui.as_weak();
     let open_settings_for_queues = open_queue_settings.clone();
     ui.on_manage_queues(move || {
         let Some(ui) = weak_main.upgrade() else { return; };
-        let source_task = usize::try_from(ui.get_selected()).ok().and_then(|index| ids_main_queues.lock().ok().and_then(|guard| id_at(&guard, index)));
+        let assign_target = resolve_target(&ui, &ids_main_queues, &sel_main_queues, &all_main_queues);
         let dialog = match QueuesWindow::new() {
             Ok(dialog) => dialog,
             Err(error) => { ui.set_message(error.to_string().into()); return; }
         };
-        dialog.set_can_assign(source_task.is_some());
+        dialog.set_can_assign(assign_target.count() > 0);
         let rows = Arc::new(Mutex::new(Vec::<xdm_ipc::QueueSummary>::new()));
         let preferred = Arc::new(Mutex::new(None::<i64>));
         let rows_refresh = rows.clone();
         let preferred_refresh = preferred.clone();
-        let paths_refresh = paths_queues.clone();
+        let ipc_refresh = ipc_queues.clone();
         let weak = dialog.as_weak();
         let refresh_queues: Arc<dyn Fn() + Send + Sync> = {
             let weak = weak.clone();
             Arc::new(move || {
                 let Some(dialog) = weak.upgrade() else { return; };
                 let previous = preferred_refresh.lock().ok().and_then(|mut guard| guard.take()).or_else(|| usize::try_from(dialog.get_selected()).ok().and_then(|index| rows_refresh.lock().ok().and_then(|guard| guard.get(index).map(|queue| queue.id))));
-                match paths_refresh.request(Command::List) {
-                    Ok(reply) if reply.ok => {
-                        let selected = previous.and_then(|id| reply.queues.iter().position(|queue| queue.id == id));
-                        let labels = reply.queues.iter().map(|queue| {
-                            let solo = if queue.started_alone { " [solo]" } else { "" };
-                            let sync = scheduler::format_sync_label(queue);
-                            format!("#{}  {}  {}{solo}{sync}  {}/{} active  {} queued  {} paused", queue.id, queue.name, if queue.running {"enabled"} else {"stopped"}, queue.active, queue.limit, queue.queued, queue.paused).into()
-                        }).collect::<Vec<slint::SharedString>>();
-                        dialog.set_queues(ModelRc::new(VecModel::from(labels)));
-                        dialog.set_selected(selected.map_or(-1, |index| index as i32));
-                        if let Some(queue) = selected.and_then(|index| reply.queues.get(index)) {
-                            dialog.set_name(queue.name.clone().into()); dialog.set_limit(queue.limit.to_string().into());
+                let weak = weak.clone();
+                let rows_refresh = rows_refresh.clone();
+                ipc_refresh.execute(move |paths| {
+                    let result = paths.request(Command::List).map_err(|e| e.to_string());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(dialog) = weak.upgrade() else { return; };
+                        match result {
+                            Ok(reply) if reply.ok => {
+                                let selected = previous.and_then(|id| reply.queues.iter().position(|queue| queue.id == id));
+                                let labels = reply.queues.iter().map(|queue| {
+                                    let solo = if queue.started_alone { " [solo]" } else { "" };
+                                    let sync = scheduler::format_sync_label(queue);
+                                    format!("#{}  {}  {}{solo}{sync}  {}/{} active  {} queued  {} paused", queue.id, queue.name, if queue.running {"enabled"} else {"stopped"}, queue.active, queue.limit, queue.queued, queue.paused).into()
+                                }).collect::<Vec<slint::SharedString>>();
+                                dialog.set_queues(ModelRc::new(VecModel::from(labels)));
+                                dialog.set_selected(selected.map_or(-1, |index| index as i32));
+                                if let Some(queue) = selected.and_then(|index| reply.queues.get(index)) {
+                                    dialog.set_name(queue.name.clone().into()); dialog.set_limit(queue.limit.to_string().into());
+                                }
+                                dialog.set_message(if reply.queue_running == Some(true) { "Global queue running. Each enabled queue uses its own job limit." } else { "Global queue stopped. Use Start all in the main window to run enabled queues." }.into());
+                                if let Ok(mut guard) = rows_refresh.lock() {
+                                    *guard = reply.queues;
+                                }
+                            }
+                            Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Queue list failed".into()).into()),
+                            Err(error) => dialog.set_message(error.into()),
                         }
-                        dialog.set_message(if reply.queue_running == Some(true) { "Global queue running. Each enabled queue uses its own job limit." } else { "Global queue stopped. Use Start all in the main window to run enabled queues." }.into());
-                        if let Ok(mut guard) = rows_refresh.lock() {
-                            *guard = reply.queues;
-                        }
-                    }
-                    Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Queue list failed".into()).into()),
-                    Err(error) => dialog.set_message(error.to_string().into()),
-                }
+                    });
+                });
             })
         };
         let weak = dialog.as_weak();
@@ -4786,7 +5060,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             open_settings(queue_id);
         });
 
-        let paths_action = paths_queues.clone();
+        let ipc_action = ipc_queues.clone();
         let refresh_action = refresh_queues.clone();
         let refresh_main = refresh_main_queues.clone();
         let weak_dialog = dialog.as_weak();
@@ -4810,7 +5084,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 3 => Command::QueueSetRunning { queue_id, running: true },
                 4 => Command::QueueSetRunning { queue_id, running: false },
                 5 => Command::QueueRemove { queue_id },
-                6 => { let Some(task_id) = source_task else { return; }; Command::AssignQueue { queue_id, task_ids: vec![task_id] } },
+                6 => match &assign_target {
+                    Target::All(all) => bulk_command(all, xdm_ipc::BulkAction::AssignQueue { queue_id }),
+                    Target::Ids(ids) if !ids.is_empty() && ids.len() <= 500 => Command::AssignQueue { queue_id, task_ids: ids.clone() },
+                    Target::Ids(ids) if !ids.is_empty() => Command::TaskBulk {
+                        action: xdm_ipc::BulkAction::AssignQueue { queue_id },
+                        selection: xdm_ipc::BulkSelection::Ids(ids.clone()),
+                        expected_total: Some(ids.len() as u64),
+                    },
+                    Target::Ids(_) => return,
+                },
                 8 => Command::QueueStartOne { queue_id },
                 9 => Command::QueueStopOne { queue_id },
                 10 => Command::QueueCreateSync { name: dialog.get_name().to_string(), limit },
@@ -4829,17 +5112,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 13 => "Check started; the result appears under Scheduler & Settings > Recent Queue Events",
                 _ => "",
             };
-            match paths_action.request(command) {
-                Ok(reply) if reply.ok => {
-                    if let Ok(mut guard) = preferred.lock() {
-                        *guard = reply.queue_id;
+            dialog.set_message("Working…".into());
+            let weak_dialog = weak_dialog.clone();
+            let preferred = preferred.clone();
+            let refresh_action = refresh_action.clone();
+            let refresh_main = refresh_main.clone();
+            let bulk_assign = action == 6 && matches!(command, Command::TaskBulk { .. });
+            ipc_then(&ipc_action, move |paths| paths.request(command).map_err(|e| e.to_string()), move |result| {
+                let Some(dialog) = weak_dialog.upgrade() else { return; };
+                match result {
+                    Ok(reply) if reply.ok => {
+                        if let Ok(mut guard) = preferred.lock() {
+                            *guard = reply.queue_id;
+                        }
+                        refresh_action(); refresh_main();
+                        if bulk_assign {
+                            dialog.set_message(bulk_message(Ok(reply), "Moved").into());
+                        } else if !note.is_empty() {
+                            dialog.set_message(note.into());
+                        }
                     }
-                    refresh_action(); refresh_main();
-                    if !note.is_empty() { dialog.set_message(note.into()); }
+                    Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Queue command rejected".into()).into()),
+                    Err(error) => dialog.set_message(error.into()),
                 }
-                Ok(reply) => dialog.set_message(reply.error.unwrap_or_else(|| "Queue command rejected".into()).into()),
-                Err(error) => dialog.set_message(error.to_string().into()),
-            }
+            });
         });
         let weak = dialog.as_weak();
         dialog.on_dismiss(move || { if let Some(dialog) = weak.upgrade() { let _ = dialog.hide(); } });
@@ -5564,18 +5860,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let add_url_window = Rc::new(RefCell::new(None::<AddUrlWindow>));
     let weak_main_url = ui.as_weak();
-    let ipc_add_url_dlg = ipc.clone();
-    let refresh_add_url_dlg = refresh.clone();
-    let settings_add_url_dlg = gui_settings.clone();
     let paths_dir_add_url = paths.dir.clone();
     let add_url_win_holder = add_url_window.clone();
 
+    let dialogs_ctx = {
+        let weak_main = ui.as_weak();
+        download_dialogs::DialogCtx {
+            ipc: ipc.clone(),
+            dir: paths.dir.clone(),
+            settings: gui_settings.clone(),
+            refresh: refresh.clone(),
+            open_categories: Rc::new(move || {
+                if let Some(ui) = weak_main.upgrade() {
+                    ui.invoke_open_categories();
+                }
+            }),
+        }
+    };
     let open_add_url_fn: Rc<dyn Fn(Option<String>)> = {
         let add_url_window = add_url_win_holder.clone();
         let weak_main_url = weak_main_url.clone();
-        let ipc_submit = ipc_add_url_dlg.clone();
-        let refresh_submit = refresh_add_url_dlg.clone();
-        let settings_submit = settings_add_url_dlg.clone();
         let paths_dir_submit = paths_dir_add_url.clone();
         Rc::new(move |prefill_url: Option<String>| {
             let Some(main_ui) = weak_main_url.upgrade() else { return; };
@@ -5595,75 +5899,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dialog.set_destination(destination.into());
             }
             let weak_dialog = dialog.as_weak();
-            let weak_main_submit = weak_main_url.clone();
-            let ipc_submit = ipc_submit.clone();
-            let refresh_submit = refresh_submit.clone();
-            let settings_submit = settings_submit.clone();
-            let paths_dir_submit = paths_dir_submit.clone();
+            // Add URL continues in the File Info dialog (download_dialogs).
+            let dialogs_ctx = dialogs_ctx.clone();
             dialog.on_submit(move || {
                 let Some(dialog) = weak_dialog.upgrade() else { return; };
-                let raw_url = dialog.get_url().to_string();
-                let url = match dialog_helpers::validate_download_url(&raw_url) {
+                let url = match dialog_helpers::validate_download_url(&dialog.get_url().to_string()) {
                     Ok(u) => u,
                     Err(err) => {
                         dialog.set_message(err.into());
                         return;
                     }
                 };
-                let mut destination = dialog.get_destination().trim().to_string();
-                if destination.is_empty() {
-                    let filename = url
-                        .split('/')
-                        .last()
-                        .and_then(|p| p.split('?').next())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("download.bin");
-                    destination = paths_dir_submit.join("downloads").join(filename).to_string_lossy().to_string();
-                }
-                let connections = settings_submit
-                    .lock()
-                    .map(|g| g.default_connections)
-                    .unwrap_or(settings::DEFAULT_CONNECTIONS);
-                let request_id = format!(
-                    "gui-add-{}-{}",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                let weak_d = weak_dialog.clone();
-                let weak_m = weak_main_submit.clone();
-                let refresh = refresh_submit.clone();
-                ipc_submit.execute(move |paths| {
-                    let res = paths.request(Command::Submit {
-                        request_id,
-                        url,
-                        output: destination,
-                        headers: Vec::new(),
-                        priority: 1,
-                        connections,
-                    });
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(dialog) = weak_d.upgrade() {
-                            match res {
-                                Ok(reply) if reply.ok => {
-                                    let _ = dialog.hide();
-                                    refresh();
-                                    if let Some(main) = weak_m.upgrade() {
-                                        main.set_message(
-                                            format!("Task #{} accepted", reply.task_id.unwrap_or_default()).into()
-                                        );
-                                    }
-                                }
-                                Ok(reply) => {
-                                    dialog.set_message(reply.error.unwrap_or_else(|| "Download rejected".into()).into());
-                                }
-                                Err(e) => dialog.set_message(format!("Daemon unavailable: {e}").into()),
-                            }
-                        }
-                    });
-                });
+                let typed = dialog.get_destination().trim().to_string();
+                let _ = dialog.hide();
+                download_dialogs::begin_add(&dialogs_ctx, url, Some(typed).filter(|t| !t.is_empty()));
             });
 
             let weak_dialog = dialog.as_weak();
@@ -6325,6 +6574,10 @@ mod table_perf_tests {
         assert_eq!(daemon_sort("filename", false, false).as_deref(), Some("-output"));
         assert_eq!(daemon_sort("id", true, true).as_deref(), Some("position"));
         assert_eq!(daemon_sort("last_try_date", false, false).as_deref(), Some("-updated"));
-        assert_eq!(daemon_sort("size", true, false), None);
+        assert_eq!(daemon_sort("size", true, false).as_deref(), Some("size"));
+        assert_eq!(daemon_sort("time_left", false, false).as_deref(), Some("-progress"));
+        assert_eq!(daemon_sort("transfer_rate", true, false).as_deref(), Some("rate"));
+        assert_eq!(daemon_sort("queue", true, false).as_deref(), Some("queue"));
+        assert_eq!(daemon_sort("bogus", true, false), None);
     }
 }

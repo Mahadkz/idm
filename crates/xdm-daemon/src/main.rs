@@ -1544,6 +1544,50 @@ impl Service {
                     Ok(Reply::list(tasks))
                 }
             }
+            Command::TaskSegments { task_id } => {
+                let (output, temp_dir) = {
+                    let inner = self
+                        .inner
+                        .lock()
+                        .map_err(|_| io::Error::other("task lock poisoned"))?;
+                    // A running segmented transfer reports positions that are
+                    // newer than its last checkpoint.
+                    if let Some(live) = inner
+                        .active
+                        .get(&task_id)
+                        .and_then(|active| active.control.as_ref())
+                        .and_then(|control| control.live_segments())
+                    {
+                        let mut reply = Reply::accepted(task_id);
+                        reply.segments = live
+                            .into_iter()
+                            .map(|(start, end, cursor)| xdm_ipc::SegmentInfo { start, end, cursor })
+                            .collect();
+                        return Ok(reply);
+                    }
+                    let row = inner.db.query_row(
+                        "SELECT output,temp_dir FROM tasks WHERE id=?1",
+                        [task_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    );
+                    match row {
+                        Ok(row) => row,
+                        Err(_) => return Ok(Reply::error("task not found")),
+                    }
+                };
+                // File read happens outside the state lock.
+                let segments = xdm_http::checkpoint_segments_in(
+                    std::path::Path::new(&output),
+                    temp_dir.as_deref().filter(|dir| !dir.is_empty()).map(std::path::Path::new),
+                )
+                .unwrap_or_default();
+                let mut reply = Reply::accepted(task_id);
+                reply.segments = segments
+                    .into_iter()
+                    .map(|(start, end, cursor)| xdm_ipc::SegmentInfo { start, end, cursor })
+                    .collect();
+                Ok(reply)
+            }
             Command::Remove { task_id } => self.remove_task(task_id, false),
             Command::TaskRemoveEx {
                 task_id,
@@ -2956,6 +3000,40 @@ mod tests {
             service.command(Command::GetTask { task_id: third }).unwrap().tasks[0].output,
             directory.join("same.zip").display().to_string()
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn task_segments_reports_checkpoint_positions() {
+        let (service, _, _) = service(1000);
+        let directory = std::env::temp_dir().join(format!("xdm-segments-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("seg.bin");
+        let id = submit_request(&service, "seg-1", "get", None).task_id.unwrap();
+        service
+            .inner
+            .lock()
+            .unwrap()
+            .db
+            .execute("UPDATE tasks SET output=?1 WHERE id=?2", rusqlite::params![output.display().to_string(), id])
+            .unwrap();
+        // No checkpoint yet: an empty list, not an error.
+        let empty = service.command(Command::TaskSegments { task_id: id }).unwrap();
+        assert!(empty.ok && empty.segments.is_empty());
+        std::fs::write(
+            format!("{}.part.meta", output.display()),
+            r#"{"version":1,"url":"http://x/s","effective_url":"http://x/s","context_sha256":"","length":200,"segments":[{"start":0,"end":99,"cursor":100},{"start":100,"end":199,"cursor":150}]}"#,
+        )
+        .unwrap();
+        let reply = service.command(Command::TaskSegments { task_id: id }).unwrap();
+        assert_eq!(
+            reply.segments,
+            vec![
+                xdm_ipc::SegmentInfo { start: 0, end: 99, cursor: 100 },
+                xdm_ipc::SegmentInfo { start: 100, end: 199, cursor: 150 },
+            ]
+        );
+        assert!(!service.command(Command::TaskSegments { task_id: id + 99 }).unwrap().ok);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

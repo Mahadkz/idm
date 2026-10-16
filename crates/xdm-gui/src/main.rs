@@ -1,5 +1,7 @@
 mod clipboard;
 mod dialog_helpers;
+#[path = "ui/download_dialogs.rs"]
+mod download_dialogs;
 mod i18n;
 mod layout;
 mod mainwin;
@@ -5396,18 +5398,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let add_url_window = Rc::new(RefCell::new(None::<AddUrlWindow>));
     let weak_main_url = ui.as_weak();
-    let ipc_add_url_dlg = ipc.clone();
-    let refresh_add_url_dlg = refresh.clone();
-    let settings_add_url_dlg = gui_settings.clone();
     let paths_dir_add_url = paths.dir.clone();
     let add_url_win_holder = add_url_window.clone();
 
+    let dialogs_ctx = {
+        let weak_main = ui.as_weak();
+        download_dialogs::DialogCtx {
+            ipc: ipc.clone(),
+            dir: paths.dir.clone(),
+            settings: gui_settings.clone(),
+            refresh: refresh.clone(),
+            open_categories: Rc::new(move || {
+                if let Some(ui) = weak_main.upgrade() {
+                    ui.invoke_open_categories();
+                }
+            }),
+        }
+    };
     let open_add_url_fn: Rc<dyn Fn(Option<String>)> = {
         let add_url_window = add_url_win_holder.clone();
         let weak_main_url = weak_main_url.clone();
-        let ipc_submit = ipc_add_url_dlg.clone();
-        let refresh_submit = refresh_add_url_dlg.clone();
-        let settings_submit = settings_add_url_dlg.clone();
         let paths_dir_submit = paths_dir_add_url.clone();
         Rc::new(move |prefill_url: Option<String>| {
             let Some(main_ui) = weak_main_url.upgrade() else { return; };
@@ -5427,75 +5437,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dialog.set_destination(destination.into());
             }
             let weak_dialog = dialog.as_weak();
-            let weak_main_submit = weak_main_url.clone();
-            let ipc_submit = ipc_submit.clone();
-            let refresh_submit = refresh_submit.clone();
-            let settings_submit = settings_submit.clone();
-            let paths_dir_submit = paths_dir_submit.clone();
+            // Add URL continues in the File Info dialog (download_dialogs).
+            let dialogs_ctx = dialogs_ctx.clone();
             dialog.on_submit(move || {
                 let Some(dialog) = weak_dialog.upgrade() else { return; };
-                let raw_url = dialog.get_url().to_string();
-                let url = match dialog_helpers::validate_download_url(&raw_url) {
+                let url = match dialog_helpers::validate_download_url(&dialog.get_url().to_string()) {
                     Ok(u) => u,
                     Err(err) => {
                         dialog.set_message(err.into());
                         return;
                     }
                 };
-                let mut destination = dialog.get_destination().trim().to_string();
-                if destination.is_empty() {
-                    let filename = url
-                        .split('/')
-                        .last()
-                        .and_then(|p| p.split('?').next())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("download.bin");
-                    destination = paths_dir_submit.join("downloads").join(filename).to_string_lossy().to_string();
-                }
-                let connections = settings_submit
-                    .lock()
-                    .map(|g| g.default_connections)
-                    .unwrap_or(settings::DEFAULT_CONNECTIONS);
-                let request_id = format!(
-                    "gui-add-{}-{}",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                let weak_d = weak_dialog.clone();
-                let weak_m = weak_main_submit.clone();
-                let refresh = refresh_submit.clone();
-                ipc_submit.execute(move |paths| {
-                    let res = paths.request(Command::Submit {
-                        request_id,
-                        url,
-                        output: destination,
-                        headers: Vec::new(),
-                        priority: 1,
-                        connections,
-                    });
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(dialog) = weak_d.upgrade() {
-                            match res {
-                                Ok(reply) if reply.ok => {
-                                    let _ = dialog.hide();
-                                    refresh();
-                                    if let Some(main) = weak_m.upgrade() {
-                                        main.set_message(
-                                            format!("Task #{} accepted", reply.task_id.unwrap_or_default()).into()
-                                        );
-                                    }
-                                }
-                                Ok(reply) => {
-                                    dialog.set_message(reply.error.unwrap_or_else(|| "Download rejected".into()).into());
-                                }
-                                Err(e) => dialog.set_message(format!("Daemon unavailable: {e}").into()),
-                            }
-                        }
-                    });
-                });
+                let typed = dialog.get_destination().trim().to_string();
+                let _ = dialog.hide();
+                download_dialogs::begin_add(&dialogs_ctx, url, Some(typed).filter(|t| !t.is_empty()));
             });
 
             let weak_dialog = dialog.as_weak();

@@ -182,11 +182,12 @@ pub fn probe_size(url: &str) -> Option<u64> {
         Some(port) => format!("{host}:{port}"),
         None => host.to_owned(),
     };
-    write!(
-        stream,
+    // One write: `write!` on a socket sends each fragment separately, and a server that
+    // closes after reading a partial request resets the connection on Windows.
+    let request = format!(
         "HEAD {target} HTTP/1.1\r\nHost: {host_header}\r\nAccept-Encoding: identity\r\nUser-Agent: XDM\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
+    );
+    stream.write_all(request.as_bytes()).ok()?;
     let mut head = Vec::new();
     let mut buffer = [0u8; 1024];
     while head.len() < 16 * 1024 && !head.windows(4).any(|w| w == b"\r\n\r\n") {

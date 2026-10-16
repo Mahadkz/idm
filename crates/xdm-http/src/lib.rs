@@ -392,6 +392,9 @@ const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
 /// Idle period after which a transfer abandons a connection that has delivered no
 /// bytes and reopens from its cursor, counting toward the retry budget (N31).
 /// The same budget bounds connect and response headers of every request.
+/// Minimum connect/idle budget on Windows, above its ~2 s refused-connect latency.
+const WINDOWS_REFUSED_CONNECT_FLOOR: Duration = Duration::from_secs(4);
+
 pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Replayable request identity shared by the probe and every transfer request.
@@ -1321,6 +1324,13 @@ fn client(
     // timeout; it also bounds connect and response headers, where no byte flows either.
     // The connect budget ends just before the overall one so a connection attempt that
     // never completes is told apart from a server that stalls after connecting (N17).
+    // Windows retries a refused SYN to loopback (about 2 s) before reporting
+    // WSAECONNREFUSED, so a shorter budget would call a closed port a timeout.
+    let stall_timeout = if cfg!(windows) {
+        stall_timeout.max(WINDOWS_REFUSED_CONNECT_FLOOR)
+    } else {
+        stall_timeout
+    };
     let connect = stall_timeout
         .saturating_sub(Duration::from_millis(250).min(stall_timeout / 4))
         .max(Duration::from_millis(1));

@@ -86,7 +86,9 @@ def main():
                 filler.close()
                 break
         row = run("connect_timeout", f"http://127.0.0.1:{full.getsockname()[1]}/f")
-        assert row["error_kind"] == "connect_timeout", row
+        # Windows resets a SYN to a full backlog after its own retries (same as a closed port).
+        accepted = ("connect_timeout", "connect_refused") if os.name == "nt" else ("connect_timeout",)
+        assert row["error_kind"] in accepted, row
 
         # HTTP status.
         def not_found(conn):
@@ -132,7 +134,7 @@ def main():
         readonly.mkdir()
         readonly.chmod(0o500)
         try:
-            if os.geteuid() != 0:
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
                 row = run("disk", f"http://127.0.0.1:{serve.getsockname()[1]}/f", readonly / "f.bin")
                 assert row["error_kind"] == "disk", row
         finally:

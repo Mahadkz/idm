@@ -57,9 +57,9 @@ fn read_request(stream: &mut TcpStream) {
 #[test]
 fn refused_port_is_connect_refused() {
     let port = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
-    // Windows retries a refused loopback connect for about 2 seconds before reporting it.
-    let wait = Duration::from_secs(if cfg!(windows) { 15 } else { 2 });
-    let error = run(format!("http://127.0.0.1:{port}/f"), dir("refused").join("f"), wait);
+    // Windows retries a refused loopback connect for ~2 s; the client floors its connect
+    // budget above that, so a 2 s stall timeout still classifies as refused.
+    let error = run(format!("http://127.0.0.1:{port}/f"), dir("refused").join("f"), Duration::from_secs(2));
     assert_eq!(kind_of(error.as_ref()), ErrorKind::ConnectRefused, "{error}");
 }
 
@@ -93,7 +93,12 @@ fn full_accept_queue_is_connect_timeout() {
         }
     }
     let error = run(format!("http://127.0.0.1:{port}/f"), dir("backlog").join("f"), Duration::from_secs(1));
-    assert_eq!(kind_of(error.as_ref()), ErrorKind::ConnectTimeout, "{error}");
+    let kind = kind_of(error.as_ref());
+    // Windows answers a SYN to a full backlog with a reset after its own retries, which is
+    // indistinguishable from a closed port, so there it is correctly reported as refused.
+    let expected: &[ErrorKind] =
+        if cfg!(windows) { &[ErrorKind::ConnectTimeout, ErrorKind::ConnectRefused] } else { &[ErrorKind::ConnectTimeout] };
+    assert!(expected.contains(&kind), "{kind:?}: {error}");
     drop((listener, fillers));
 }
 

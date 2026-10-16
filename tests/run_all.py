@@ -42,7 +42,6 @@ def find_chrome():
 # Windows with this reason (never silently); porting them is tracked in
 # docs/PRODUCTION_READINESS.md (native Windows row).
 WINDOWS_UNSUPPORTED = {
-    "bandwidth.py": "per-host connection cap (3) observed as peak 4 by the fixture server on Windows; unresolved whether a fixture close-timing artifact or a daemon bug (needs investigation)",
     "cli_http.py": "harness imports the POSIX-only resource module",
     "contracts_core.py": "harness interrupts the daemon with SIGINT via Popen.send_signal (unsupported on Windows)",
     "http_engine.py": "harness interrupts the daemon with SIGINT via Popen.send_signal (unsupported on Windows)",
@@ -55,7 +54,6 @@ WINDOWS_UNSUPPORTED = {
     "ops_hardening.py": "asserts POSIX 0700/0600 file modes and uses the Unix-socket harness",
     "proxy_auth.py": "uses auth_harness.py, which talks to the daemon over a Unix socket",
     "system_proxy.py": "injects the proxy through environment variables; Windows reads the registry proxy instead",
-    "diagnostics.py": "expects error_kind=connect_refused for a closed loopback port; on Windows the daemon reports a connect timeout (open question: see PRODUCTION_READINESS native Windows row)",
 }
 
 

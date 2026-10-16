@@ -29,6 +29,7 @@ class Stats:
     lock = threading.Lock()
     inflight = {}
     peak = {}
+    log = []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,6 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         with Stats.lock:
             now = Stats.inflight[host] = Stats.inflight.get(host, 0) + 1
             Stats.peak[host] = max(Stats.peak.get(host, 0), now)
+            Stats.log.append((round(time.monotonic() % 1000, 3), 'start', self.client_address[1], now, self.headers.get('Range')))
         try:
             self.send_response(status)
             self.send_header("Accept-Ranges", "bytes")
@@ -80,6 +82,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             with Stats.lock:
                 Stats.inflight[host] -= 1
+                Stats.log.append((round(time.monotonic() % 1000, 3), 'end', self.client_address[1], Stats.inflight[host], None))
 
 
 def main():
@@ -184,6 +187,7 @@ def main():
             # N44 connection budget; first the control without a budget.
             def peak_for(label, budget):
                 Stats.peak.clear()
+                Stats.log.clear()
                 if budget:
                     cli("host-connections", "127.0.0.1", str(budget))
                 ids = [submit("127.0.0.1", f"{label}{n}.bin", 16, rate=3072) for n in (1, 2)]
@@ -195,7 +199,7 @@ def main():
             free = peak_for("c", None)
             assert free > 3, free
             held = peak_for("d", 3)
-            assert 1 <= held <= 3, held
+            assert 1 <= held <= 3, (held, [e for e in Stats.log if e[3] is not None][-60:])
             status = cli("bandwidth")["bandwidth"]
             assert status["host_connections"] == [["127.0.0.1", 3]], status
             cli("host-connections", "127.0.0.1", "remove")

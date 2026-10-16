@@ -134,7 +134,7 @@ def main():
         readonly.mkdir()
         readonly.chmod(0o500)
         try:
-            if os.geteuid() != 0:
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
                 row = run("disk", f"http://127.0.0.1:{serve.getsockname()[1]}/f", readonly / "f.bin")
                 assert row["error_kind"] == "disk", row
         finally:

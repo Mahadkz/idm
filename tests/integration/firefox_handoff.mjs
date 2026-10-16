@@ -60,6 +60,15 @@ const created = (h, url = URL_BIN, extra = {}) => h.handlers.download({ url, fil
   assert.equal(h.calls.resume, 0);
 }
 
+// 1b. A top-level navigation download has no Referer in webRequest and no originUrl; Firefox's DownloadItem.referrer supplies it.
+{
+  const h = harness();
+  h.handlers.request({ url: URL_BIN, method: 'GET', tabId: 1, requestHeaders: [{ name: 'User-Agent', value: 'Page-UA' }] });
+  created(h, URL_BIN, { referrer: 'http://example.test/page' });
+  await tick(); await tick(); await tick();
+  assert.equal(h.calls.messages[0].payload.requestContext.referrer, 'http://example.test/page');
+}
+
 // 2. Opt-in off, non-GET, private windows, extension-initiated: browser keeps the download.
 for (const [name, h, run] of [
   ['opt-out', harness({ intercept: false }), h => { seen(h); created(h); }],

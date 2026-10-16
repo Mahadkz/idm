@@ -74,7 +74,9 @@ def prerequisite_problem(path, text):
     if path.name == "chromium_real.mjs" and not find_chrome():
         return "XDM_CHROME_FOR_TESTING unset or missing (needs Chrome for Testing; see .github/workflows/browsers.yml)"
     if path.name == "firefox_real.mjs" and not (os.environ.get("XDM_FIREFOX") and Path(os.environ["XDM_FIREFOX"]).exists()):
-        return "XDM_FIREFOX unset or missing (needs Firefox)"
+        return "XDM_FIREFOX unset or missing (needs Firefox; see .github/workflows/browsers.yml)"
+    if path.name == "firefox_real.mjs" and not (os.environ.get("XDM_GECKODRIVER") or find("geckodriver")):
+        return "geckodriver not found (set XDM_GECKODRIVER or put it on PATH)"
     return None
 
 

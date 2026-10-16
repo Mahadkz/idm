@@ -26,7 +26,7 @@ Match IDM's structure and workflows using the mapped dialogs (`docs/idm_control_
 | Item | Status | Evidence |
 |---|---|---|
 | Behavior contracts: core, browser, behavior-review — remaining Missing items closed or out of scope | In progress | docs/parity_ledger.md |
-| Real-browser tests: Chrome/Chromium and Firefox headless, install/load extension, handoff, media capture | Not started | |
+| Real-browser tests: Chrome/Chromium and Firefox headless, install/load extension, handoff, media capture | Partial | Chromium: tests/integration/chromium_real.mjs (handoff, daemon-down fallback; no media-capture case). Firefox: tests/integration/firefox_real.mjs (real headless Firefox via geckodriver: temporary add-on install, native hello, media sniffing + media handoff, link click handed off with URL/referrer/cookie, no browser copy, daemon-down fallback); CI job browsers/firefox. Linux only; Windows browsers untested |
 | Native Windows: build, unit tests, integration suites, named-pipe IPC, DPAPI, registry proxy, power actions (fake adapter), GUI smoke | Not started | |
 | macOS | Out of scope for v1 (Linux and Windows first, per project decision) | |
 

@@ -1352,6 +1352,10 @@ fn retry_after(response: &Response) -> Option<Duration> {
 }
 
 /// Waits before a retry, honoring a capped Retry-After and returning early when paused.
+fn describe_io(error: &std::io::Error) -> String {
+    format!("{:?}: {error}", error.kind())
+}
+
 fn wait_retry(attempt: usize, after: Option<Duration>, stop: &AtomicBool) -> Result<()> {
     let delay = after
         .map(|value| value.min(Duration::from_secs(30)))
@@ -1996,6 +2000,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
         let mut persisted = cursor;
         let mut buffer = vec![0u8; WRITE_BUFFER];
         let mut failed = false;
+        let mut why = String::new();
         let mut shrunk = false;
         loop {
             if shared.stop.load(Ordering::Relaxed) || shared.control.quota_hit() {
@@ -2045,6 +2050,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
             match response.read(&mut buffer[filled..filled + want]) {
                 Ok(0) => {
                     failed = true;
+                    why = "eof".into();
                     break;
                 }
                 Ok(n) => {
@@ -2053,8 +2059,9 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                     position += n as u64;
                     failures = 0;
                 }
-                Err(_) => {
+                Err(error) => {
                     failed = true;
+                    why = describe_io(&error);
                     break;
                 }
             }
@@ -2100,7 +2107,11 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
             wait_retry(failures, None, &shared.stop)?;
             continue;
         }
-        return Err(err("range stream ended before its declared end"));
+        return Err(err(format!(
+            "range stream ended before its declared end ({why}; position {position}, requested {cursor}..={end}, quota_hit {}, stop {})",
+            shared.control.quota_hit(),
+            shared.stop.load(Ordering::Relaxed)
+        )));
     }
 }
 

@@ -747,7 +747,10 @@ def main():
             assert deep, f"scrolling to the end must fetch deep pages; got {fetched}"
             # Search is pushed to the daemon: 500 rows match one import chunk.
             type_field(main_window, 270, 254, "g07_")
-            click(main_window, 556, 254)  # Find
+            # Tab moves focus from the search box to the Find button and Space activates it; the
+            # button's x position depends on the (Urdu) label widths, so it is not clicked by coordinate.
+            key("Tab")
+            key("space")
             try:
                 until(lambda: has_total(500), timeout=30)
             except AssertionError:

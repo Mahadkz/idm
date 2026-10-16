@@ -834,6 +834,34 @@ pub fn download_with_headers(
     run_ffmpeg_job(command, &temporary, output, stop)
 }
 
+/// Stream-copies one video-only and one audio-only local file into `output`
+/// (mp4, mkv or webm by extension). The inputs are plain files produced by the
+/// segmented HTTP engine, so ffmpeg is limited to the `file` protocol here.
+pub fn merge_streams(video: &Path, audio: &Path, output: &Path, stop: &AtomicBool) -> Result<()> {
+    let muxer = match output.extension().and_then(|value| value.to_str()) {
+        Some(value) if value.eq_ignore_ascii_case("mp4") => "mp4",
+        Some(value) if value.eq_ignore_ascii_case("mkv") => "matroska",
+        Some(value) if value.eq_ignore_ascii_case("webm") => "webm",
+        _ => return Err(err("merged output must have an .mp4, .mkv or .webm extension")),
+    };
+    if output.exists() {
+        return Err(err("media destination already exists"));
+    }
+    let temporary = part_path(output);
+    let _ = fs::remove_file(&temporary);
+    let mut command = tool("ffmpeg");
+    command.args(["-nostdin", "-hide_banner", "-v", "error", "-protocol_whitelist", "file"]);
+    command.arg("-i").arg(video);
+    command.args(["-protocol_whitelist", "file"]);
+    command.arg("-i").arg(audio);
+    command.args(["-map", "0:v:0", "-map", "1:a:0", "-c", "copy"]);
+    if muxer == "mp4" {
+        command.args(["-movflags", "+faststart"]);
+    }
+    command.args(["-f", muxer, "-y"]).arg(&temporary);
+    run_ffmpeg_job(command, &temporary, output, stop)
+}
+
 pub fn download_audio(
     url: &str,
     output: &Path,

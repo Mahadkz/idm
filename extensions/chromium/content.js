@@ -314,6 +314,21 @@ async function refreshFromPage(mediaItem) {
 
 var siteAdapters = [
   {
+    // YouTube watch pages, shorts, embeds and youtu.be. The <video> element has a blob: source, so it is
+    // identified by the page and video id instead of a URL (see ytState below).
+    id: "youtube",
+    version: 1,
+    minHostVersion: 1,
+    name: "YouTube Page Video Adapter",
+    matches: url => typeof XdmVideo !== "undefined" && !!XdmVideo.ytVideoId(url),
+    extractMedia: node => {
+      if (!node || !(node instanceof Element) || typeof ytPageItem !== "function") return [];
+      const item = ytPageItem();
+      return item ? [item] : [];
+    },
+    refreshUrl: async item => ({ url: item?.url, expired: false, refreshed: false })
+  },
+  {
     id: "embedded-stream",
     version: 1,
     minHostVersion: 1,
@@ -408,6 +423,177 @@ if (api?.storage?.local?.get) {
   });
 }
 
+// Chromium injects page_video.js as a MAIN-world content script (manifest). Firefox MV2 has no such world, so
+// the extension's own web-accessible script is added to the page instead.
+if (typeof document !== "undefined" && api?.runtime?.getManifest?.().manifest_version === 2 && /(^|\.)youtube(?:-nocookie)?\.com$/i.test(location.hostname)) {
+  try {
+    const tag = document.createElement("script");
+    tag.src = api.runtime.getURL("page_video.js");
+    tag.onload = () => tag.remove();
+    (document.head || document.documentElement).appendChild(tag);
+  } catch {}
+}
+
+// Page-video state for the YouTube adapter. The page script (page_video.js, main world) posts the page's own
+// player responses; formats arrive without addresses (YouTube serves the web player over SABR), so addresses are
+// resolved on demand by asking the page script, and refreshed when they are close to expiring.
+var ytState = { videoId: null, model: null, merged: null, resolvedAt: 0, pending: null, error: "", requestSeq: 0 };
+var YT_REFRESH_MARGIN_MS = 10 * 60 * 1000;
+var YT_RESOLVE_TIMEOUT_MS = 20000;
+
+function ytPostToPage(message) {
+  try { if (typeof window !== "undefined" && typeof window.postMessage === "function") window.postMessage({ xdmVideo: 1, ...message }, location.origin); } catch {}
+}
+
+function ytPageItem() {
+  const m = ytState.model;
+  if (!m || !m.playable || typeof XdmVideo === "undefined") return null;
+  const here = XdmVideo.ytVideoId(typeof location !== "undefined" ? location.href : "");
+  if (here && here !== m.videoId) return null;
+  return { url: `https://www.youtube.com/watch?v=${m.videoId}`, mime: "video/*", title: m.title, kind: "page-video", videoId: m.videoId };
+}
+
+function ytOnPlayer(response) {
+  if (typeof XdmVideo === "undefined") return;
+  const model = XdmVideo.normalizePlayerResponse(response);
+  if (!model || !model.videoId) return;
+  const here = XdmVideo.ytVideoId(typeof location !== "undefined" ? location.href : "");
+  if (here && here !== model.videoId) return;
+  const previous = ytState.model;
+  // A later response for the same video may carry more formats (or addresses); keep the richer one.
+  if (previous && previous.videoId === model.videoId && previous.formats.length > model.formats.length && !model.hasUrls) return;
+  if (!previous || previous.videoId !== model.videoId) { ytState.merged = null; ytState.resolvedAt = 0; ytState.error = ""; }
+  ytState.videoId = model.videoId;
+  ytState.model = model;
+  if (model.drm) {
+    for (const entry of playerRegistry.entries.values()) if (entry.videoId === model.videoId) api?.runtime?.sendMessage({ type: "page.protected", url: `https://www.youtube.com/watch?v=${model.videoId}` })?.catch?.(() => {});
+  }
+  if (typeof document !== "undefined" && document.documentElement) debouncedInspect(document.documentElement, 50);
+}
+
+function ytMinExpiry(model) {
+  const times = (model?.formats || []).filter(f => f.url && f.expiresAt).map(f => f.expiresAt);
+  return times.length ? Math.min(...times) : Infinity;
+}
+
+// Resolves stream addresses through the page script. Reuses a fresh result; asks again when the addresses
+// are close to (or past) their `expire` time: the "refresh download address" step, done before the request is
+// handed to XDM rather than after a failed one.
+function ytEnsureResolved(force = false) {
+  const base = ytState.model;
+  if (!base) return Promise.resolve(null);
+  const fresh = ytState.merged && ytState.merged.hasUrls && ytState.merged.videoId === base.videoId && ytMinExpiry(ytState.merged) - Date.now() > YT_REFRESH_MARGIN_MS;
+  if (fresh && !force) return Promise.resolve(ytState.merged);
+  if (ytState.pending) return ytState.pending;
+  const requestId = `${Date.now()}-${++ytState.requestSeq}`;
+  const videoId = base.videoId;
+  ytState.pending = new Promise(resolve => {
+    let timer = null;
+    const done = value => {
+      if (timer) clearTimeout(timer);
+      pendingResolves.delete(requestId);
+      ytState.pending = null;
+      resolve(value);
+    };
+    pendingResolves.set(requestId, reply => {
+      if (reply?.ok && reply.response) {
+        const resolved = XdmVideo.normalizePlayerResponse(reply.response);
+        let merged = XdmVideo.mergeUrls(ytState.model && ytState.model.videoId === videoId ? ytState.model : base, resolved ? resolved.formats : []);
+        ytState.error = merged.hasUrls ? "" : "YouTube did not offer downloadable streams for this video.";
+        ytState.merged = merged;
+        ytState.resolvedAt = Date.now();
+        // Addresses the page's own player requested (plain GET videoplayback) fill any itag still missing one.
+        done(merged);
+      } else {
+        ytState.error = reply?.reason ? `YouTube did not offer downloadable streams: ${reply.reason}` : "YouTube did not offer downloadable streams for this video.";
+        done(null);
+      }
+    });
+    timer = setTimeout(() => { ytState.error = "Timed out waiting for YouTube's player."; done(null); }, YT_RESOLVE_TIMEOUT_MS);
+    ytPostToPage({ type: "resolve", videoId, requestId });
+  });
+  return ytState.pending;
+}
+var pendingResolves = new Map();
+var lastVideoMenu = [];
+
+async function ytMenu() {
+  let merged = await ytEnsureResolved();
+  if (merged && api?.runtime?.sendMessage) {
+    const captured = await api.runtime.sendMessage({ type: "video.captured", videoId: merged.videoId }).catch(() => null);
+    if (captured?.formats?.length) {
+      merged = XdmVideo.mergeUrls(merged, captured.formats.map(f => XdmVideo.normalizeFormat(f)).filter(Boolean), { addUnknown: false });
+    }
+  }
+  let options = merged ? XdmVideo.buildMenu(merged) : [];
+  if (!options.length) return { options: [], note: ytState.error || "YouTube did not offer downloadable streams for this video." };
+  // Only formats that are served to the end are offered (see probeOffset in video_core.js).
+  let footnote = "";
+  const verdict = await api.runtime.sendMessage({ type: "video.verify", items: [...new Map(options.flatMap(o => [o.video, o.audio]).filter(Boolean).map(p => [p.url, { url: p.url, at: p.probeAt }])).values()] }).catch(() => null);
+  if (verdict?.ok) {
+    const served = verdict.results || {};
+    const complete = options.filter(o => [o.video, o.audio].filter(Boolean).every(p => served[p.url] === true));
+    if (complete.length < options.length) footnote = complete.length ? "Higher qualities are hidden: YouTube only serves them to its own player." : "";
+    if (!complete.length) return { options: [], note: "YouTube only serves this video's streams to its own player (integrity check); no complete download address is available." };
+    options = complete;
+  }
+  return {
+    footnote,
+    options: options.map(choice => ({
+      label: choice.label,
+      detail: choice.detail,
+      audioOnly: !!choice.audioOnly,
+      run: () => api.runtime.sendMessage({ type: "video.download", choice: { ...choice, site: "youtube", title: merged.title }, pageUrl: typeof location !== "undefined" ? location.href : "" })
+    }))
+  };
+}
+
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("message", event => {
+    const m = event?.data;
+    if (!m || m.xdmVideo !== 1 || (event.source !== undefined && event.source !== window)) return;
+    if (m.type === "player") ytOnPlayer(m.response);
+    else if (m.type === "resolved") pendingResolves.get(m.requestId)?.(m);
+    else if (m.type === "ready") ytPostToPage({ type: "hello" });
+  });
+}
+
+// Pages whose <video> plays a blob: (MSE) source have no address of their own. When the background script has
+// captured an HLS or DASH manifest for the tab, the player is offered that stream's qualities instead.
+var streamProbes = typeof WeakMap !== "undefined" ? new WeakMap() : new Map();
+
+function probeStreams(player) {
+  if (!api?.runtime?.sendMessage || ytState.model || typeof XdmVideo !== "undefined" && XdmVideo.ytVideoId(typeof location !== "undefined" ? location.href : "")) return;
+  const st = streamProbes.get(player) || { tries: 0, found: false };
+  if (st.found || st.tries >= 8) return;
+  st.tries++;
+  streamProbes.set(player, st);
+  api.runtime.sendMessage({ type: "media.list" }).then(reply => {
+    const stream = (reply?.items || []).filter(item => item.kind === "hls" || item.kind === "dash").pop();
+    if (stream) {
+      st.found = true;
+      playerRegistry.register(player, { url: stream.url, title: document.title || "", kind: "stream", streamKind: stream.kind });
+    } else if (st.tries < 8) {
+      setTimeout(() => probeStreams(player), 2500);
+    }
+  }).catch?.(() => {});
+}
+
+// Any other player: the background script lists what it captured for the tab (direct files, one entry each;
+// HLS/DASH variants, one entry per resolution) plus the player's own source address.
+async function genericMenu(info) {
+  const reply = await api.runtime.sendMessage({ type: "video.options", playerUrl: info.url, title: info.title || document.title, pageUrl: typeof location !== "undefined" ? location.href : "" });
+  if (!reply?.ok || !reply.options?.length) return { options: [], note: reply?.reason || "No downloadable formats found for this video yet." };
+  return {
+    options: reply.options.map(option => ({
+      label: option.label,
+      detail: option.detail,
+      audioOnly: !!option.audioOnly,
+      run: () => api.runtime.sendMessage({ type: "video.download", choice: option.choice, pageUrl: typeof location !== "undefined" ? location.href : "" })
+    }))
+  };
+}
+
 // B48: Floating "Download with XDM" button attached to detected players. The visible UI lives inside a
 // closed shadow root so page CSS and page scripts cannot restyle or reach it; the host element only carries
 // position. Keyboard: the button is focusable, Escape dismisses the overlay and returns focus to the player,
@@ -418,23 +604,24 @@ var playerPanel = (() => {
   const owned = typeof WeakSet !== "undefined" ? new WeakSet() : new Set();
   const MIN_SIZE = 40;
   const WIDTHS = { full: 144, mini: 44 };
-  const CSS = ":host{all:initial}button{all:initial;box-sizing:border-box;display:block;cursor:pointer;font:600 12px/1.2 sans-serif;color:#fff;background:#1a56c4;border:1px solid #fff;border-radius:4px;padding:6px 10px;text-align:center;width:100%}button:hover{background:#2a6ae0}button:focus-visible{outline:2px solid #ffbf00;outline-offset:1px}";
+  const CSS = ":host{all:initial}button{all:initial;box-sizing:border-box;display:block;cursor:pointer;font:600 12px/1.2 sans-serif;color:#fff;background:#1a56c4;border:1px solid #fff;border-radius:4px;padding:6px 10px;text-align:center;width:100%}button:hover{background:#2a6ae0}button:focus-visible{outline:2px solid #ffbf00;outline-offset:1px}.menu{position:absolute;top:34px;right:0;width:250px;max-height:60vh;overflow:auto;background:#fff;color:#111;border:1px solid #1a56c4;border-radius:4px;box-shadow:0 4px 14px rgba(0,0,0,.4);font:13px/1.3 sans-serif}.menu .head{padding:6px 10px;font-weight:600;background:#eef3fd;border-bottom:1px solid #c9d6f0}.menu .opt{display:flex;justify-content:space-between;gap:8px;width:100%;background:#fff;color:#111;border:0;border-bottom:1px solid #eee;border-radius:0;padding:7px 10px;text-align:left;font:13px/1.3 sans-serif}.menu .opt:hover,.menu .opt:focus-visible{background:#dce8fb}.menu .opt span{color:#555}.menu .note{padding:8px 10px;color:#333}";
 
   const kebab = name => name.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
   // Plain assignment plus an !important inline declaration so page rules with !important cannot override it.
   function setStyle(el, prop, value) {
-    el.style = el.style || {};
+    if (!el.style) el.style = {};
     el.style[prop] = value;
     if (typeof el.style.setProperty === "function") el.style.setProperty(kebab(prop), value, "important");
   }
 
   function width() { return WIDTHS[overlayPolicy.mode] || WIDTHS.full; }
 
-  function labelFor(btn) {
+  function labelFor(btn, info) {
     const mini = overlayPolicy.mode === "mini";
-    btn.textContent = mini ? "XDM" : "Download with XDM";
-    btn.setAttribute?.("aria-label", "Download with XDM");
-    btn.title = "Download with XDM";
+    const text = "Download this video";
+    btn.textContent = mini ? "XDM" : text;
+    btn.setAttribute?.("aria-label", text);
+    btn.title = text;
   }
 
   function create(playerId, mediaInfo = {}) {
@@ -450,7 +637,7 @@ var playerPanel = (() => {
     const panel = doc.createElement("div");
     panel.className = "xdm-player-panel";
     panel.setAttribute?.("data-player-id", playerId);
-    panel.style = panel.style || {};
+    if (!panel.style) panel.style = {};
     setStyle(panel, "position", "fixed");
     setStyle(panel, "zIndex", "2147483647");
     setStyle(panel, "display", "none");
@@ -469,14 +656,14 @@ var playerPanel = (() => {
     const btn = doc.createElement("button");
     btn.className = "xdm-download-btn";
     btn.type = "button";
-    labelFor(btn);
+    labelFor(btn, mediaInfo);
     // Reads the live entry so a replaced source is never downloaded from a stale URL.
     btn.onclick = event => {
       event?.stopPropagation?.();
       event?.preventDefault?.();
       const info = panel.mediaInfo || {};
-      if (info.url) {
-        api?.runtime?.sendMessage({ type: "media.download", url: info.url, title: info.title, pageUrl: typeof location !== "undefined" ? location.href : "" })?.catch?.(() => {});
+      if (info.kind || info.url) {
+        if (parts.get(playerId)?.menu) closeMenu(playerId); else openMenu(playerId);
       }
     };
     owned.add(btn);
@@ -486,6 +673,7 @@ var playerPanel = (() => {
       event?.stopPropagation?.();
       if (event?.key === "Escape") {
         event.preventDefault?.();
+        if (part.menu) { closeMenu(playerId); try { btn.focus?.(); } catch {} return; }
         dismiss(playerId);
         try { part.focusTarget?.(); } catch {}
       }
@@ -507,6 +695,75 @@ var playerPanel = (() => {
     return true;
   }
 
+  function closeMenu(playerId) {
+    const part = parts.get(playerId);
+    if (!part?.menu) return;
+    try { part.root.removeChild(part.menu); } catch {}
+    part.menu = null;
+    if (part.outside && typeof window !== "undefined") { try { window.removeEventListener("click", part.outside, true); } catch {} part.outside = null; }
+  }
+
+  // The IDM-style quality list. Options come from the adapter (or the background script for captured streams);
+  // choosing one reports the outcome inside the same menu.
+  async function openMenu(playerId) {
+    const part = parts.get(playerId);
+    const panel = panels.get(playerId);
+    const doc = typeof document !== "undefined" ? document : null;
+    if (!part || !panel || !doc || typeof doc.createElement !== "function") return null;
+    closeMenu(playerId);
+    const menu = doc.createElement("div");
+    menu.className = "menu";
+    menu.setAttribute?.("role", "menu");
+    part.menu = menu;
+    part.root.appendChild(menu);
+    part.outside = event => { if (event?.target !== panel) closeMenu(playerId); };
+    if (typeof window !== "undefined") window.addEventListener?.("click", part.outside, true);
+    const text = (cls, value) => { const el = doc.createElement("div"); el.className = cls; el.textContent = value; return el; };
+    const clear = () => { while (menu.children?.length) menu.removeChild(menu.children[0]); };
+    clear();
+    menu.appendChild(text("head", "Download this video"));
+    const status = text("note", "Loading qualities…");
+    menu.appendChild(status);
+    const info = panel.mediaInfo || {};
+    let result;
+    try {
+      result = info.kind === "page-video" ? await ytMenu() : await genericMenu(info);
+    } catch (error) {
+      result = { options: [], note: `Could not list qualities: ${error?.message || error}` };
+    }
+    if (part.menu !== menu) return null;
+    clear();
+    menu.appendChild(text("head", "Download this video"));
+    if (!result.options.length) menu.appendChild(text("note", result.note || "Nothing to download."));
+    if (result.footnote) menu.appendChild(text("note", result.footnote));
+    const note = text("note", "");
+    note.style.display = "none";
+    for (const option of result.options) {
+      const row = doc.createElement("button");
+      row.className = "opt";
+      row.type = "button";
+      row.setAttribute?.("role", "menuitem");
+      const label = doc.createElement("div");
+      label.textContent = option.label;
+      row.appendChild(label);
+      if (option.detail) { const size = doc.createElement("span"); size.textContent = option.detail; row.appendChild(size); }
+      row.onclick = async event => {
+        event?.stopPropagation?.();
+        event?.preventDefault?.();
+        note.style.display = "block";
+        note.textContent = "Sending to XDM…";
+        let reply;
+        try { reply = await option.run(); } catch (error) { reply = { accepted: false, reason: String(error?.message || error) }; }
+        const accepted = reply?.accepted || reply?.ok === true;
+        note.textContent = accepted ? "Added to XDM" : `Could not hand off: ${reply?.reason || "unknown error"}`;
+        if (accepted) setTimeout(() => closeMenu(playerId), 1500);
+      };
+      menu.appendChild(row);
+    }
+    menu.appendChild(note);
+    return menu;
+  }
+
   function isOwn(node) {
     for (let cur = node, depth = 0; cur && depth < 4; cur = cur.parentNode, depth++) if (owned.has(cur)) return true;
     return false;
@@ -521,6 +778,7 @@ var playerPanel = (() => {
   }
 
   function hide(playerId) {
+    closeMenu(playerId);
     const panel = panels.get(playerId);
     if (panel) {
       if (panel.style) setStyle(panel, "display", "none");
@@ -578,11 +836,12 @@ var playerPanel = (() => {
   }
 
   function applyPolicy() {
-    for (const [id, part] of parts) labelFor(part.btn);
+    for (const [id, part] of parts) labelFor(part.btn, panels.get(id)?.mediaInfo);
     if (typeof playerRegistry !== "undefined") playerRegistry.repositionAll();
   }
 
   function remove(playerId) {
+    closeMenu(playerId);
     const panel = panels.get(playerId);
     if (panel) {
       if (panel.parentNode && typeof panel.parentNode.removeChild === "function") {
@@ -602,7 +861,7 @@ var playerPanel = (() => {
     return parts.get(playerId) || null;
   }
 
-  return { create, attach, show, hide, dismiss, reset, bind, updatePosition, sync, applyPolicy, remove, get, internals, isOwn, panels };
+  return { create, attach, show, hide, dismiss, reset, bind, updatePosition, sync, applyPolicy, remove, get, internals, isOwn, openMenu, closeMenu, panels };
 })();
 
 // B44: Player registry with WeakRef tracking, per-player observers and removal cleanup.
@@ -671,6 +930,7 @@ var playerRegistry = (() => {
       if (info.url && info.url !== existing.url) playerPanel.reset(id);
       existing.url = info.url || existing.url;
       existing.title = info.title || existing.title;
+      if (info.kind) { existing.kind = info.kind; existing.videoId = info.videoId; existing.streamKind = info.streamKind; }
       playerPanel.sync(id, element);
       return id;
     }
@@ -679,6 +939,9 @@ var playerRegistry = (() => {
       ref: typeof WeakRef !== "undefined" ? new WeakRef(element) : element,
       url: info.url || element.currentSrc || element.src || "",
       title: info.title || element.title || "",
+      kind: info.kind || null,
+      videoId: info.videoId || null,
+      streamKind: info.streamKind || null,
       registeredAt: Date.now(),
       io: null,
       ro: null
@@ -781,15 +1044,20 @@ function inspect(node) {
       const rect = player.getBoundingClientRect();
       if (rect && rect.width <= 1 && rect.height <= 1) continue; // suppress 1x1 tracking pixel
     }
-    for (const item of adapterMedia(player, pageUrl)) {
+    const items = adapterMedia(player, pageUrl);
+    // A blob: (MSE) player has no address of its own; look for a captured HLS/DASH manifest of this tab.
+    if (!items.length && !playerUrls(player).some(u => /^https?:/i.test(u))) probeStreams(player);
+    for (const item of items) {
       const url = item.url;
       if (isAd(url)) continue;
       const known = seen.has(url);
       // A replacement element showing an already reported URL still needs its own overlay.
-      playerRegistry.register(player, { url, title: item.title });
+      playerRegistry.register(player, { url, title: item.title, kind: item.kind, videoId: item.videoId });
       if (playerRegistry.isProtected(player)) continue;
       if (known) continue;
       seen.add(url);
+      // A page video is not a downloadable address; the panel menu is its only route.
+      if (item.kind === "page-video") continue;
       const expiresAt = urlExpiry(url);
       api?.runtime?.sendMessage({
         type: "page.media",
@@ -861,6 +1129,21 @@ if (api?.runtime?.onMessage?.addListener) {
       const filename = (anchor?.getAttribute ? anchor.getAttribute("download") : anchor?.attributes?.download) || anchor?.innerText || anchor?.textContent || undefined;
       sendResponse({ filename });
       return false;
+    }
+    if (msg?.type === "page.videoMenu") {
+      const entry = [...playerRegistry.entries.values()].find(item => !item.protected);
+      if (!entry) { sendResponse({ options: [] }); return false; }
+      (entry.kind === "page-video" ? ytMenu() : genericMenu(entry)).then(result => {
+        lastVideoMenu = result.options;
+        sendResponse({ options: result.options.map((o, key) => ({ key, label: o.label, detail: o.detail })), note: result.note });
+      }, () => sendResponse({ options: [] }));
+      return true;
+    }
+    if (msg?.type === "page.videoChoose") {
+      const option = lastVideoMenu[msg.key];
+      if (!option) { sendResponse({ accepted: false, reason: "menu expired" }); return false; }
+      option.run().then(sendResponse, error => sendResponse({ accepted: false, reason: String(error) }));
+      return true;
     }
     if (msg?.type === "page.extractLinks") {
       sendResponse({ links: extractLinks(msg.options) });

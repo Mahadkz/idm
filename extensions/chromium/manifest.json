@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "111",
   "name": "XDM Browser Bridge",
   "version": "0.1.0",
   "description": "Send eligible browser downloads and clear media URLs to XDM.",
@@ -24,9 +25,17 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js", "page_xhr.js", "page_fetch.js"],
+      "js": ["video_core.js", "content.js", "page_xhr.js", "page_fetch.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "match_about_blank": true
+    },
+    {
+      "matches": ["https://*.youtube.com/*", "https://*.youtube-nocookie.com/*"],
+      "js": ["page_video.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
     }
   ],
   "web_accessible_resources": [

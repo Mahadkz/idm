@@ -64,6 +64,9 @@ struct SubmitFlags {
 }
 
 pub(crate) struct Inner {
+    /// Browser download offers waiting for a GUI, and when a GUI last polled.
+    pub(crate) offers: std::collections::VecDeque<(Instant, xdm_ipc::DownloadOffer)>,
+    pub(crate) gui_polled: Option<Instant>,
     pub(crate) db: Connection,
     pub(crate) active: HashMap<i64, Active>,
     pub(crate) max_concurrent: usize,
@@ -142,6 +145,10 @@ fn restart_reason(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Op
 pub(crate) fn owned_partial_paths(output: &Path, temp: Option<&str>) -> Vec<PathBuf> {
     let mut paths = http_part_paths(output).to_vec();
     paths.push(PathBuf::from(format!("{}.part.ftp", output.display())));
+    for staged in adaptive_stage_paths(output) {
+        paths.extend(http_part_paths(&staged));
+        paths.push(staged);
+    }
     if let Some(temp) = temp.filter(|temp| !temp.is_empty()) {
         let temp = std::fs::canonicalize(temp).unwrap_or_else(|_| PathBuf::from(temp));
         let (part, meta) = xdm_http::partial_paths(output, Some(&temp));
@@ -327,12 +334,28 @@ fn ftp_checkpoint_progress(output: &Path, temp: Option<&Path>) -> Option<(u64, O
 pub(crate) struct MediaLive {
     /// Bytes ffmpeg has written so far, sampled from the temporary file.
     downloaded: AtomicU64,
+    /// Combined declared size of an adaptive job's streams (0 while unknown).
+    total: AtomicU64,
+    /// Live recordings report elapsed seconds; adaptive downloads do not.
+    timed: bool,
     started: Instant,
 }
 
 impl MediaLive {
     fn new() -> Self {
-        Self { downloaded: AtomicU64::new(0), started: Instant::now() }
+        Self { downloaded: AtomicU64::new(0), total: AtomicU64::new(0), timed: true, started: Instant::now() }
+    }
+
+    fn new_transfer() -> Self {
+        Self { downloaded: AtomicU64::new(0), total: AtomicU64::new(0), timed: false, started: Instant::now() }
+    }
+
+    fn report_total(&self, total: u64) {
+        self.total.store(total, Ordering::Relaxed);
+    }
+
+    fn declared_total(&self) -> Option<u64> {
+        Some(self.total.load(Ordering::Relaxed)).filter(|total| *total > 0)
     }
 
     /// Called from the recorder's sampling thread while ffmpeg is running.
@@ -461,11 +484,11 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                 });
             // A live recording reports its captured bytes and seconds; the
             // recorder has no total to show, so only the counters fill in.
-            let recording = inner
-                .active
-                .get(&id)
-                .and_then(|active| active.media.as_ref())
-                .map(|media| media.progress());
+            let media_live = inner.active.get(&id).and_then(|active| active.media.as_ref());
+            let recording = media_live.filter(|media| media.timed).map(|media| media.progress());
+            let transfer = media_live
+                .filter(|media| !media.timed)
+                .map(|media| (media.progress().0, media.declared_total()));
             let progress: Option<(u64, Option<u64>)> = if live.is_some() {
                 None
             } else if status == "complete" {
@@ -495,9 +518,11 @@ pub(crate) fn query_summaries<P: rusqlite::Params>(
                 downloaded: live
                     .map(|p| p.downloaded)
                     .or(recording.map(|(bytes, _)| bytes))
+                    .or(transfer.map(|(bytes, _)| bytes))
                     .or_else(|| progress.map(|(done, _)| done)),
                 total: live
                     .and_then(|p| p.total)
+                    .or(transfer.and_then(|(_, total)| total))
                     .or_else(|| progress.and_then(|(_, total)| total)),
                 media_seconds: recording.map(|(_, seconds)| seconds),
                 kind: row.get(6)?,
@@ -1047,6 +1072,8 @@ impl Service {
         let quota = bandwidth::load(&db, &governor);
         Ok(Arc::new(Self {
             inner: Arc::new(Mutex::new(Inner {
+                offers: Default::default(),
+                gui_polled: None,
                 db,
                 active: HashMap::new(),
                 max_concurrent,
@@ -1495,7 +1522,7 @@ impl Service {
                 let id = next_task_id(&inner.db)?;
                 let rules = load_rules(&inner.db)?;
                 let category = match &mode {
-                    MediaMode::Video { .. } | MediaMode::Live { .. } => "Video".to_string(),
+                    MediaMode::Video { .. } | MediaMode::Live { .. } | MediaMode::Adaptive { .. } => "Video".to_string(),
                     MediaMode::Audio { .. } => xdm_categories::classify_with(
                         &rules,
                         std::path::Path::new(&output)
@@ -1817,6 +1844,42 @@ impl Service {
                 remember,
             } => self.task_provide_login(task_id, username, password, remember),
             Command::TaskRestart { task_id } => self.task_restart(task_id),
+            Command::OfferDownload { offer } => {
+                let web = |value: &str| (value.starts_with("http://") || value.starts_with("https://")) && value.len() <= 8192;
+                if offer.id.is_empty()
+                    || offer.id.len() > 128
+                    || !web(&offer.url)
+                    || offer.audio_url.as_deref().is_some_and(|audio| !web(audio))
+                    || offer.filename.len() > 255
+                    || offer.title.len() > 1024
+                    || !valid_media_headers(&offer.headers)
+                {
+                    return Ok(Reply::error("invalid download offer"));
+                }
+                let mut inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
+                let now = Instant::now();
+                inner.offers.retain(|(at, _)| now.duration_since(*at) < Duration::from_secs(600));
+                let present = inner.gui_polled.is_some_and(|at| now.duration_since(at) < Duration::from_secs(5));
+                let mut reply = Reply::accepted(0);
+                if present && inner.offers.len() < 20 {
+                    inner.offers.push_back((now, offer));
+                    reply.offered = true;
+                }
+                Ok(reply)
+            }
+            Command::TakeOffers => {
+                let mut inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
+                let now = Instant::now();
+                inner.gui_polled = Some(now);
+                let mut reply = Reply::accepted(0);
+                reply.offers = inner
+                    .offers
+                    .drain(..)
+                    .filter(|(at, _)| now.duration_since(*at) < Duration::from_secs(600))
+                    .map(|(_, offer)| offer)
+                    .collect();
+                Ok(reply)
+            }
             Command::Hello { .. } => Ok(Reply::error("handshake is answered by the connection handler")),
         }
     }
@@ -2007,10 +2070,11 @@ impl Service {
                         None
                     };
                     // Only live recordings have progress to report while they run.
-                    let media = stored_mode
-                        .as_ref()
-                        .is_some_and(|mode| matches!(mode, MediaMode::Live { .. }))
-                        .then(|| Arc::new(MediaLive::new()));
+                    let media = match stored_mode.as_ref() {
+                        Some(MediaMode::Live { .. }) => Some(Arc::new(MediaLive::new())),
+                        Some(MediaMode::Adaptive { .. }) => Some(Arc::new(MediaLive::new_transfer())),
+                        _ => None,
+                    };
                     let kind = if kind == "media" {
                         WorkKind::Media {
                             mode: stored_mode.expect("resolved above"),
@@ -2075,7 +2139,7 @@ impl Service {
                         stall_timeout: Duration::from_secs(inner.stall_timeout),
                         stop,
                         stop_requested,
-                        policy: ResumePolicy { ignore_modification_date: ignore_modified != 0 },
+                        policy: ResumePolicy { ignore_modification_date: ignore_modified != 0, ..ResumePolicy::default() },
                         name_from_server: name_from_server != 0,
                         temp_dir,
                         set_file_time: preserve_time != 0,
@@ -2159,6 +2223,7 @@ impl Service {
                             &mut **decide
                                 as &mut (dyn FnMut(ResponseMetadata) -> Result<PathBuf> + Send)
                         });
+                        let request_cap = range_cap_for(&work.url);
                         download_ex(
                             Options {
                                 login: work.login.clone(),
@@ -2175,10 +2240,11 @@ impl Service {
                                 stop: work.stop.clone(),
                                 temp_dir: work.temp_dir.clone(),
                                 set_file_time: work.set_file_time,
+                                max_request_bytes: request_cap,
                             },
                             control,
                             work.stall_timeout,
-                            work.policy,
+                            ResumePolicy { same_site_redirects: request_cap.is_some(), ..work.policy },
                             named,
                         )
                     }
@@ -2226,6 +2292,24 @@ impl Service {
                             &headers,
                             &work.stop,
                         ),
+                        MediaMode::Adaptive { audio_url } => match work.media.clone() {
+                            None => Err("adaptive media task without a progress holder".into()),
+                            Some(live) => run_adaptive(
+                                AdaptiveJob {
+                                    video_url: &work.url,
+                                    audio_url,
+                                    output: &work.output,
+                                    proxy: &work.proxy,
+                                    login: &work.login,
+                                    proxy_login: &work.proxy_login,
+                                    stop: &work.stop,
+                                    stall_timeout: work.stall_timeout,
+                                    policy: work.policy,
+                                },
+                                &headers,
+                                &live,
+                            ),
+                        },
                         MediaMode::Live {
                             video,
                             audio,
@@ -2311,6 +2395,118 @@ impl Service {
             });
         }
     }
+}
+
+/// Downloads both streams of an adaptive job with the segmented engine, in
+/// parallel, then stream-copies them into the destination. A stream that
+/// already completed on an earlier run is not fetched again; the staged files
+/// and the engine's partial state are removed once the merge published.
+/// Media hosts that reject open-ended ranges and ranges above about 10 MB (googlevideo) get a per-request
+/// cap. `XDM_RANGE_CAP_HOSTS` (comma separated host names) and `XDM_RANGE_CAP_BYTES` extend and tune this
+/// for tests against local fixture servers.
+fn range_cap_for(url: &str) -> Option<u64> {
+    let host = Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    let extra = std::env::var("XDM_RANGE_CAP_HOSTS").unwrap_or_default();
+    let listed = extra.split(',').map(str::trim).any(|item| !item.is_empty() && item.eq_ignore_ascii_case(&host));
+    if !(listed || host == "googlevideo.com" || host.ends_with(".googlevideo.com")) {
+        return None;
+    }
+    let bytes = std::env::var("XDM_RANGE_CAP_BYTES").ok().and_then(|value| value.parse().ok()).filter(|bytes| *bytes > 0);
+    Some(bytes.unwrap_or(8 * 1024 * 1024))
+}
+
+struct AdaptiveJob<'a> {
+    video_url: &'a str,
+    audio_url: &'a str,
+    output: &'a Path,
+    proxy: &'a Proxy,
+    login: &'a Option<xdm_http::Login>,
+    proxy_login: &'a Option<xdm_http::Login>,
+    stop: &'a Arc<AtomicBool>,
+    stall_timeout: Duration,
+    policy: ResumePolicy,
+}
+
+fn run_adaptive(
+    work: AdaptiveJob<'_>,
+    headers: &[(String, String)],
+    live: &Arc<MediaLive>,
+) -> Result<()> {
+    let [video_path, audio_path] = adaptive_stage_paths(work.output);
+    let controls = [
+        Arc::new(TransferControl::new(None)?),
+        Arc::new(TransferControl::new(None)?),
+    ];
+    let jobs = [
+        (work.video_url.to_string(), video_path.clone(), controls[0].clone()),
+        (work.audio_url.to_string(), audio_path.clone(), controls[1].clone()),
+    ];
+    let finished = Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let controls = controls.clone();
+        let live = live.clone();
+        let finished = finished.clone();
+        thread::spawn(move || {
+            while !finished.load(Ordering::Relaxed) {
+                let progress: Vec<Progress> = controls.iter().map(|control| control.progress()).collect();
+                live.report(progress.iter().map(|p| p.downloaded).sum());
+                if progress.iter().all(|p| p.total.is_some()) {
+                    live.report_total(progress.iter().filter_map(|p| p.total).sum());
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+        })
+    };
+    let fetched: Result<()> = thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .into_iter()
+            .map(|(url, path, control)| {
+                let headers = headers.to_vec();
+                let url_for_cap = url.clone();
+                let cap_for_policy = range_cap_for(&url);
+                scope.spawn(move || -> Result<()> {
+                    let (part, meta) = xdm_http::partial_paths(&path, None);
+                    // Complete from an earlier run: the engine published it and left no checkpoint.
+                    if path.exists() && !part.exists() && !meta.exists() {
+                        return Ok(());
+                    }
+                    download_ex(
+                        Options {
+                            url,
+                            output: path,
+                            connections: 8,
+                            headers,
+                            proxy: work.proxy.clone(),
+                            login: work.login.clone(),
+                            proxy_login: work.proxy_login.clone(),
+                            stop: work.stop.clone(),
+                            max_request_bytes: range_cap_for(&url_for_cap),
+                            ..Options::default()
+                        },
+                        control,
+                        work.stall_timeout,
+                        ResumePolicy { same_site_redirects: cap_for_policy.is_some(), ..work.policy },
+                        None,
+                    )
+                })
+            })
+            .collect();
+        let mut first: Result<()> = Ok(());
+        for handle in handles {
+            let result = handle.join().unwrap_or_else(|_| Err("adaptive download thread panicked".into()));
+            if first.is_ok() {
+                first = result;
+            }
+        }
+        first
+    });
+    finished.store(true, Ordering::Relaxed);
+    let _ = sampler.join();
+    fetched?;
+    xdm_media::merge_streams(&video_path, &audio_path, work.output, work.stop)?;
+    let _ = std::fs::remove_file(&video_path);
+    let _ = std::fs::remove_file(&audio_path);
+    Ok(())
 }
 
 /// The engine flips the shared stop flag when it aborts a failing transfer;

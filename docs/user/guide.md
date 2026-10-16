@@ -53,6 +53,14 @@ Downloads go to `<data directory>/downloads` by default, with one folder per cat
 - Downloads started in private or incognito windows are not captured by default.
 - The extension options page has site exclusions, force and bypass modifier keys, a link filter for **Download selected links** and **Download all links**, and media panel settings.
 
+### Download this video (browser panel)
+
+- With a browser extension installed, a **Download this video** button appears at the top right of a playing video. Click it for a list of the formats found: container and resolution, size where known, and audio-only entries. HLS and DASH streams list one entry per resolution; direct files list one entry each.
+- Choosing an entry opens XDM's **Download File Info** dialog with the file name taken from the video title. If no XDM window is open, the download is queued directly instead.
+- The extension toolbar popup shows the same list for the current tab.
+- Videos with DRM protection never get the button. Live streams are not offered.
+- YouTube: XDM offers only the qualities YouTube actually serves to the end. In the current state of the site that is **MP4 360p** for videos longer than about a minute (YouTube withholds its higher qualities from anything but its own player), and every quality for very short videos. Separate video and audio streams are downloaded together and merged with ffmpeg into one MP4, WEBM or MKV file. The menu says when higher qualities are hidden.
+
 ### Batch download
 
 - **Tasks → Add batch download…**

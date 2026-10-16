@@ -5415,6 +5415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         }
     };
+    let offers_ctx = dialogs_ctx.clone();
     let open_add_url_fn: Rc<dyn Fn(Option<String>)> = {
         let add_url_window = add_url_win_holder.clone();
         let weak_main_url = weak_main_url.clone();
@@ -5470,6 +5471,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // Browser "Download this video" choices arrive as offers; each opens the File Info dialog. Polling also
+    // tells the daemon a window is present, so offers are not queued behind the user's back.
+    let offer_timer = Timer::default();
+    offer_timer.start(TimerMode::Repeated, std::time::Duration::from_secs(1), {
+        let ctx = offers_ctx.clone();
+        move || {
+            let shown = ctx.clone();
+            ipc_then(
+                &ctx.ipc,
+                |paths| paths.request(Command::TakeOffers).ok().map(|reply| reply.offers).unwrap_or_default(),
+                move |offers| {
+                    for offer in offers {
+                        download_dialogs::begin_offer(&shown, offer);
+                    }
+                },
+            );
+        }
+    });
     let open_add_for_ui = open_add_url_fn.clone();
     ui.on_open_add_url(move || {
         open_add_for_ui(None);

@@ -1,3 +1,4 @@
+if (typeof importScripts === "function") { try { importScripts("video_core.js"); } catch {} }
 const HOST = "org.xdm.browser";
 const MAX_RECENT = 300;
 const REQUEST_TTL_MS = 60000;
@@ -204,6 +205,7 @@ function getRecentRequest(url, tabId) {
 
 function remember(details) {
   if (!validHttp(details.url) || details.tabId < 0) return;
+  if (details.url.includes("googlevideo.com/videoplayback")) captureVideoplayback(details);
   const tabKey = `${details.tabId}:${details.url}`;
   const previous = recent.get(tabKey) || recent.get(details.url) || {};
   const headers = (details.requestHeaders || []).filter(h => /^(referer|user-agent)$/i.test(h.name));
@@ -348,6 +350,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   media.delete(tabId);
+  capturedStreams.delete(tabId);
   protectedUrls.delete(tabId);
   disabledTabs.delete(tabId);
   for (const [key, entry] of bodies) if (entry.tabId === tabId) bodies.delete(key);
@@ -357,6 +360,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 function onTabUpdated(tabId, change) {
   if (change?.status === "loading" && change?.url) {
     media.delete(tabId);
+    capturedStreams.delete(tabId);
     protectedUrls.delete(tabId);
     chrome.action.setBadgeText?.({ tabId, text: "" });
   }
@@ -736,7 +740,229 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   return true;
 });
 
+// Page-video support (YouTube adapter and captured HLS/DASH menus). Content scripts send a selection; this
+// side re-validates it and builds the native message itself.
+const capturedStreams = new Map(); // tabId -> Map(itag -> raw format-like entry)
+const EXPIRY_GRACE_MS = 30000;
+
+// Plain GET videoplayback requests made by the page's own player: the whole-stream address (chunk parameters
+// stripped) of an itag. YouTube's web player now uses POST (SABR) requests, which carry no itag and are not recorded.
+function captureVideoplayback(details) {
+  if (typeof XdmVideo === "undefined" || details.tabId < 0 || details.method !== "GET") return;
+  let params;
+  try { params = new URL(details.url).searchParams; } catch { return; }
+  const itag = Number(params.get("itag"));
+  const mime = params.get("mime");
+  const whole = XdmVideo.wholeStreamUrl(details.url);
+  if (!whole || !Number.isInteger(itag) || !/^(video|audio)\//.test(mime || "")) return;
+  const list = capturedStreams.get(details.tabId) || new Map();
+  list.set(itag, { itag, mimeType: mime, url: whole, contentLength: params.get("clen") || undefined, capturedAt: Date.now() });
+  capturedStreams.set(details.tabId, list);
+  while (list.size > 60) list.delete(list.keys().next().value);
+}
+
+// Sends a video-panel choice to the XDM window's Download File Info dialog; a host without that message, or
+// with no window open, queues it directly instead (`fallback`).
+async function offerVideo(payload, fallback) {
+  try {
+    const offered = await chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId: crypto.randomUUID(), type: "video.offer", payload });
+    if (offered?.type !== "error") return offered;
+  } catch (error) {
+    if (!/unsupported/i.test(String(error))) throw error;
+  }
+  return fallback();
+}
+
+// Is the stream served at `at` (a byte offset deep into the file)? One-byte ranged GETs, cached for a while;
+// anything but 206 (googlevideo answers 403 once the address is past its integrity-free allowance) is a no.
+const verifyCache = new Map();
+async function streamServed(url, at) {
+  const key = `${url}#${at}`;
+  const hit = verifyCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.ok;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = setTimeout(() => controller?.abort(), 8000);
+  let ok = null;
+  try {
+    const response = await fetch(url, { headers: { Range: `bytes=${at}-${at}` }, signal: controller?.signal, credentials: "omit" });
+    ok = response.status === 206;
+    controller?.abort();
+  } catch { ok = null; } finally { clearTimeout(timer); }
+  if (ok !== null) { verifyCache.set(key, { ok, at: Date.now() }); while (verifyCache.size > 400) verifyCache.delete(verifyCache.keys().next().value); }
+  return ok;
+}
+
+async function verifyStreams(items) {
+  if (typeof XdmVideo === "undefined" || !Array.isArray(items)) return { ok: false };
+  const wanted = items.slice(0, 60).filter(item => item && XdmVideo.validateChoice({ type: "direct", video: { url: item.url }, filename: "x" }).ok);
+  const results = {};
+  await Promise.all(wanted.map(async item => {
+    const served = await streamServed(item.url, Math.max(0, Math.floor(Number(item.at) || 0)));
+    if (served !== null) results[item.url] = served;
+  }));
+  return { ok: true, results };
+}
+
+async function submitVideoChoice(choice, pageUrl, tab) {
+  if (tab?.incognito) return { accepted: false, reason: "private window" };
+  if (choice?.site === "generic") return submitGenericChoice(choice, pageUrl, tab);
+  if (typeof XdmVideo === "undefined") return { accepted: false, reason: "video support unavailable" };
+  const check = XdmVideo.validateChoice(choice);
+  if (!check.ok) return { accepted: false, reason: check.reason };
+  const parts = [choice.video, choice.audio].filter(Boolean);
+  const now = Date.now();
+  for (const part of parts) {
+    const expiry = XdmVideo.expiryOf(part.url);
+    if (expiry && expiry <= now + EXPIRY_GRACE_MS) return { accepted: false, expired: true, reason: "stream address expired; open the menu again to refresh it" };
+  }
+  const referrer = "https://www.youtube.com/";
+  const headers = [{ name: "User-Agent", value: navigator.userAgent }];
+  const adaptive = choice.type === "adaptive";
+  const primary = adaptive ? choice.video : parts[0];
+  const payload = {
+    url: primary.url, filenameHint: choice.filename, title: choice.title || "", mime: primary.mime || "",
+    size: Number.isFinite(choice.size) ? choice.size : undefined, source: { pageUrl: pageUrl || undefined },
+    requestContext: { headers, referrer }
+  };
+  if (adaptive) Object.assign(payload, { audioUrl: choice.audio.url, mode: "adaptive", container: choice.container });
+  return offerVideo(payload, () => adaptive
+    ? chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId: crypto.randomUUID(), type: "media.submit", payload })
+    : submit(primary.url, choice.filename, referrer, undefined, primary.mime || "", tab?.id));
+}
+
+// Direct files and HLS/DASH renditions captured for the tab (any site).
+async function submitGenericChoice(choice, pageUrl, tab) {
+  if (!validHandoffUrl(choice.url) || typeof choice.filename !== "string" || !choice.filename || choice.filename.length > 200 || /[\\/:*?"<>|\u0000-\u001f]/.test(choice.filename)) {
+    return { accepted: false, reason: "invalid selection" };
+  }
+  const agent = navigator.userAgent;
+  if (choice.type === "stream") {
+    if (!["hls", "dash"].includes(mediaKind(choice.url)) || !Number.isInteger(choice.videoIndex) || choice.videoIndex < 0) return { accepted: false, reason: "invalid stream selection" };
+    const payload = {
+      url: choice.url, mode: "video", videoIndex: choice.videoIndex, audioIndex: Number.isInteger(choice.audioIndex) ? choice.audioIndex : null,
+      filenameHint: choice.filename, title: choice.title || "", source: { pageUrl: pageUrl || undefined },
+      requestContext: { headers: [{ name: "User-Agent", value: agent }], referrer: pageUrl ? refererFor(pageUrl, choice.url) : undefined }
+    };
+    return offerVideo(payload, () => chrome.runtime.sendNativeMessage(HOST, { version: 1, requestId: crypto.randomUUID(), type: "media.submit", payload }));
+  }
+  if (choice.type !== "direct" || ["hls", "dash"].includes(mediaKind(choice.url))) return { accepted: false, reason: "invalid selection" };
+  const request = getRecentRequest(choice.url, tab?.id);
+  const capture = capturedBody(choice.url, request, tab?.id);
+  if (!capture) return { accepted: false, reason: "non-GET request has no replayable captured body" };
+  const cookies = await chrome.cookies.getAll({ url: choice.url }).catch(() => []);
+  const payload = { ...buildPayload(choice.url, choice.filename, pageUrl, request, capture, cookies, choice.mime || ""), title: choice.title || "", size: Number.isFinite(choice.size) ? choice.size : undefined };
+  return offerVideo(payload, () => submit(choice.url, choice.filename, pageUrl, undefined, choice.mime || "", tab?.id));
+}
+
+const SAFE_NAME = /[\u0000-\u001f\u007f<>:"/\\|?*\u202a-\u202e]/g;
+function fileStem(title, fallback = "video") {
+  let name = String(title || "").replace(SAFE_NAME, " ").replace(/\s+/g, " ").trim().replace(/[. ]+$/g, "");
+  let bytes = 0, out = "";
+  for (const ch of name) { const n = unescape(encodeURIComponent(ch)).length; if (bytes + n > 150) break; bytes += n; out += ch; }
+  out = out.trim() || fallback;
+  return /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i.test(out) ? `_${out}` : out;
+}
+
+// The menu for any player: captured direct files (one entry each, largest first) and HLS/DASH manifests
+// (one entry per resolution, best bitrate wins), plus the player's own http source.
+async function pageVideoOptions(tabId, message) {
+  const title = String(message.title || "");
+  const urlStem = (() => { try { const n = decodeURIComponent(new URL(message.playerUrl).pathname.split("/").pop() || ""); return n.replace(/\.[a-z0-9]{1,5}$/i, ""); } catch { return ""; } })();
+  const stem = fileStem(title, urlStem || "video");
+  const items = await visibleMedia(tabId);
+  const direct = new Map();
+  const addDirect = (url, mime, size) => {
+    if (!validHandoffUrl(url) || mediaKind(url) !== "direct" || direct.has(url)) return;
+    const ext = (() => { const e = linkExtension(url); if (e && e.length <= 5) return e; const m = /\/([a-z0-9]+)/i.exec(mime || ""); return m ? m[1].toLowerCase() : "mp4"; })();
+    direct.set(url, { url, mime, size, ext });
+  };
+  if (typeof message.playerUrl === "string") addDirect(message.playerUrl, "video/*", null);
+  for (const item of items) if (item.kind === "direct") addDirect(item.url, item.mime, item.size);
+  // Sizes the browser did not report: ask the server, briefly and in parallel.
+  if (typeof fetch === "function") {
+    await Promise.all([...direct.values()].filter(d => !d.size).map(async d => {
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      const timer = setTimeout(() => controller?.abort(), 4000);
+      try {
+        const head = await fetch(d.url, { method: "HEAD", signal: controller?.signal });
+        const length = Number(head.headers.get("content-length"));
+        if (head.ok && length > 0 && !head.headers.get("content-encoding")) d.size = length;
+      } catch {} finally { clearTimeout(timer); }
+    }));
+  }
+  const options = [];
+  for (const d of [...direct.values()].sort((a, b) => (b.size || 0) - (a.size || 0)).slice(0, 12)) {
+    const audioOnly = mediaClass(d.url, d.mime) === "audio";
+    options.push({
+      label: `${d.ext.toUpperCase()}${audioOnly ? " audio" : ""}`, detail: d.size ? formatBytes(d.size) : "", audioOnly,
+      choice: { site: "generic", type: "direct", url: d.url, mime: d.mime, size: d.size || undefined, title, filename: `${stem}.${d.ext}` }
+    });
+  }
+  const manifests = items.filter(item => item.kind === "hls" || item.kind === "dash").slice(-3).reverse();
+  if (typeof message.playerUrl === "string" && ["hls", "dash"].includes(mediaKind(message.playerUrl)) && !manifests.some(m => m.url === message.playerUrl)) manifests.unshift({ url: message.playerUrl, kind: mediaKind(message.playerUrl) });
+  let failure = "";
+  const groups = [];
+  for (const manifest of manifests) {
+    try {
+      const result = await chrome.runtime.sendNativeMessage(HOST, { version: 1, type: "media.inspect", payload: { url: manifest.url } });
+      if (!result?.ok) { failure = result?.reason || "inspection failed"; continue; }
+      const audio = (result.tracks || []).find(track => track.kind === "audio");
+      const byHeight = new Map();
+      for (const track of (result.tracks || []).filter(t => t.kind === "video")) {
+        const key = track.height || `${track.width || "?"}w`;
+        const kept = byHeight.get(key);
+        if (!kept || (track.bitrate || 0) > (kept.bitrate || 0)) byHeight.set(key, track);
+      }
+      const group = [];
+      for (const track of [...byHeight.values()].sort((a, b) => (b.height || 0) - (a.height || 0))) {
+        const q = track.height ? `${track.height}p` : `${track.width || "?"}w`;
+        group.push({
+          label: `MP4 ${q}`, detail: track.bitrate ? `${Math.round(track.bitrate / 1000)} kb/s` : "",
+          choice: { site: "generic", type: "stream", url: manifest.url, videoIndex: track.index, audioIndex: audio ? audio.index : null, title, filename: `${stem} [${q}].mp4` }
+        });
+      }
+      if (group.length) groups.push(group);
+    } catch (error) { failure = String(error); }
+  }
+  // A page also fetches the single-rendition playlists a master lists; only the richest manifest is offered,
+  // and a resolution is never listed twice.
+  groups.sort((a, b) => b.length - a.length);
+  const listed = new Set();
+  for (const group of groups) {
+    if (group.length === 1 && groups[0].length > 1) continue;
+    for (const option of group) if (!listed.has(option.label)) { listed.add(option.label); options.push(option); }
+  }
+  if (!options.length) return { ok: false, reason: failure || "No downloadable formats found for this video yet." };
+  return { ok: true, options };
+}
+
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let v = bytes, i = 0;
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (message?.type === "video.download") {
+    if (sender?.id !== undefined && sender.id !== chrome.runtime.id) { reply({ accepted: false, reason: "not allowed" }); return false; }
+    submitVideoChoice(message.choice, String(message.pageUrl || sender?.tab?.url || ""), sender?.tab)
+      .then(reply, error => reply({ accepted: false, reason: String(error) }));
+    return true;
+  }
+  if (message?.type === "video.options") {
+    pageVideoOptions(sender?.tab?.id ?? message.tabId, message).then(reply, error => reply({ ok: false, reason: String(error) }));
+    return true;
+  }
+  if (message?.type === "video.verify") {
+    verifyStreams(message.items).then(reply, () => reply({ ok: false }));
+    return true;
+  }
+  if (message?.type === "video.captured") {
+    const tabId = sender?.tab?.id ?? message.tabId;
+    reply({ formats: [...(capturedStreams.get(tabId)?.values() || [])] });
+    return false;
+  }
   if (message?.type === "page.media") {
     addMedia(sender.tab?.id ?? -1, message.url, message.mime || "", sender.tab?.url || "", message.title || "", message);
     reply({ ok: true });
@@ -795,7 +1021,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     return true;
   }
   if (message?.type === "media.list") {
-    visibleMedia(message.tabId).then(items => reply({ items }), () => reply({ items: [] }));
+    visibleMedia(message.tabId ?? sender?.tab?.id).then(items => reply({ items }), () => reply({ items: [] }));
     return true;
   }
   if (message?.type === "media.download") {

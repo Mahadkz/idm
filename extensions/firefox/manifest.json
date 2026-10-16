@@ -19,16 +19,17 @@
     "http://*/*",
     "https://*/*"
   ],
-  "background": {"scripts": ["core.js", "background.js"]},
+  "background": {"scripts": ["core.js", "video_core.js", "background.js"]},
   "browser_action": {"default_popup": "popup.html"},
   "options_ui": {"page": "options.html", "open_in_tab": true},
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js", "page_xhr.js", "page_fetch.js"],
+      "js": ["video_core.js", "content.js", "page_xhr.js", "page_fetch.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
-  "web_accessible_resources": ["page_helper.js"]
+  "web_accessible_resources": ["page_helper.js", "page_video.js"]
 }

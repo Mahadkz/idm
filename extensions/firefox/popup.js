@@ -82,3 +82,26 @@ browser.tabs.query({ active: true, currentWindow: true }).then(async tabs => {
     root.append(row);
   }
 });
+
+// The page's own video (panel menu): the same format list the player overlay offers.
+browser.tabs.query({ active: true, currentWindow: true }).then(async tabs => {
+  const tab = tabs[0]; if (!tab) return;
+  const reply = await browser.tabs.sendMessage(tab.id, { type: "page.videoMenu" }, { frameId: 0 }).catch(() => null);
+  if (!reply?.options?.length) return;
+  const root = document.querySelector("#video");
+  root.hidden = false;
+  const head = document.createElement("strong"); head.textContent = "Download this video"; root.append(head);
+  const status = document.createElement("small");
+  for (const option of reply.options) {
+    const button = document.createElement("button");
+    button.textContent = option.detail ? `${option.label} · ${option.detail}` : option.label;
+    button.addEventListener("click", async () => {
+      button.disabled = true; status.textContent = "Sending to XDM…";
+      const result = await browser.tabs.sendMessage(tab.id, { type: "page.videoChoose", key: option.key }, { frameId: 0 }).catch(() => null);
+      status.textContent = result?.accepted ? "Added to XDM" : `Could not hand off: ${result?.reason || "unknown error"}`;
+      button.disabled = false;
+    });
+    root.append(button);
+  }
+  root.append(status);
+});

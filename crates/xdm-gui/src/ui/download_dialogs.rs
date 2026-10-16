@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use xdm_ipc::{Command, ImportEntry, Paths, SegmentInfo, TaskSummary};
+use xdm_ipc::{Command, DownloadOffer, ImportEntry, MediaMode, Paths, SegmentInfo, TaskSummary};
 
 slint::slint! {
     import { FileInfoWindow, ProgressWindow, CompleteWindow, SegView, ConnRow } from "download_dialogs.slint";
@@ -328,6 +328,8 @@ struct Plan {
     /// Directory to store as the category's destination.
     remember: Option<String>,
     description: String,
+    /// Browser video choice this dialog was opened for; ignored once the user edits the URL.
+    offer: Option<DownloadOffer>,
 }
 
 enum Outcome {
@@ -381,7 +383,33 @@ fn execute_plan(
 }
 
 fn execute_once(paths: &Paths, plan: &Plan, rules: &[xdm_categories::CategoryRule]) -> Outcome {
-    let reply = if plan.later {
+    let offer = plan.offer.as_ref().filter(|offer| offer.url == plan.url);
+    let media_mode = offer.and_then(|offer| match (&offer.audio_url, offer.stream_video) {
+        (Some(audio_url), _) => Some(MediaMode::Adaptive { audio_url: audio_url.clone() }),
+        (None, Some(video)) => Some(MediaMode::Video { video, audio: offer.stream_audio, subtitles: Vec::new() }),
+        _ => None,
+    });
+    let reply = if let Some(mode) = media_mode {
+        // Adaptive pair or manifest stream: a media job. "Download Later" submits it paused.
+        let offer = offer.expect("checked above");
+        let request_id = new_request_id();
+        let reply = paths.request(Command::SubmitMediaJob {
+            request_id,
+            url: plan.url.clone(),
+            output: plan.output.to_string_lossy().into_owned(),
+            headers: offer.headers.clone(),
+            mode,
+            priority: 1,
+        });
+        if plan.later {
+            if let Ok(done) = &reply {
+                if let Some(task_id) = done.task_id {
+                    let _ = paths.request(Command::Pause { task_id });
+                }
+            }
+        }
+        reply
+    } else if plan.later {
         let Some(filename) = plan.output.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             return Outcome::Rejected("Save As needs a file name".into());
         };
@@ -408,7 +436,7 @@ fn execute_once(paths: &Paths, plan: &Plan, rules: &[xdm_categories::CategoryRul
                 video: None,
                 audio: None,
                 category,
-                headers: Vec::new(),
+                headers: offer.map(|offer| offer.headers.clone()).unwrap_or_default(),
             }],
             enqueue: false,
             allow_duplicate: plan.allow_duplicate,
@@ -418,7 +446,7 @@ fn execute_once(paths: &Paths, plan: &Plan, rules: &[xdm_categories::CategoryRul
             request_id: new_request_id(),
             url: plan.url.clone(),
             output: plan.output.to_string_lossy().into_owned(),
-            headers: Vec::new(),
+            headers: offer.map(|offer| offer.headers.clone()).unwrap_or_default(),
             method: "GET".into(),
             body: None,
             priority: 1,
@@ -521,6 +549,7 @@ pub fn begin_add(ctx: &DialogCtx, url: String, typed_destination: Option<String>
                 connections,
                 remember: None,
                 description: String::new(),
+                offer: None,
             };
             execute_plan(paths, &plan, &rules)
         },
@@ -541,6 +570,7 @@ struct InfoState {
     user_edited_path: bool,
     pending_later: bool,
     duplicate_of: i64,
+    offer: Option<DownloadOffer>,
 }
 
 fn parent_text(path: &str) -> String {
@@ -569,10 +599,25 @@ fn apply_category_path(window: &FileInfoWindow, state: &InfoState) {
     sync_remember(window, &state.category);
 }
 
+/// Opens the File Info dialog for a video chosen in the browser's "Download this video" menu: URL, file
+/// name (from the video title), size and request headers come from the offer.
+pub fn begin_offer(ctx: &DialogCtx, offer: DownloadOffer) {
+    let url = offer.url.clone();
+    open_file_info_ex(ctx, url, None, Some(offer));
+}
+
 fn open_file_info(ctx: &DialogCtx, url: String, typed_destination: Option<String>) {
+    open_file_info_ex(ctx, url, typed_destination, None);
+}
+
+fn open_file_info_ex(ctx: &DialogCtx, url: String, typed_destination: Option<String>, offer: Option<DownloadOffer>) {
     let Ok(window) = FileInfoWindow::new() else { return };
     let downloads = ctx.dir.join("downloads");
-    let filename = filename_from_url(&url);
+    let filename = offer
+        .as_ref()
+        .map(|offer| offer.filename.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| filename_from_url(&url));
     // A path equal to the Add URL dialog's own default is not a user choice.
     let typed = typed_destination.filter(|path| {
         !path.trim().is_empty() && Path::new(path.trim()) != downloads.join(&filename)
@@ -589,8 +634,12 @@ fn open_file_info(ctx: &DialogCtx, url: String, typed_destination: Option<String
         user_edited_path: typed.is_some(),
         pending_later: false,
         duplicate_of: 0,
+        offer: offer.clone(),
     }));
     window.set_url(url.clone().into());
+    if let Some(size) = offer.as_ref().and_then(|offer| offer.size) {
+        window.set_size_text(fmt_size(size).into());
+    }
     window.set_categories(ModelRc::new(VecModel::from(
         names.iter().map(|n| SharedString::from(n.as_str())).collect::<Vec<_>>(),
     )));
@@ -638,7 +687,9 @@ fn open_file_info(ctx: &DialogCtx, url: String, typed_destination: Option<String
             apply_category_path(&window, &st);
         });
     }
-    spawn_probe(window.as_weak(), url.clone());
+    if offer.as_ref().is_none_or(|offer| offer.audio_url.is_none() && offer.stream_video.is_none() && offer.size.is_none()) {
+        spawn_probe(window.as_weak(), url.clone());
+    }
 
     {
         let weak = window.as_weak();
@@ -822,6 +873,7 @@ fn submit_from_window(
         connections: ctx.settings.lock().map(|s| s.default_connections).unwrap_or(settings::DEFAULT_CONNECTIONS),
         remember,
         description: window.get_description().to_string(),
+        offer: st.offer.clone(),
     };
     let rules = st.rules.clone();
     drop(st);

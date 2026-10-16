@@ -132,6 +132,16 @@ pub struct TransferControl {
     total_known: AtomicBool,
     sample: Mutex<Sample>,
     size_unverified: AtomicBool,
+    live: OnceLock<LiveSegments>,
+}
+
+/// Reader of a running segmented transfer's per-connection positions.
+struct LiveSegments(Box<dyn Fn() -> Vec<(u64, u64, u64)> + Send + Sync>);
+
+impl std::fmt::Debug for LiveSegments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveSegments")
+    }
 }
 
 /// Shared limits a daemon attaches to a transfer.
@@ -178,7 +188,14 @@ impl TransferControl {
                 speed: 0,
             }),
             size_unverified: AtomicBool::new(false),
+            live: OnceLock::new(),
         })
+    }
+
+    /// Segments `(start, inclusive end, next byte)` of the running transfer,
+    /// including bytes not yet checkpointed; `None` when it is not segmented.
+    pub fn live_segments(&self) -> Option<Vec<(u64, u64, u64)>> {
+        self.live.get().map(|live| (live.0)())
     }
 
     /// True when the last transfer declared no Content-Length and ended at EOF, so
@@ -289,6 +306,8 @@ struct Segment {
     claimed: u64, // bytes before this are promised to the active worker
     #[serde(skip)]
     written: u64, // bytes before this are in the file, possibly not yet checkpointed
+    #[serde(skip)]
+    received: u64, // bytes before this arrived from the network; display only, never persisted
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,6 +325,13 @@ struct Checkpoint {
 /// Read the latest durable byte count without opening a network connection.
 pub fn checkpoint_progress(output: &Path) -> Option<(u64, u64)> {
     checkpoint_progress_in(output, None)
+}
+
+/// Segments `(start, inclusive end, cursor)` of a task's checkpoint.
+pub fn checkpoint_segments_in(output: &Path, temp: Option<&Path>) -> Option<Vec<(u64, u64, u64)>> {
+    let file = File::open(meta_path(output, temp)).ok()?;
+    let state: Checkpoint = serde_json::from_reader(file).ok()?;
+    Some(state.segments.iter().take(256).map(|s| (s.start, s.end, s.cursor)).collect())
 }
 
 /// Like `checkpoint_progress` for a task whose partials live in `temp`.
@@ -901,6 +927,7 @@ fn split_segments(length: u64, workers: usize) -> Vec<Segment> {
                 active: false,
                 claimed: start,
                 written: start,
+                received: start,
             };
             start += size;
             segment
@@ -1751,6 +1778,7 @@ impl Shared {
                 active: true,
                 claimed: middle,
                 written: middle,
+                received: middle,
             },
         );
         store_checkpoint(&self.file, &self.meta, &guard)?;
@@ -1982,6 +2010,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 }
                 let segment = &mut guard.segments[index];
                 segment.written = segment.written.max(written);
+                segment.received = segment.received.max(position.min(segment.end.saturating_add(1)));
                 shrunk |= segment.end < end;
                 if position > segment.end {
                     0
@@ -2386,6 +2415,23 @@ fn run_transfer(
         host,
         probe_lease: Mutex::new(probe_lease.take()),
     });
+    {
+        let weak = Arc::downgrade(&shared);
+        let _ = shared.control.live.set(LiveSegments(Box::new(move || {
+            weak.upgrade()
+                .and_then(|shared| {
+                    shared.state.lock().ok().map(|state| {
+                        state
+                            .segments
+                            .iter()
+                            .take(256)
+                            .map(|s| (s.start, s.end, s.cursor.max(s.written).max(s.received)))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default()
+        })));
+    }
     let handles: Vec<_> = (0..options.connections)
         .map(|_| {
             let shared = shared.clone();
@@ -3365,6 +3411,42 @@ mod net_tests {
         download_with_control(opts, control.clone()).unwrap();
         assert_eq!(fs::read(dir.join("x.bin")).unwrap(), b"hello world");
         assert!(control.size_unverified());
+    }
+
+    #[test]
+    fn live_segments_report_received_bytes_before_any_flush() {
+        let len = 4 * 1024 * 1024;
+        let server = spawn_server(Faults::new(len));
+        let dir = workspace("live-segments");
+        let output = dir.join("f.bin");
+        let opts = options(server.url(), &output, 4);
+        let stop = opts.stop.clone();
+        let control = Arc::new(TransferControl::new(Some(400 * 1024)).unwrap());
+        let runner = {
+            let control = control.clone();
+            thread::spawn(move || download_with_control(opts, control))
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut live_total = 0;
+        while Instant::now() < deadline {
+            let live = control.live_segments().unwrap_or_default();
+            live_total = live.iter().map(|(start, _, cursor)| cursor - start).sum::<u64>();
+            if live_total > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let flushed = checkpoint_segments_in(&output, None)
+            .unwrap_or_default()
+            .iter()
+            .map(|(start, _, cursor)| cursor - start)
+            .sum::<u64>();
+        stop.store(true, Ordering::Relaxed);
+        let _ = runner.join();
+        assert!(live_total > 0, "no received bytes were reported");
+        // Received bytes are a display value; the checkpoint still holds flushed bytes only.
+        assert!(flushed < live_total, "flushed {flushed} live {live_total}");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -47,6 +47,14 @@ jobs:
       # media_live_tasks is skipped while authenticated live streams fail on main (open item: a
       # private media relay is being added). Remove the skip once that fix lands.
       - name: Integration suites (strict, every prerequisite installed)
+        env:
+          XDM_TEST_ARTIFACTS: ${{ runner.temp }}/artifacts
         run: python3 tests/run_all.py --strict --skip chromium_real media_live_tasks
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gui-failure
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
       - name: Windows cross-build
         run: cargo build --workspace --target x86_64-pc-windows-gnu

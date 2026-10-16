@@ -748,7 +748,16 @@ def main():
             # Search is pushed to the daemon: 500 rows match one import chunk.
             type_field(main_window, 270, 254, "g07_")
             click(main_window, 556, 254)  # Find
-            until(lambda: has_total(500), timeout=30)
+            try:
+                until(lambda: has_total(500), timeout=30)
+            except AssertionError:
+                keep = os.environ.get("XDM_TEST_ARTIFACTS")
+                if keep:  # CI uploads this screenshot of the isolated display on failure
+                    Path(keep).mkdir(parents=True, exist_ok=True)
+                    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1200x900",
+                                    "-i", env["DISPLAY"], "-frames:v", "1", str(Path(keep) / "gui-search-failure.png")],
+                                   env=env, check=False, timeout=30)
+                raise
             # Sorting by a column is a daemon sort: the refresh after the header click still reports the filtered total.
             click(main_window, 70, 413)
             time.sleep(2.5)

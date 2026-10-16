@@ -44,12 +44,10 @@ jobs:
           echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
-      # media_live_tasks is skipped while authenticated live streams fail on main (open item: a
-      # private media relay is being added). Remove the skip once that fix lands.
       - name: Integration suites (strict, every prerequisite installed)
         env:
           XDM_TEST_ARTIFACTS: ${{ runner.temp }}/artifacts
-        run: python3 tests/run_all.py --strict --skip chromium_real media_live_tasks
+        run: python3 tests/run_all.py --strict --skip chromium_real
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

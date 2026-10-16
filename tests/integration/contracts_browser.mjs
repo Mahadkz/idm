@@ -9,6 +9,7 @@ const chromiumManifest = JSON.parse(fs.readFileSync(new URL('manifest.json', chr
 const firefoxManifest = JSON.parse(fs.readFileSync(new URL('manifest.json', firefoxDir), 'utf8'));
 
 const chromiumBgSource = fs.readFileSync(new URL('background.js', chromiumDir), 'utf8');
+const videoCoreSource = fs.readFileSync(new URL('video_core.js', chromiumDir), 'utf8');
 const chromiumContentSource = fs.readFileSync(new URL('content.js', chromiumDir), 'utf8');
 
 const firefoxCoreSource = fs.readFileSync(new URL('core.js', firefoxDir), 'utf8');
@@ -103,6 +104,7 @@ function makeChromiumHarness({
   };
 
   vm.createContext(context);
+  vm.runInContext(videoCoreSource, context);
   vm.runInContext(chromiumBgSource, context);
   return { calls, handlers, chrome, context, triggerTimeout: () => timeout?.() };
 }
@@ -202,11 +204,12 @@ function makeFirefoxHarness({
 
   vm.createContext(context);
   vm.runInContext(firefoxCoreSource, context);
+  vm.runInContext(videoCoreSource, context);
   vm.runInContext(firefoxBgSource, context);
   return { calls, handlers, browser, context, triggerTimeout: () => timeout?.() };
 }
 
-function makeContentHarness(source, isFirefox = false, { storage, location } = {}) {
+function makeContentHarness(source, isFirefox = false, { storage, location, reply } = {}) {
   const sentMessages = [];
   const observedNodes = [];
   const intersectionObservers = [];
@@ -317,7 +320,7 @@ function makeContentHarness(source, isFirefox = false, { storage, location } = {
     runtime: {
       sendMessage: async msg => {
         sentMessages.push(msg);
-        return { ok: true };
+        return reply ? reply(msg) : { ok: true };
       },
       onMessage: {
         addListener: fn => { messageListener = fn; },
@@ -377,6 +380,7 @@ function makeContentHarness(source, isFirefox = false, { storage, location } = {
   };
 
   vm.createContext(context);
+  vm.runInContext(videoCoreSource, context);
   vm.runInContext(source, context);
   const result = {
     docEl,
@@ -1431,7 +1435,8 @@ tests.B44 = async function test_B44() {
     assert.equal(panelsIn(content).length, 1, 'source change does not duplicate overlays');
     content.sentMessages.length = 0;
     btnOf(panelsIn(content)[0]).onclick();
-    assert.equal(content.sentMessages[0]?.url, 'http://example.test/quality-720.mp4', 'overlay button uses the current source');
+    await tick();
+    assert.equal(content.sentMessages[0]?.playerUrl, 'http://example.test/quality-720.mp4', 'overlay menu is built for the current source');
   }
 };
 
@@ -1563,11 +1568,12 @@ tests.B48 = async function test_B48() {
     assert.equal(panel.shadow.mode, 'closed', 'overlay UI lives in a closed shadow root');
     assert.equal(panel.shadowRoot, undefined, 'closed shadow root is not reachable from the page');
     assert.equal(panel.children.length, 0, 'no overlay UI is exposed as light-DOM children page CSS could style');
-    assert.equal(btnOf(panel).textContent, 'Download with XDM');
+    assert.equal(btnOf(panel).textContent, 'Download this video');
 
     content.sentMessages.length = 0;
     btnOf(panel).onclick({ stopPropagation() {}, preventDefault() {} });
-    assert.deepEqual(content.sentMessages.map(m => [m.type, m.url, m.title]), [['media.download', 'http://example.test/movie.mp4', 'Movie']], 'button hands the player URL to XDM');
+    await tick();
+    assert.deepEqual(content.sentMessages.map(m => [m.type, m.playerUrl, m.title]), [['video.options', 'http://example.test/movie.mp4', 'Movie']], 'button asks for the formats of the player URL');
 
     // No intrusion: tiny players and 1x1 pixels never show an overlay.
     const tiny = appendVideo(content, 'http://example.test/tiny.mp4', rect(0, 0, 20, 20));
@@ -1730,11 +1736,11 @@ tests.PANEL_POLICY = async function test_PANEL_POLICY() {
     c.observedNodes[0].observer.triggerAdd(v);
     let panel = panelsIn(c)[0];
     assert.equal(btnOf(panel).textContent, 'XDM', `${label}: mini overlay shows a compact label`);
-    assert.equal(btnOf(panel).getAttribute('aria-label'), 'Download with XDM');
+    assert.equal(btnOf(panel).getAttribute('aria-label'), 'Download this video');
     assert.equal(panel.style.left, `${50 + 640 - 44 - 4}px`, `${label}: mini overlay uses its smaller width`);
     // Live switch back to full mode.
     c.fireStorageChange({ mediaSettings: { newValue: { overlayMode: 'full' } } });
-    assert.equal(btnOf(panel).textContent, 'Download with XDM', `${label}: mode change applies without reload`);
+    assert.equal(btnOf(panel).textContent, 'Download this video', `${label}: mode change applies without reload`);
     assert.equal(panel.style.left, `${50 + 640 - 144 - 4}px`);
 
     // Per-site disable (exact and wildcard); other sites unaffected; live toggle.
@@ -1985,12 +1991,437 @@ tests.B62 = async function test_B62() {
   }
 };
 
+
+// ---- Video panel: YouTube adapter core, panel menu and background hand-off (synthetic fixtures only) ----
+const FAR = Math.floor(Date.now() / 1000) + 6 * 3600;
+const gv = (itag, extra = '') => `https://rr1---sn-synthetic.googlevideo.com/videoplayback?expire=${FAR}&itag=${itag}&sig=SYNTHETIC${extra}`;
+const fmt = (itag, mimeType, extra = {}) => ({ itag, mimeType, url: gv(itag), ...extra });
+function playerFixture({ withUrls = true, live = false, drm = false, status = 'OK', title = 'A: Test/Video?' } = {}) {
+  const u = f => withUrls ? f : { ...f, url: undefined };
+  const adaptive = [
+    u(fmt(313, 'video/webm; codecs="vp9"', { width: 3840, height: 2160, fps: 30, bitrate: 20e6, contentLength: '900000000' })),
+    u(fmt(137, 'video/mp4; codecs="avc1.640028"', { width: 1920, height: 1080, fps: 30, bitrate: 4e6, contentLength: '250000000' })),
+    u(fmt(248, 'video/webm; codecs="vp9"', { width: 1920, height: 1080, fps: 30, bitrate: 2.5e6, contentLength: '150000000' })),
+    u(fmt(136, 'video/mp4; codecs="avc1.4d401f"', { width: 1280, height: 720, fps: 30, bitrate: 2e6, contentLength: '90000000' })),
+    u(fmt(298, 'video/mp4; codecs="avc1.4d4020"', { width: 1280, height: 720, fps: 60, bitrate: 3e6, contentLength: '120000000' })),
+    u(fmt(140, 'audio/mp4; codecs="mp4a.40.2"', { bitrate: 130000, averageBitrate: 128000, audioChannels: 2, contentLength: '10000000', audioQuality: 'AUDIO_QUALITY_MEDIUM' })),
+    u(fmt(251, 'audio/webm; codecs="opus"', { bitrate: 140000, averageBitrate: 130000, audioChannels: 2, contentLength: '9000000' })),
+    u({ ...fmt(140, 'audio/mp4; codecs="mp4a.40.2"', { bitrate: 130000, audioChannels: 2, isDrc: true }), itag: 141 }),
+    u(fmt(256, 'audio/mp4; codecs="mp4a.40.5"', { bitrate: 380000, audioChannels: 6, contentLength: '30000000' })),
+    { itag: 399, mimeType: 'video/mp4; codecs="av01.0.08M.08"', width: 1920, height: 1080, fps: 30, signatureCipher: 's=x&url=y' },
+  ];
+  const formats = [u(fmt(18, 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', { width: 640, height: 360, fps: 30, bitrate: 600000 }))];
+  if (drm) adaptive[0].drmFamilies = ['WIDEVINE'];
+  return {
+    playabilityStatus: { status, reason: status === 'OK' ? undefined : 'Sign in to confirm' },
+    videoDetails: { videoId: 'aaaaaaaaaaa', title, author: 'Someone', lengthSeconds: '600', isLive: live },
+    streamingData: { formats, adaptiveFormats: adaptive },
+  };
+}
+
+tests.VIDEO_CORE = async function test_VIDEO_CORE() {
+  const ctx = { URL, Date, Math };
+  vm.createContext(ctx);
+  vm.runInContext(videoCoreSource, ctx);
+  const V = ctx.XdmVideo;
+  assert.equal(V.ytVideoId('https://www.youtube.com/watch?v=aaaaaaaaaaa&t=3'), 'aaaaaaaaaaa');
+  assert.equal(V.ytVideoId('https://youtu.be/bbbbbbbbbbb?si=x'), 'bbbbbbbbbbb');
+  assert.equal(V.ytVideoId('https://www.youtube.com/shorts/ccccccccccc'), 'ccccccccccc');
+  assert.equal(V.ytVideoId('https://www.youtube.com/embed/ddddddddddd'), 'ddddddddddd');
+  assert.equal(V.ytVideoId('https://m.youtube.com/watch?v=eeeeeeeeeee'), 'eeeeeeeeeee');
+  for (const bad of ['https://www.youtube.com/', 'https://www.youtube.com/watch?v=short', 'https://evil.test/watch?v=aaaaaaaaaaa', 'https://www.youtube.com.evil.test/watch?v=aaaaaaaaaaa', 'nope']) assert.equal(V.ytVideoId(bad), null, bad);
+
+  const model = V.normalizePlayerResponse(plain(playerFixture()));
+  assert.equal(model.playable, true);
+  assert.equal(model.title, 'A: Test/Video?');
+  const menu = V.buildMenu(model);
+  const labels = menu.map(o => o.label);
+  // Best first; MP4 (H.264 + AAC) and WEBM (VP9 + Opus) per height; 60 fps named; audio-only last.
+  assert.deepEqual(plain(labels.slice(0, 6)), ['WEBM 2160p', 'MP4 1080p', 'WEBM 1080p', 'MP4 720p60', 'MP4 720p', 'MP4 360p']);
+  assert.ok(labels.includes('M4A 128 kbps') && labels.includes('WEBM 130 kbps'), labels.join(','));
+  assert.ok(!labels.some(l => /AV1|399/.test(l)), 'a ciphered format without an address is never offered');
+  const mp4 = menu.find(o => o.label === 'MP4 1080p');
+  assert.equal(mp4.type, 'adaptive');
+  assert.equal(mp4.container, 'mp4');
+  assert.deepEqual([mp4.video.itag, mp4.audio.itag], [137, 140], 'MP4 pairs H.264 with AAC');
+  assert.equal(mp4.size, 260000000);
+  assert.equal(mp4.detail, '260 MB');
+  const web = menu.find(o => o.label === 'WEBM 2160p');
+  assert.deepEqual([web.video.itag, web.audio.itag, web.container], [313, 251, 'webm'], 'WEBM pairs VP9 with Opus');
+  const muxed = menu.find(o => o.label === 'MP4 360p');
+  assert.equal(muxed.type, 'direct');
+  assert.equal(muxed.audio, null);
+  assert.ok(!menu.some(o => o.audio?.itag === 141 || o.audio?.itag === 256), 'DRC and surround variants are not paired');
+  assert.equal(menu.find(o => o.audioOnly && o.ext === 'm4a').filename, 'A Test Video [128k].m4a');
+  assert.equal(mp4.filename, 'A Test Video [1080p].mp4', 'title is made a safe file name');
+  assert.ok(menu.every(o => V.validateChoice({ ...o, title: 't' }).ok), 'every offered choice passes validation');
+
+  // SABR-only response (no addresses): nothing to offer until addresses are resolved and merged by itag.
+  const sabr = V.normalizePlayerResponse(plain(playerFixture({ withUrls: false })));
+  assert.equal(sabr.playable, true);
+  assert.equal(sabr.hasUrls, false);
+  assert.deepEqual(plain(V.buildMenu(sabr)), []);
+  const resolved = V.normalizePlayerResponse(plain(playerFixture()));
+  const merged = V.mergeUrls(sabr, resolved.formats);
+  assert.ok(merged.hasUrls && V.buildMenu(merged).length >= 8, 'addresses resolved by itag complete the menu');
+  const only = V.mergeUrls(sabr, [{ itag: 9999, url: gv(9999), kind: 'video' }], { addUnknown: false });
+  assert.ok(!only.formats.some(f => f.itag === 9999), 'captured addresses only fill itags the page knows');
+
+  // Never offered: live, DRM, blocked videos; expired addresses.
+  for (const odd of [{ live: true }, { drm: true }, { status: 'LOGIN_REQUIRED' }]) {
+    const m = V.normalizePlayerResponse(plain(playerFixture(odd)));
+    assert.equal(m.playable, false, JSON.stringify(odd));
+    assert.deepEqual(plain(V.buildMenu(m)), []);
+  }
+  assert.deepEqual(plain(V.buildMenu(model, (FAR + 60) * 1000)), [], 'expired addresses are not offered');
+
+  // The background accepts only googlevideo https addresses and sane names.
+  const good = { type: 'direct', video: { url: gv(18) }, audio: null, filename: 'a.mp4' };
+  assert.equal(V.validateChoice(good).ok, true);
+  for (const bad of [
+    { ...good, video: { url: 'https://evil.test/videoplayback' } },
+    { ...good, video: { url: 'http://rr1---x.googlevideo.com/videoplayback' } },
+    { ...good, video: { url: 'https://googlevideo.com.evil.test/x' } },
+    { ...good, filename: '../x.mp4' },
+    { ...good, type: 'adaptive', container: 'mp4' },
+    { type: 'adaptive', container: 'avi', video: { url: gv(1) }, audio: { url: gv(2) }, filename: 'a.avi' },
+  ]) assert.equal(V.validateChoice(bad).ok, false, JSON.stringify(bad));
+
+  // Chunk parameters are stripped so a captured player request addresses the whole stream.
+  const whole = V.wholeStreamUrl(gv(22, '&range=0-9999&rn=3&rbuf=100&ump=1'));
+  assert.ok(!/[?&](range|rn|rbuf|ump)=/.test(whole) && /itag=22/.test(whole), whole);
+  assert.equal(V.wholeStreamUrl('https://example.test/videoplayback?itag=1'), null);
+  assert.equal(V.safeName('CON'), '_CON');
+  assert.equal(V.safeName('   '), 'video');
+  assert.ok(new TextEncoder().encode(V.safeName('é'.repeat(300))).length <= 240);
+};
+
+async function youtubeContent(source, isFf, replyOverride) {
+  const location = { href: 'https://www.youtube.com/watch?v=aaaaaaaaaaa', hostname: 'www.youtube.com', origin: 'https://www.youtube.com' };
+  const posted = [];
+  const c = makeContentHarness(source, isFf, { location, reply: async msg => {
+    if (replyOverride) { const r = await replyOverride(msg); if (r !== undefined) return r; }
+    if (msg.type === 'video.captured') return { formats: [] };
+    if (msg.type === 'video.verify') return { ok: true, results: Object.fromEntries(msg.items.map(i => [i.url, true])) };
+    return { ok: true };
+  } });
+  c.window.postMessage = (data) => posted.push(data);
+  return { c, posted, send: data => c.winListeners.message({ data: { xdmVideo: 1, ...data }, source: c.window }) };
+}
+
+tests.VIDEO_PANEL = async function test_VIDEO_PANEL() {
+  for (const [source, isFf] of bothContents) {
+    const label = isFf ? 'firefox' : 'chromium';
+    const h = await youtubeContent(source, isFf);
+    const { c, posted, send } = h;
+    const v = appendVideo(c, 'blob:https://www.youtube.com/1234', rect(10, 80, 800, 450));
+    v.src = v.currentSrc = 'blob:https://www.youtube.com/1234';
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c).length, 0, `${label}: no panel before the page's player response is known`);
+    // The page script reports the page's own player response (no addresses: SABR).
+    send({ type: 'player', response: plain(playerFixture({ withUrls: false })) });
+    c.triggerTimeout?.();
+    c.observedNodes[0].observer.triggerAdd(v);
+    const panel = panelsIn(c)[0];
+    assert.ok(panel, `${label}: blob: video gets a panel identified by the page video, not a URL`);
+    assert.equal(btnOf(panel).textContent, 'Download this video');
+    assert.equal(c.playerRegistry.get([...c.playerRegistry.entries.keys()][0]).kind, 'page-video');
+    // Opening the menu asks the page script to resolve addresses; the menu lists qualities.
+    btnOf(panel).onclick({ stopPropagation() {}, preventDefault() {} });
+    await tick();
+    const request = posted.find(m => m.type === 'resolve');
+    assert.ok(request && request.videoId === 'aaaaaaaaaaa', `${label}: resolution is requested from the page script`);
+    send({ type: 'resolved', requestId: request.requestId, ok: true, response: plain(playerFixture()) });
+    await tick(); await tick(); await tick();
+    const menu = panel.shadow.children.find(ch => ch.className === 'menu');
+    assert.ok(menu, `${label}: menu opened inside the shadow root`);
+    const rows = menu.children.filter(ch => ch.className === 'opt');
+    assert.equal(rows[0].children[0].textContent, 'WEBM 2160p');
+    assert.ok(rows.length >= 8, `${label}: ${rows.length} rows`);
+    // Choosing one hands the full selection to the background script.
+    c.sentMessages.length = 0;
+    rows[1].onclick({ stopPropagation() {}, preventDefault() {} });
+    await tick();
+    const chosen = c.sentMessages.find(m => m.type === 'video.download');
+    assert.ok(chosen, `${label}: choice is sent`);
+    assert.equal(chosen.choice.label, 'MP4 1080p');
+    assert.equal(chosen.choice.site, 'youtube');
+    assert.equal(chosen.choice.title, 'A: Test/Video?');
+    assert.equal(chosen.choice.type, 'adaptive');
+    // Escape closes the menu first, then the panel.
+    panel.shadow.dispatch('keydown', { key: 'Escape' });
+    assert.ok(!panel.shadow.children.some(ch => ch.className === 'menu'), `${label}: Escape closes the menu`);
+    assert.equal(panel.style.display, 'block');
+    // Single-page navigation to another video: stale model never shows for the new page.
+    c.location = undefined;
+  }
+};
+
+tests.VIDEO_PANEL_DRM = async function test_VIDEO_PANEL_DRM() {
+  for (const [source, isFf] of bothContents) {
+    const h = await youtubeContent(source, isFf);
+    const { c, send } = h;
+    const v = appendVideo(c, 'blob:https://www.youtube.com/9', rect(0, 0, 800, 450));
+    send({ type: 'player', response: plain(playerFixture({ drm: true, withUrls: false })) });
+    c.observedNodes[0].observer.triggerAdd(v);
+    assert.equal(panelsIn(c).length, 0, 'DRM-protected video never gets a panel');
+    const live = await youtubeContent(source, isFf);
+    const lv = appendVideo(live.c, 'blob:https://www.youtube.com/8', rect(0, 0, 800, 450));
+    live.send({ type: 'player', response: plain(playerFixture({ live: true, withUrls: false })) });
+    live.c.observedNodes[0].observer.triggerAdd(lv);
+    assert.equal(panelsIn(live.c).length, 0, 'live streams get no panel');
+    // A response for a different video than the page shows is ignored.
+    const other = await youtubeContent(source, isFf);
+    const ov = appendVideo(other.c, 'blob:https://www.youtube.com/7', rect(0, 0, 800, 450));
+    const r = playerFixture({ withUrls: false });
+    r.videoDetails.videoId = 'zzzzzzzzzzz';
+    other.send({ type: 'player', response: plain(r) });
+    other.c.observedNodes[0].observer.triggerAdd(ov);
+    assert.equal(panelsIn(other.c).length, 0, 'stale response of another video is ignored');
+  }
+};
+
+tests.VIDEO_PANEL_GENERIC = async function test_VIDEO_PANEL_GENERIC() {
+  for (const [source, isFf] of bothContents) {
+    // A blob: player on an ordinary site is offered the manifest the background script captured.
+    let asked = 0;
+    const c = makeContentHarness(source, isFf, { location: { href: 'https://news.example/story', hostname: 'news.example', origin: 'https://news.example' }, reply: async msg => {
+      if (msg.type === 'media.list') { asked++; return { items: [{ url: 'https://cdn.example/v/master.m3u8', kind: 'hls', title: 'Story clip' }] }; }
+      if (msg.type === 'video.options') return { ok: true, options: [{ label: 'MP4 720p', detail: '2000 kb/s', choice: { site: 'generic', type: 'stream', url: msg.playerUrl, videoIndex: 1, audioIndex: 3, filename: 'Story [720p].mp4' } }] };
+      return { ok: true };
+    } });
+    const v = appendVideo(c, '', rect(0, 0, 640, 360));
+    v.src = v.currentSrc = 'blob:https://news.example/abc';
+    c.observedNodes[0].observer.triggerAdd(v);
+    await tick(); await tick();
+    assert.ok(asked >= 1, 'blob: player asks the background script for captured streams');
+    const panel = panelsIn(c)[0];
+    assert.ok(panel, 'panel shows for a captured HLS stream');
+    btnOf(panel).onclick({ stopPropagation() {}, preventDefault() {} });
+    await tick(); await tick();
+    const options = panel.shadow.children.find(ch => ch.className === 'menu').children.filter(ch => ch.className === 'opt');
+    assert.equal(options.length, 1);
+    assert.equal(c.sentMessages.find(m => m.type === 'video.options').playerUrl, 'https://cdn.example/v/master.m3u8');
+    c.sentMessages.length = 0;
+    options[0].onclick({ stopPropagation() {}, preventDefault() {} });
+    await tick();
+    const sent = c.sentMessages.find(m => m.type === 'video.download');
+    assert.deepEqual(plain(sent.choice), { site: 'generic', type: 'stream', url: 'https://cdn.example/v/master.m3u8', videoIndex: 1, audioIndex: 3, filename: 'Story [720p].mp4' });
+    // Not shown for a DRM player: an element with mediaKeys is never registered.
+    const protectedPlayer = appendVideo(c, 'https://news.example/p.mp4', rect(0, 400, 640, 360));
+    protectedPlayer.mediaKeys = {};
+    c.observedNodes[0].observer.triggerAdd(protectedPlayer);
+    assert.equal(panelsIn(c).length, 1, 'DRM player gets no panel');
+  }
+};
+
+async function callMessage(h, message, sender = {}) {
+  if (h.handlers.message.length === 3) return await new Promise(resolve => { h.handlers.message(message, sender, resolve); });
+  return await h.handlers.message(message, sender);
+}
+
+tests.VIDEO_BACKGROUND = async function test_VIDEO_BACKGROUND() {
+  const choice = (type, extra = {}) => ({
+    site: 'youtube', type, title: 'A Test', label: 'x', filename: 'A Test [1080p].mp4', container: 'mp4', size: 123,
+    video: { itag: 137, url: gv(137), mime: 'video/mp4' }, audio: type === 'adaptive' ? { itag: 140, url: gv(140), mime: 'audio/mp4' } : null, ...extra,
+  });
+  for (const [name, make] of bothHarnesses) {
+    // The host shows the choice in the XDM window.
+    let h = make({ nativeReply: async m => ({ version: 1, type: 'download.result', accepted: true, offered: true, requestId: m.requestId }) });
+    let reply = await callMessage(h, { type: 'video.download', choice: choice('adaptive'), pageUrl: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' }, { tab: { id: 1 } });
+    assert.equal(reply.accepted, true, `${name}: ${JSON.stringify(reply)}`);
+    const offer = h.calls.messages[0];
+    assert.equal(offer.type, 'video.offer');
+    assert.equal(offer.payload.mode, 'adaptive');
+    assert.equal(offer.payload.url, gv(137));
+    assert.equal(offer.payload.audioUrl, gv(140));
+    assert.equal(offer.payload.container, 'mp4');
+    assert.equal(offer.payload.filenameHint, 'A Test [1080p].mp4');
+    assert.equal(offer.payload.requestContext.referrer, 'https://www.youtube.com/');
+    assert.ok(offer.payload.requestContext.headers.some(x => x.name === 'User-Agent'));
+    assert.equal(JSON.stringify(offer).includes('cookie'), false, 'no cookies travel with an adaptive offer');
+
+    // An older host without video.offer: the choice is queued directly through media.submit.
+    h = make({ nativeReply: async m => m.type === 'video.offer' ? { version: 1, type: 'error', reason: 'unsupported message type' } : { version: 1, type: 'media.result', accepted: true, taskId: 4 } });
+    reply = await callMessage(h, { type: 'video.download', choice: choice('adaptive') }, { tab: { id: 1 } });
+    assert.equal(reply.accepted, true);
+    assert.deepEqual(h.calls.messages.map(m => m.type), ['video.offer', 'media.submit']);
+    assert.equal(h.calls.messages[1].payload.mode, 'adaptive');
+
+    // A single stream (muxed or audio-only) falls back to the ordinary handoff.
+    h = make({ nativeReply: async m => m.type === 'video.offer' ? { version: 1, type: 'error', reason: 'unsupported message type' } : { version: 1, type: 'download.result', accepted: true } });
+    reply = await callMessage(h, { type: 'video.download', choice: choice('direct', { video: null, audio: { itag: 140, url: gv(140), mime: 'audio/mp4' }, filename: 'A Test [128k].m4a' }) }, { tab: { id: 1 } });
+    assert.equal(reply.accepted, true);
+    assert.deepEqual(h.calls.messages.map(m => m.type), ['video.offer', 'download.submit']);
+    assert.equal(h.calls.messages[1].payload.filenameHint, 'A Test [128k].m4a');
+
+    // Rejected without contacting the host.
+    h = make();
+    for (const [what, message, sender] of [
+      ['foreign host', { choice: choice('direct', { video: { url: 'https://evil.test/x', mime: 'video/mp4' } }) }, { tab: { id: 1 } }],
+      ['expired address', { choice: choice('direct', { video: { url: `https://rr1---x.googlevideo.com/videoplayback?expire=${Math.floor(Date.now() / 1000) - 5}&itag=18`, mime: 'video/mp4' } }) }, { tab: { id: 1 } }],
+      ['private window', { choice: choice('adaptive') }, { tab: { id: 1, incognito: true } }],
+      ['bad container', { choice: choice('adaptive', { container: 'avi' }) }, { tab: { id: 1 } }],
+    ]) {
+      reply = await callMessage(h, { type: 'video.download', ...message }, sender);
+      assert.equal(reply.accepted, false, `${name}: ${what}`);
+    }
+    assert.equal(h.calls.native, 0, `${name}: rejected choices never reach the host`);
+    if (name === 'chromium') {
+      const foreign = await callMessage(h, { type: 'video.download', choice: choice('adaptive') }, { id: 'someone-else', tab: { id: 1 } });
+      assert.equal(foreign.accepted, false);
+    }
+
+    // Plain GET videoplayback requests of the page's player are remembered per tab, whole-stream.
+    h = make();
+    h.handlers.request({ url: gv(22, '&mime=video%2Fmp4&clen=5000&range=0-999&rn=2&rbuf=1'), method: 'GET', tabId: 7, requestHeaders: [] });
+    h.handlers.request({ url: gv(23, '&mime=video%2Fmp4'), method: 'POST', tabId: 7, requestHeaders: [] });
+    const captured = await callMessage(h, { type: 'video.captured' }, { tab: { id: 7 } });
+    assert.equal(captured.formats.length, 1);
+    assert.equal(captured.formats[0].itag, 22);
+    assert.ok(!/[?&](range|rn|rbuf)=/.test(captured.formats[0].url));
+    assert.equal(captured.formats[0].contentLength, '5000');
+    assert.equal((await callMessage(h, { type: 'video.captured' }, { tab: { id: 8 } })).formats.length, 0);
+  }
+
+  // Generic sites: direct files one entry each, HLS variants one entry per resolution.
+  for (const [name, make] of bothHarnesses) {
+    const h = make({ nativeReply: async m => {
+      if (m.type === 'media.inspect') return { ok: true, tracks: [
+        { index: 0, kind: 'video', codec: 'h264', width: 1280, height: 720, bitrate: 2000000 },
+        { index: 1, kind: 'video', codec: 'h264', width: 1280, height: 720, bitrate: 1500000 },
+        { index: 2, kind: 'video', codec: 'h264', width: 640, height: 360, bitrate: 700000 },
+        { index: 3, kind: 'audio', codec: 'aac', bitrate: 128000 }] };
+      return { version: 1, type: m.type === 'media.submit' ? 'media.result' : 'download.result', accepted: true, offered: true };
+    } });
+    h.handlers.headers({ tabId: 3, url: 'https://cdn.example/clip.mp4', responseHeaders: [{ name: 'Content-Type', value: 'video/mp4' }, { name: 'Content-Length', value: '5000000' }] });
+    h.handlers.headers({ tabId: 3, url: 'https://cdn.example/low.webm', responseHeaders: [{ name: 'Content-Type', value: 'video/webm' }, { name: 'Content-Length', value: '900000' }] });
+    h.handlers.headers({ tabId: 3, url: 'https://cdn.example/master.m3u8', responseHeaders: [{ name: 'Content-Type', value: 'application/vnd.apple.mpegurl' }] });
+    const options = (await callMessage(h, { type: 'video.options', title: 'Story: clip', playerUrl: 'blob:x' }, { tab: { id: 3 } }));
+    assert.equal(options.ok, true, `${name}: ${JSON.stringify(options)}`);
+    assert.deepEqual(plain(options.options.map(o => o.label)), ['MP4', 'WEBM', 'MP4 720p', 'MP4 360p'], 'direct files first (largest first), then one entry per resolution');
+    assert.equal(options.options[0].detail, '5.0 MB');
+    const stream = options.options[2].choice;
+    assert.deepEqual([stream.videoIndex, stream.audioIndex], [0, 3], 'the best bitrate of a resolution wins, paired with the audio rendition');
+    assert.equal(stream.filename, 'Story clip [720p].mp4');
+    const sent = await callMessage(h, { type: 'video.download', choice: stream, pageUrl: 'https://cdn.example/page' }, { tab: { id: 3 } });
+    assert.equal(sent.accepted, true);
+    const last = h.calls.messages.at(-1);
+    assert.equal(last.type, 'video.offer');
+    assert.equal(last.payload.mode, 'video');
+    assert.equal(last.payload.videoIndex, 0);
+    const direct = await callMessage(h, { type: 'video.download', choice: options.options[0].choice, pageUrl: 'https://cdn.example/page' }, { tab: { id: 3 } });
+    assert.equal(direct.accepted, true);
+    assert.equal(h.calls.messages.at(-1).type, 'video.offer');
+    assert.equal(h.calls.messages.at(-1).payload.filenameHint, 'Story clip.mp4');
+    const forged = await callMessage(h, { type: 'video.download', choice: { site: 'generic', type: 'direct', url: 'file:///etc/passwd', filename: 'x.mp4' } }, { tab: { id: 3 } });
+    assert.equal(forged.accepted, false);
+  }
+};
+
+
+tests.VIDEO_VERIFY = async function test_VIDEO_VERIFY() {
+  // YouTube cuts addresses obtained without its integrity proof after about a minute of media. Formats that are
+  // not served to the end are never offered; the muxed stream that is stays, with a note about the rest.
+  for (const [source, isFf] of bothContents) {
+    const label = isFf ? 'firefox' : 'chromium';
+    const probes = [];
+    const h = await youtubeContent(source, isFf, async msg => {
+      if (msg.type !== 'video.verify') return undefined;
+      probes.push(...msg.items);
+      return { ok: true, results: Object.fromEntries(msg.items.map(i => [i.url, /itag=18(&|$)/.test(i.url)])) };
+    });
+    const { c, posted, send } = h;
+    const v = appendVideo(c, 'blob:https://www.youtube.com/5', rect(10, 80, 800, 450));
+    send({ type: 'player', response: plain(playerFixture({ withUrls: false })) });
+    c.observedNodes[0].observer.triggerAdd(v);
+    const panel = panelsIn(c)[0];
+    btnOf(panel).onclick({ stopPropagation() {}, preventDefault() {} });
+    await tick();
+    send({ type: 'resolved', requestId: posted.find(m => m.type === 'resolve').requestId, ok: true, response: plain(playerFixture()) });
+    await tick(); await tick(); await tick();
+    const menu = panel.shadow.children.find(ch => ch.className === 'menu');
+    const rows = menu.children.filter(ch => ch.className === 'opt').map(r => r.children[0].textContent);
+    assert.deepEqual(rows, ['MP4 360p'], `${label}: only the stream served to the end is offered`);
+    assert.ok(menu.children.some(ch => ch.className === 'note' && /Higher qualities are hidden/.test(ch.textContent)), `${label}: the user is told why`);
+    assert.ok(probes.every(p => Number.isInteger(p.at) && p.at >= 0) && probes.some(p => p.at > 100000000), `${label}: probes address deep into the file`);
+    // When nothing verifies, the menu says so instead of listing dead entries.
+    const none = await youtubeContent(source, isFf, async msg => msg.type === 'video.verify' ? { ok: true, results: Object.fromEntries(msg.items.map(i => [i.url, false])) } : undefined);
+    const v2 = appendVideo(none.c, 'blob:https://www.youtube.com/6', rect(10, 80, 800, 450));
+    none.send({ type: 'player', response: plain(playerFixture({ withUrls: false })) });
+    none.c.observedNodes[0].observer.triggerAdd(v2);
+    const p2 = panelsIn(none.c)[0];
+    btnOf(p2).onclick({ stopPropagation() {}, preventDefault() {} });
+    await tick();
+    none.send({ type: 'resolved', requestId: none.posted.find(m => m.type === 'resolve').requestId, ok: true, response: plain(playerFixture()) });
+    await tick(); await tick(); await tick();
+    const m2 = p2.shadow.children.find(ch => ch.className === 'menu');
+    assert.equal(m2.children.filter(ch => ch.className === 'opt').length, 0);
+    assert.ok(m2.children.some(ch => /integrity check/.test(ch.textContent)));
+  }
+  // Background: one-byte ranged probes; 206 means served, 403 means cut, anything else is unknown.
+  for (const [name, make] of bothHarnesses) {
+    const h = make();
+    const seen = [];
+    h.context.fetch = async (url, init) => { seen.push([url, init.headers.Range]); return { status: /itag=137/.test(url) ? 403 : (/itag=140/.test(url) ? 416 : 206) }; };
+    h.context.AbortController = AbortController;
+    const items = [137, 136, 140].map(itag => ({ url: gv(itag), at: 123456 }));
+    const reply = await callMessage(h, { type: 'video.verify', items: [...items, { url: 'https://evil.test/x', at: 1 }] }, { tab: { id: 1 } });
+    assert.equal(reply.ok, true, name);
+    assert.deepEqual(plain(reply.results), { [gv(137)]: false, [gv(136)]: true, [gv(140)]: false }, `${name}: only a 206 counts as served (416 too), foreign hosts are never fetched`);
+    assert.deepEqual(plain(seen.map(x => x[1])), ['bytes=123456-123456', 'bytes=123456-123456', 'bytes=123456-123456']);
+  }
+};
+
+tests.VIDEO_PAGE_SCRIPT = async function test_VIDEO_PAGE_SCRIPT() {
+  // The page-world script is shipped as an identical copy in both extensions and does nothing off YouTube.
+  const a = fs.readFileSync(new URL('page_video.js', chromiumDir), 'utf8');
+  assert.equal(a, fs.readFileSync(new URL('page_video.js', firefoxDir), 'utf8'));
+  assert.equal(videoCoreSource, fs.readFileSync(new URL('video_core.js', firefoxDir), 'utf8'));
+  const other = { window: { fetch: () => {}, addEventListener() {}, postMessage() { throw new Error('must stay silent'); } }, location: { hostname: 'example.test' }, document: {} };
+  other.window.window = other.window;
+  vm.createContext(other);
+  vm.runInContext(a, other);
+  assert.equal(other.window.__xdmVideoHook, undefined, 'inactive on other sites');
+  // On YouTube it answers a resolve request with the first client profile that yields addresses.
+  const posted = [];
+  const calls = [];
+  const listeners = {};
+  const win = {
+    ytcfg: { get: key => ({ INNERTUBE_API_KEY: 'KEY', VISITOR_DATA: 'VD' })[key] },
+    addEventListener: (type, fn) => { listeners[type] = fn; },
+    postMessage: data => posted.push(data),
+    fetch: async (url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push(body.context.client.clientName);
+      const blocked = body.context.client.clientName === 'ANDROID';
+      return { json: async () => blocked ? { playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in' } } : { ...playerFixture(), playabilityStatus: { status: 'OK' } } };
+    },
+  };
+  win.window = win;
+  const yt = { window: win, location: { hostname: 'www.youtube.com', origin: 'https://www.youtube.com', href: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' },
+    document: { addEventListener() {}, getElementById: () => null, querySelector: () => null }, XMLHttpRequest: function () {}, setTimeout, encodeURIComponent, JSON };
+  yt.XMLHttpRequest.prototype.open = function () {};
+  vm.createContext(yt);
+  vm.runInContext(a, yt);
+  listeners.message({ source: win, data: { xdmVideo: 1, type: 'resolve', videoId: 'aaaaaaaaaaa', requestId: 'r1' } });
+  await new Promise(r => setTimeout(r, 20));
+  const reply = posted.find(m => m.type === 'resolved');
+  assert.ok(reply?.ok, JSON.stringify(reply));
+  assert.deepEqual(calls, ['ANDROID', 'IOS'], 'falls through to the next client profile when one is refused');
+  assert.equal(reply.response.xdmClient, 'IOS');
+  assert.ok(reply.response.streamingData.adaptiveFormats.length > 5);
+  listeners.message({ source: win, data: { xdmVideo: 1, type: 'resolve', videoId: '../bad', requestId: 'r2' } });
+  await new Promise(r => setTimeout(r, 5));
+  assert.equal(posted.find(m => m.requestId === 'r2')?.ok, false, 'a malformed video id is refused');
+};
+
 // Test Runner
 async function run() {
   console.log('Running IDM Browser Behavior Contract Tests (B01-B62 plus media-policy checks)...\n');
   const only = process.argv.slice(2);
   const baseIds = Array.from({ length: 62 }, (_, i) => `B${String(i + 1).padStart(2, '0')}`);
-  const extraIds = ['MEDIA_SIZE', 'MISCAPTURE', 'PANEL_POLICY', 'OVERLAY_SHADOW'];
+  const extraIds = ['MEDIA_SIZE', 'MISCAPTURE', 'PANEL_POLICY', 'OVERLAY_SHADOW', 'VIDEO_CORE', 'VIDEO_PANEL', 'VIDEO_PANEL_DRM', 'VIDEO_PANEL_GENERIC', 'VIDEO_BACKGROUND', 'VIDEO_VERIFY', 'VIDEO_PAGE_SCRIPT'];
   const allIds = [...baseIds, ...extraIds].filter(id => only.length === 0 || only.includes(id));
   const unknown = only.filter(id => ![...baseIds, ...extraIds].includes(id));
   if (unknown.length) { console.error(`unknown test id(s): ${unknown.join(', ')}`); process.exit(2); }

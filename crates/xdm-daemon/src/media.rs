@@ -20,6 +20,16 @@ pub(crate) fn valid_media_headers(headers: &[(String, String)]) -> bool {
 /// (`max_seconds`, when set) stays within one day.
 pub(crate) fn valid_media_request(url: &str, output: &str, mode: &MediaMode) -> bool {
     let manifest = url.split('?').next().unwrap_or("").to_ascii_lowercase();
+    if let MediaMode::Adaptive { audio_url } = mode {
+        let web = |value: &str| {
+            (value.starts_with("http://") || value.starts_with("https://")) && value.len() <= 8192
+        };
+        let extension = std::path::Path::new(output)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        return web(url) && web(audio_url) && mode.valid(extension);
+    }
     let extension = std::path::Path::new(output)
         .extension()
         .and_then(|value| value.to_str())
@@ -37,6 +47,7 @@ pub(crate) fn valid_media_request(url: &str, output: &str, mode: &MediaMode) -> 
         }
         MediaMode::Audio { track, .. } => *track <= 10000,
         MediaMode::Subtitles { track } => *track <= 10000,
+        MediaMode::Adaptive { .. } => true,
         MediaMode::Live {
             video,
             audio,
@@ -96,6 +107,15 @@ pub(crate) fn engine_audio_format(format: MediaAudioFormat) -> xdm_media::AudioF
             xdm_media::AudioFormat::Opus { bitrate_kbps }
         }
     }
+}
+
+/// Temporary names of the two streams of an adaptive job, beside the destination.
+pub(crate) fn adaptive_stage_paths(output: &Path) -> [PathBuf; 2] {
+    let name = output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    [
+        output.with_file_name(format!("{name}.xdm-video")),
+        output.with_file_name(format!("{name}.xdm-audio")),
+    ]
 }
 
 #[cfg(test)]

@@ -425,6 +425,10 @@ pub enum Command {
         id: i64,
         allow: bool,
     },
+    /// Hands a browser download choice to a running GUI (see `DownloadOffer`).
+    OfferDownload { offer: DownloadOffer },
+    /// GUI poll: returns and clears pending offers, and marks a GUI as present.
+    TakeOffers,
     /// Version handshake: the reply carries `daemon_version` and `protocol`.
     Hello { client_version: String, protocol: u32 },
 }
@@ -517,6 +521,12 @@ pub enum MediaMode {
         #[serde(default)]
         max_seconds: Option<u64>,
     },
+    /// Two plain HTTP streams (video-only `url` plus this audio-only URL), each
+    /// downloaded with the segmented engine and then stream-copied into the
+    /// destination container. Used for adaptive web video such as YouTube.
+    Adaptive {
+        audio_url: String,
+    },
 }
 
 impl MediaMode {
@@ -532,6 +542,7 @@ impl MediaMode {
                 _ => &[],
             },
             Self::Subtitles { .. } => &["srt", "vtt"],
+            Self::Adaptive { .. } => &["mp4", "mkv", "webm"],
         }
     }
 
@@ -992,6 +1003,41 @@ pub struct Reply {
     /// Checkpoint segments of `TaskSegments`.
     #[serde(default)]
     pub segments: Vec<SegmentInfo>,
+    /// Pending browser offers drained by `TakeOffers`.
+    #[serde(default)]
+    pub offers: Vec<DownloadOffer>,
+    /// `OfferDownload`: true when a running GUI will show the offer; false means
+    /// nobody is polling and the submitter should queue the download itself.
+    #[serde(default)]
+    pub offered: bool,
+}
+
+/// A download a browser extension wants the user to confirm in the Download File
+/// Info dialog (video panel format choice). `audio_url` makes it an adaptive
+/// pair: `url` is the video-only stream and both are merged into `container`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DownloadOffer {
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub audio_url: Option<String>,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub container: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// HLS/DASH manifest choice: `url` is the manifest and these are track indices.
+    #[serde(default)]
+    pub stream_video: Option<usize>,
+    #[serde(default)]
+    pub stream_audio: Option<usize>,
 }
 
 /// One download segment: inclusive byte range and the next byte to write.
@@ -1056,6 +1102,8 @@ impl Reply {
             proxy_note: None,
             protocol: None,
             segments: Vec::new(),
+            offers: Vec::new(),
+            offered: false,
         }
     }
     pub fn list(tasks: Vec<TaskSummary>) -> Self {
@@ -1092,6 +1140,8 @@ impl Reply {
             proxy_note: None,
             protocol: None,
             segments: Vec::new(),
+            offers: Vec::new(),
+            offered: false,
         }
     }
     /// A crawl just registered with the daemon, still running.
@@ -1137,6 +1187,8 @@ impl Reply {
             proxy_note: None,
             protocol: None,
             segments: Vec::new(),
+            offers: Vec::new(),
+            offered: false,
         }
     }
 }
@@ -1385,6 +1437,15 @@ mod tests {
         };
         assert_eq!(body.as_deref(), Some(&[0u8, 1, 255][..]));
         assert_eq!(method, "POST");
+    }
+
+    #[test]
+    fn adaptive_mode_round_trips_and_names_its_containers() {
+        let mode = MediaMode::Adaptive { audio_url: "https://a.test/audio".into() };
+        let text = serde_json::to_string(&mode).unwrap();
+        assert_eq!(text, r#"{"kind":"adaptive","audio_url":"https://a.test/audio"}"#);
+        assert_eq!(serde_json::from_str::<MediaMode>(&text).unwrap(), mode);
+        assert!(mode.valid("mp4") && mode.valid("WEBM") && mode.valid("mkv") && !mode.valid("avi"));
     }
 
     #[test]

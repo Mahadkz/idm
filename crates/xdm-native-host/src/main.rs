@@ -882,6 +882,14 @@ fn media_mode(payload: &Value) -> Result<MediaMode, &'static str> {
                 max_seconds,
             })
         }
+        Some("adaptive") => {
+            let audio_url = payload
+                .get("audioUrl")
+                .and_then(Value::as_str)
+                .ok_or("invalid audio URL")?;
+            handoff_url(audio_url).map_err(|_| "invalid audio URL")?;
+            Ok(MediaMode::Adaptive { audio_url: audio_url.to_owned() })
+        }
         None => Ok(MediaMode::Video {
             video: required_index(payload, "videoIndex")?,
             audio: optional_index(payload, "audioIndex")?,
@@ -953,6 +961,20 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
         MediaMode::Subtitles { .. } => directory
             .join("Video")
             .join(format!("{stem}-s-{}.srt", &digest[..10])),
+        MediaMode::Adaptive { .. } => {
+            let extension = match payload.get("container").and_then(Value::as_str) {
+                Some("mkv") => "mkv",
+                Some("webm") => "webm",
+                _ => "mp4",
+            };
+            let plain = directory.join("Video").join(format!("{stem}.{extension}"));
+            // A finished earlier download of the same title keeps its name.
+            if plain.exists() {
+                directory.join("Video").join(format!("{stem}-{}.{extension}", &digest[..6]))
+            } else {
+                plain
+            }
+        }
     };
     let command = if headers.is_empty() && payload.get("mode").is_none() {
         Command::SubmitMedia {
@@ -989,6 +1011,62 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
         Err(error) => {
             json!({"version":1,"requestId":request_id,"type":"media.result","accepted":false,"reason":format!("daemon unavailable: {error}")})
         }
+    }
+}
+
+/// Video panel choice: offered to a running GUI so the user confirms it in the Download File Info dialog.
+/// With no GUI polling the daemon says so and the choice is queued directly, like any other handoff.
+fn offer_video(message: &Value, paths: &Paths) -> Value {
+    let request_id = match message.get("requestId").and_then(Value::as_str) {
+        Some(value) if !value.is_empty() && value.len() <= 128 => value.to_owned(),
+        _ => return json!({"version":1,"type":"download.result","accepted":false,"reason":"invalid requestId"}),
+    };
+    let payload = &message["payload"];
+    let adaptive = payload.get("mode").and_then(Value::as_str) == Some("adaptive");
+    let fail = |reason: &str| json!({"version":1,"requestId":request_id,"type":"download.result","accepted":false,"reason":reason});
+    let Some(url) = payload.get("url").and_then(Value::as_str) else { return fail("invalid URL") };
+    if let Err(reason) = handoff_url(url) {
+        return fail(reason);
+    }
+    let audio_url = if adaptive {
+        match payload.get("audioUrl").and_then(Value::as_str) {
+            Some(audio) if handoff_url(audio).is_ok() => Some(audio.to_owned()),
+            _ => return fail("invalid audio URL"),
+        }
+    } else {
+        None
+    };
+    let Some(name) = filename(payload) else { return fail("invalid filename") };
+    let headers = match request_headers(payload) {
+        Ok(headers) => headers,
+        Err(reason) => return fail(&reason),
+    };
+    let offer = xdm_ipc::DownloadOffer {
+        id: request_id.clone(),
+        url: url.to_owned(),
+        audio_url,
+        filename: name,
+        container: payload.get("container").and_then(Value::as_str).unwrap_or("").to_owned(),
+        title: payload.get("title").and_then(Value::as_str).unwrap_or("").chars().take(300).collect(),
+        mime: payload.get("mime").and_then(Value::as_str).unwrap_or("").to_owned(),
+        size: payload.get("size").and_then(Value::as_u64),
+        headers,
+        stream_video: payload.get("videoIndex").and_then(Value::as_u64).map(|n| n as usize).filter(|_| payload.get("mode").and_then(Value::as_str) == Some("video")),
+        stream_audio: payload.get("audioIndex").and_then(Value::as_u64).map(|n| n as usize),
+    };
+    match paths.request(Command::OfferDownload { offer }) {
+        Ok(reply) if reply.ok && reply.offered => {
+            json!({"version":1,"requestId":request_id,"type":"download.result","accepted":true,"offered":true})
+        }
+        Ok(reply) if reply.ok => {
+            if adaptive || payload.get("mode").and_then(Value::as_str) == Some("video") {
+                submit_media(message, paths)
+            } else {
+                submit(message, paths)
+            }
+        }
+        Ok(reply) => fail(&reply.error.unwrap_or_else(|| "offer rejected".into())),
+        Err(error) => fail(&format!("daemon unavailable: {error}")),
     }
 }
 
@@ -1102,13 +1180,14 @@ fn process(message: Value, paths: &Paths) -> Value {
     }
     match message.get("type").and_then(Value::as_str) {
         Some("hello") => {
-            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","batch.submit","media.inspect","media.submit"]})
+            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","batch.submit","media.inspect","media.submit","media.adaptive","video.offer"]})
         }
         Some("health") => health(paths),
         Some("download.submit") => submit(&message, paths),
         Some("batch.submit") => submit_batch(&message, paths),
         Some("media.inspect") => inspect_media(&message),
         Some("media.submit") => submit_media(&message, paths),
+        Some("video.offer") => offer_video(&message, paths),
         _ => json!({"version":1,"type":"error","reason":"unsupported message type"}),
     }
 }

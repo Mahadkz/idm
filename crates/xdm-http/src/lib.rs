@@ -58,6 +58,10 @@ pub struct Options {
     pub temp_dir: Option<PathBuf>,
     /// Sets the completed file's modification time from Last-Modified (N41).
     pub set_file_time: bool,
+    /// Largest byte range one request may ask for. Some media hosts (googlevideo) answer 403 to an
+    /// open-ended range and to ranges above about 10 MB, so the probe asks for one byte and the
+    /// transfer is cut into segments no larger than this. `None` keeps the normal behavior.
+    pub max_request_bytes: Option<u64>,
 }
 
 /// Connection route used by every request of a transfer.
@@ -97,6 +101,7 @@ impl Default for Options {
             stop: Arc::new(AtomicBool::new(false)),
             temp_dir: None,
             set_file_time: false,
+            max_request_bytes: None,
         }
     }
 }
@@ -107,6 +112,29 @@ impl Default for Options {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResumePolicy {
     pub ignore_modification_date: bool,
+    /// Treat a redirect to another host of the same site (same scheme and path, same last two host
+    /// labels) as the same destination. Media CDNs such as googlevideo answer one address from
+    /// different cache hosts; object identity is still enforced by length, validators and Content-Range.
+    pub same_site_redirects: bool,
+}
+
+/// Whether two effective URLs name the same destination under `policy`.
+fn same_destination(a: &str, b: &str, policy: &ResumePolicy) -> bool {
+    if a == b {
+        return true;
+    }
+    if !policy.same_site_redirects {
+        return false;
+    }
+    let (Ok(a), Ok(b)) = (reqwest::Url::parse(a), reqwest::Url::parse(b)) else {
+        return false;
+    };
+    let site = |url: &reqwest::Url| {
+        let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+        let labels: Vec<&str> = host.split('.').collect();
+        (labels.len() >= 2).then(|| labels[labels.len() - 2..].join("."))
+    };
+    a.scheme() == b.scheme() && a.path() == b.path() && site(&a).is_some() && site(&a) == site(&b)
 }
 
 /// Response facts of the request that probed a transfer (N14). Delivered
@@ -912,11 +940,20 @@ pub fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     (total > 0 && start <= end && end < total).then_some((start, end, total))
 }
 
+#[cfg(test)]
 fn split_segments(length: u64, workers: usize) -> Vec<Segment> {
+    split_segments_capped(length, workers, None)
+}
+
+/// Like `split_segments`; with a cap, there are at least enough segments that none exceeds it.
+fn split_segments_capped(length: u64, workers: usize, cap: Option<u64>) -> Vec<Segment> {
     if length == 0 {
         return Vec::new();
     }
-    let count = workers.max(1).min(16).min(length as usize);
+    let mut count = workers.max(1).min(16).min(length as usize);
+    if let Some(cap) = cap.filter(|cap| *cap > 0) {
+        count = count.max(length.div_ceil(cap).min(8192) as usize).min(length as usize);
+    }
     let base = length / count as u64;
     let extra = length % count as u64;
     let mut start = 0;
@@ -1003,7 +1040,7 @@ fn store_checkpoint(file: &File, path: &Path, state: &Checkpoint) -> Result<()> 
 }
 
 fn validators_match(saved: &Checkpoint, current: &Probe, policy: &ResumePolicy) -> bool {
-    if Some(saved.length) != current.length || saved.effective_url != current.effective_url {
+    if Some(saved.length) != current.length || !same_destination(&saved.effective_url, &current.effective_url, policy) {
         return false;
     }
     let etag = saved
@@ -1412,7 +1449,10 @@ fn retry_send(
 
 /// Opens the resource once, from `offset` to its end, and keeps the response for adoption.
 /// A server that ignores or garbles the range is asked once more for the whole representation.
-fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> Result<Probe> {
+fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool, bounded: bool) -> Result<Probe> {
+    if bounded {
+        return probe_bounded(client, request, offset, stop);
+    }
     let response = retry_send(client, request, Some(format!("bytes={offset}-")), stop)?;
     let status = response.status();
     let disposition = header(&response, CONTENT_DISPOSITION);
@@ -1468,6 +1508,32 @@ fn probe(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> 
         response: Some(response),
         offset: 0,
     })
+}
+
+/// Probe for hosts that refuse open-ended ranges: one byte at `offset` yields the total length from
+/// Content-Range. The body is not adopted; segments fetch their own bounded ranges. A host that does not
+/// answer 206 is probed the normal way afterwards.
+fn probe_bounded(client: &Client, request: &Request, offset: u64, stop: &AtomicBool) -> Result<Probe> {
+    let response = retry_send(client, request, Some(format!("bytes={offset}-{offset}")), stop)?;
+    if response.status() == StatusCode::PARTIAL_CONTENT && identity_encoded(&response) {
+        if let Some((start, end, length)) = header(&response, CONTENT_RANGE).as_deref().and_then(parse_content_range) {
+            if start == offset && end == offset {
+                return Ok(Probe {
+                    effective_url: response.url().to_string(),
+                    length: Some(length),
+                    ranges: true,
+                    etag: header(&response, ETAG),
+                    last_modified: header(&response, LAST_MODIFIED),
+                    disposition: header(&response, CONTENT_DISPOSITION),
+                    content_type: header(&response, reqwest::header::CONTENT_TYPE),
+                    response: None,
+                    offset,
+                });
+            }
+        }
+    }
+    drop(response);
+    probe(client, request, offset, stop, false)
 }
 
 /// Renames without ever replacing an existing destination. Linux uses
@@ -1951,7 +2017,7 @@ fn transfer_segment(shared: &Shared, start: u64) -> Result<Outcome> {
                 if !identity_encoded(&response) {
                     return Err(unreliable(cursor, "range response was not identity-encoded"));
                 }
-                if response.url().as_str() != effective_url {
+                if !same_destination(response.url().as_str(), &effective_url, &shared.policy) {
                     return Err(unreliable(cursor, "range response arrived from another destination"));
                 }
                 let range = header(&response, CONTENT_RANGE);
@@ -2302,7 +2368,7 @@ fn run_transfer(
         .governor()
         .map(|governor| governor.acquire(&url_host, &options.stop))
         .transpose()?;
-    let mut probe = probe(&client, &request, offset, &options.stop)?;
+    let mut probe = probe(&client, &request, offset, &options.stop, options.max_request_bytes.is_some())?;
     let host = host_of(&probe.effective_url);
     if host != url_host {
         probe_lease = None;
@@ -2397,7 +2463,7 @@ fn run_transfer(
             length,
             etag: probe.etag.clone(),
             last_modified: probe.last_modified.clone(),
-            segments: split_segments(length, options.connections),
+            segments: split_segments_capped(length, options.connections, options.max_request_bytes),
         }
     };
     if temp.is_some() {
@@ -2514,6 +2580,35 @@ mod tests {
         worker.join().unwrap().unwrap();
         assert!(changed.elapsed() < Duration::from_secs(1));
         assert!(control.set_rate(Some(0)).is_err());
+    }
+
+    #[test]
+    fn same_site_redirects_are_opt_in_and_stay_on_one_site_and_path() {
+        let strict = ResumePolicy::default();
+        let lenient = ResumePolicy { same_site_redirects: true, ..ResumePolicy::default() };
+        let a = "https://rr2---sn-aaa.googlevideo.com/videoplayback?itag=18&x=1";
+        let b = "https://rr3---sn-bbb.googlevideo.com/videoplayback?itag=18&x=2";
+        assert!(same_destination(a, a, &strict));
+        assert!(!same_destination(a, b, &strict), "different hosts are another destination by default");
+        assert!(same_destination(a, b, &lenient));
+        for other in [
+            "https://rr3---sn-bbb.googlevideo.com/other?itag=18",
+            "http://rr3---sn-bbb.googlevideo.com/videoplayback?itag=18",
+            "https://evil.example/videoplayback?itag=18",
+            "https://googlevideo.com.evil.example/videoplayback?itag=18",
+        ] {
+            assert!(!same_destination(a, other, &lenient), "{other}");
+        }
+        assert!(!same_destination("https://localhost/a", "https://other/a", &lenient), "single-label hosts have no site");
+    }
+
+    #[test]
+    fn capped_split_never_exceeds_the_request_cap() {
+        let capped = split_segments_capped(100 << 20, 8, Some(8 << 20));
+        assert!(capped.len() >= 13 && capped.iter().all(|s| s.end - s.start < (8 << 20)));
+        assert_eq!(capped.last().unwrap().end, (100 << 20) - 1);
+        assert_eq!(split_segments_capped(1000, 8, Some(1 << 20)).len(), 8);
+        assert_eq!(split_segments_capped(100 << 20, 8, None).len(), 8);
     }
 
     #[test]
@@ -2811,7 +2906,7 @@ mod tests {
         };
         let (etag, date) = ("\"x\"", "Mon, 01 Jan 2024 00:00:00 GMT");
         let (other_tag, other_date, other_url) = ("\"z\"", "Tue, 02 Jan 2024 00:00:00 GMT", "v");
-        for policy in [ResumePolicy::default(), ResumePolicy { ignore_modification_date: true }] {
+        for policy in [ResumePolicy::default(), ResumePolicy { ignore_modification_date: true, ..ResumePolicy::default() }] {
             let old = saved(Some(etag), Some(date));
             // A changed length, a changed strong ETag or a changed effective URL
             // refuse in every policy.
@@ -2823,15 +2918,15 @@ mod tests {
         // Only the date changed: refuse by default, allowed only behind the
         // N13 flag while the strong ETag and length still match.
         assert!(!validators_match(&old, &probe(Some(etag), Some(other_date), "u", 8), &ResumePolicy::default()));
-        assert!(validators_match(&old, &probe(Some(etag), Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true }));
+        assert!(validators_match(&old, &probe(Some(etag), Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true, ..ResumePolicy::default() }));
         // Without a strong ETag the date is the only identity signal and stays
         // binding: disabling the date check alone can never splice new bytes.
         let dated = saved(None, Some(date));
         assert!(validators_match(&dated, &probe(None, Some(date), "u", 8), &ResumePolicy::default()));
-        assert!(!validators_match(&dated, &probe(None, Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true }));
-        assert!(!validators_match(&dated, &probe(None, None, "u", 8), &ResumePolicy { ignore_modification_date: true }));
+        assert!(!validators_match(&dated, &probe(None, Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true, ..ResumePolicy::default() }));
+        assert!(!validators_match(&dated, &probe(None, None, "u", 8), &ResumePolicy { ignore_modification_date: true, ..ResumePolicy::default() }));
         let weak = saved(Some("W/\"a\""), Some(date));
-        assert!(!validators_match(&weak, &probe(Some("W/\"a\""), Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true }));
+        assert!(!validators_match(&weak, &probe(Some("W/\"a\""), Some(other_date), "u", 8), &ResumePolicy { ignore_modification_date: true, ..ResumePolicy::default() }));
     }
     #[test]
     fn disposition_and_url_filenames_parse() {

@@ -93,7 +93,12 @@ fn full_accept_queue_is_connect_timeout() {
         }
     }
     let error = run(format!("http://127.0.0.1:{port}/f"), dir("backlog").join("f"), Duration::from_secs(1));
-    assert_eq!(kind_of(error.as_ref()), ErrorKind::ConnectTimeout, "{error}");
+    let kind = kind_of(error.as_ref());
+    // Windows answers a SYN to a full backlog with a reset after its own retries, which is
+    // indistinguishable from a closed port, so there it is correctly reported as refused.
+    let expected: &[ErrorKind] =
+        if cfg!(windows) { &[ErrorKind::ConnectTimeout, ErrorKind::ConnectRefused] } else { &[ErrorKind::ConnectTimeout] };
+    assert!(expected.contains(&kind), "{kind:?}: {error}");
     drop((listener, fillers));
 }
 

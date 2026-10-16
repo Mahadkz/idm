@@ -27,6 +27,8 @@ def main():
         (base / "home").mkdir()
         env = {**os.environ, "XDM_DATA_DIR": str(base / "state"), "HOME": str(base / "home")}
         env.pop("XDG_DOWNLOAD_DIR", None)
+        (base / "empty").mkdir()
+        env["PATH"] = str(base / "empty")  # no yt-dlp on PATH
         daemon = subprocess.Popen([str(ROOT / "target/debug/xdm-daemon")], env=env, stderr=subprocess.PIPE, text=True)
         host = None
         try:
@@ -46,7 +48,7 @@ def main():
             host = subprocess.Popen([str(ROOT / "target/debug/xdm-native-host")], env=env, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             hello = exchange(host, {"version": 1, "type": "hello"})
-            assert "video.offer" in hello["capabilities"], hello
+            assert "video.offer" in hello["capabilities"] and "video.probe" in hello["capabilities"], hello
 
             def offer(request_id, **extra):
                 payload = {"url": "https://rr1.googlevideo.com/videoplayback?itag=137", "filenameHint": "Clip [1080p].mp4",
@@ -84,6 +86,23 @@ def main():
             for bad in (offer("bad-1", url="file:///etc/passwd"), offer("bad-2", **{**adaptive, "audioUrl": "ftp://x/y"}),
                         offer("bad-3", filenameHint="../x.mp4"), offer("bad-4", url="https://u:p@x.test/a.mp4")):
                 assert bad["accepted"] is False, bad
+
+            # yt-dlp choices: the page address plus format ids; the offer carries the selector, never stream URLs.
+            page = {"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa", "mode": "ytdlp", "ytdlpFormat": "299+140", "container": "mp4"}
+            assert rpc({"type": "take_offers"})["offers"] == []
+            shown = offer("yt-1", **page)
+            assert shown["accepted"] and shown["offered"], shown
+            got = rpc({"type": "take_offers"})["offers"][0]
+            assert got["ytdlp_format"] == "299+140" and got["url"].startswith("https://www.youtube.com/watch") and got["audio_url"] is None, got
+            for evil in ("-o /tmp/x", "a+b+c", "best[height<=1080]", "", "--exec"):
+                assert offer("yt-bad", **{**page, "ytdlpFormat": evil})["accepted"] is False, evil
+
+            # A format probe through the host: no yt-dlp installed here, so a clear flagged error comes back.
+            probed = exchange(host, {"version": 1, "type": "video.probe", "payload": {"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa", "cookies": []}})
+            assert probed["type"] == "video.probe.result" and probed["ok"] is False and probed["ytdlpMissing"] is True, probed
+            assert "yt-dlp was not found" in probed["reason"], probed
+            assert exchange(host, {"version": 1, "type": "video.probe", "payload": {"url": "file:///etc/passwd"}})["ok"] is False
+            assert exchange(host, {"version": 1, "type": "video.probe", "payload": {"url": "https://u:p@x.test/"}})["ok"] is False
 
             # The GUI stops polling: offers fall back to direct queueing after the polling window lapses.
             time.sleep(5.5)

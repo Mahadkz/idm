@@ -34,6 +34,9 @@ pub(crate) fn valid_media_request(url: &str, output: &str, mode: &MediaMode) -> 
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
+    if let MediaMode::YtDlp { format } = mode {
+        return crate::ytdlp::validate_url(url).is_ok() && crate::ytdlp::valid_selector(format) && mode.valid(extension);
+    }
     let bounded = match mode {
         MediaMode::Video {
             video,
@@ -47,7 +50,7 @@ pub(crate) fn valid_media_request(url: &str, output: &str, mode: &MediaMode) -> 
         }
         MediaMode::Audio { track, .. } => *track <= 10000,
         MediaMode::Subtitles { track } => *track <= 10000,
-        MediaMode::Adaptive { .. } => true,
+        MediaMode::Adaptive { .. } | MediaMode::YtDlp { .. } => true,
         MediaMode::Live {
             video,
             audio,

@@ -882,6 +882,18 @@ fn media_mode(payload: &Value) -> Result<MediaMode, &'static str> {
                 max_seconds,
             })
         }
+        Some("ytdlp") => {
+            let format = payload.get("ytdlpFormat").and_then(Value::as_str).unwrap_or("");
+            // Same rule the daemon applies: one or two plain format ids, never a free-form selector.
+            let ok = (1..=2).contains(&format.split('+').count())
+                && format.split('+').all(|id| {
+                    !id.is_empty() && id.len() <= 64 && !id.starts_with(['-', '.']) && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                });
+            if !ok {
+                return Err("invalid format selection");
+            }
+            Ok(MediaMode::YtDlp { format: format.to_owned() })
+        }
         Some("adaptive") => {
             let audio_url = payload
                 .get("audioUrl")
@@ -961,10 +973,12 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
         MediaMode::Subtitles { .. } => directory
             .join("Video")
             .join(format!("{stem}-s-{}.srt", &digest[..10])),
-        MediaMode::Adaptive { .. } => {
+        MediaMode::Adaptive { .. } | MediaMode::YtDlp { .. } => {
             let extension = match payload.get("container").and_then(Value::as_str) {
                 Some("mkv") => "mkv",
                 Some("webm") => "webm",
+                Some("m4a") if matches!(mode, MediaMode::YtDlp { .. }) => "m4a",
+                Some("opus") if matches!(mode, MediaMode::YtDlp { .. }) => "opus",
                 _ => "mp4",
             };
             let plain = directory.join("Video").join(format!("{stem}.{extension}"));
@@ -1014,6 +1028,55 @@ fn submit_media(message: &Value, paths: &Paths) -> Value {
     }
 }
 
+/// Asks the daemon (and through it the optional yt-dlp) for the formats of a page. Stream addresses and
+/// request headers stay in the daemon: the browser only gets what it needs to draw a menu.
+fn probe_video(message: &Value, paths: &Paths) -> Value {
+    let fail = |reason: &str, missing: bool| json!({"version":1,"type":"video.probe.result","ok":false,"reason":reason,"ytdlpMissing":missing});
+    let payload = &message["payload"];
+    let Some(url) = payload.get("url").and_then(Value::as_str) else { return fail("invalid URL", false) };
+    if let Err(reason) = handoff_url(url) {
+        return fail(reason, false);
+    }
+    let cookies: Vec<xdm_ipc::ProbeCookie> = payload
+        .get("cookies")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .take(2000)
+                .filter_map(|cookie| {
+                    Some(xdm_ipc::ProbeCookie {
+                        name: cookie.get("name")?.as_str()?.to_owned(),
+                        value: cookie.get("value")?.as_str()?.to_owned(),
+                        domain: cookie.get("domain")?.as_str()?.to_owned(),
+                        path: cookie.get("path").and_then(Value::as_str).unwrap_or("/").to_owned(),
+                        secure: cookie.get("secure").and_then(Value::as_bool).unwrap_or(false),
+                        expires: cookie.get("expirationDate").and_then(Value::as_f64).map(|seconds| seconds as i64),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let refresh = payload.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+    match paths.request(Command::MediaProbe { page_url: url.to_owned(), cookies, refresh }) {
+        Ok(reply) if reply.ok => {
+            let Some(probe) = reply.probe else { return fail("probe returned nothing", false) };
+            let formats: Vec<Value> = probe
+                .formats
+                .iter()
+                .map(|f| json!({
+                    "id": f.id, "ext": f.ext, "kind": f.kind, "width": f.width, "height": f.height, "fps": f.fps,
+                    "vcodec": f.vcodec, "acodec": f.acodec, "tbr": f.tbr, "abr": f.abr, "filesize": f.filesize,
+                    "filesizeApprox": f.filesize_approx, "protocol": f.protocol, "note": f.note, "language": f.language,
+                }))
+                .collect();
+            json!({"version":1,"type":"video.probe.result","ok":true,"title":probe.title,"duration":probe.duration,
+                "thumbnail":probe.thumbnail,"live":probe.live,"extractor":probe.extractor,"formats":formats})
+        }
+        Ok(reply) => fail(&reply.error.unwrap_or_else(|| "probe failed".into()), reply.ytdlp_missing),
+        Err(error) => fail(&format!("daemon unavailable: {error}"), false),
+    }
+}
+
 /// Video panel choice: offered to a running GUI so the user confirms it in the Download File Info dialog.
 /// With no GUI polling the daemon says so and the choice is queued directly, like any other handoff.
 fn offer_video(message: &Value, paths: &Paths) -> Value {
@@ -1023,6 +1086,14 @@ fn offer_video(message: &Value, paths: &Paths) -> Value {
     };
     let payload = &message["payload"];
     let adaptive = payload.get("mode").and_then(Value::as_str) == Some("adaptive");
+    let ytdlp_format = (payload.get("mode").and_then(Value::as_str) == Some("ytdlp"))
+        .then(|| media_mode(payload))
+        .transpose();
+    let ytdlp_format = match ytdlp_format {
+        Ok(Some(MediaMode::YtDlp { format })) => Some(format),
+        Ok(_) => None,
+        Err(reason) => return json!({"version":1,"requestId":request_id,"type":"download.result","accepted":false,"reason":reason}),
+    };
     let fail = |reason: &str| json!({"version":1,"requestId":request_id,"type":"download.result","accepted":false,"reason":reason});
     let Some(url) = payload.get("url").and_then(Value::as_str) else { return fail("invalid URL") };
     if let Err(reason) = handoff_url(url) {
@@ -1053,13 +1124,14 @@ fn offer_video(message: &Value, paths: &Paths) -> Value {
         headers,
         stream_video: payload.get("videoIndex").and_then(Value::as_u64).map(|n| n as usize).filter(|_| payload.get("mode").and_then(Value::as_str) == Some("video")),
         stream_audio: payload.get("audioIndex").and_then(Value::as_u64).map(|n| n as usize),
+        ytdlp_format: ytdlp_format.clone(),
     };
     match paths.request(Command::OfferDownload { offer }) {
         Ok(reply) if reply.ok && reply.offered => {
             json!({"version":1,"requestId":request_id,"type":"download.result","accepted":true,"offered":true})
         }
         Ok(reply) if reply.ok => {
-            if adaptive || payload.get("mode").and_then(Value::as_str) == Some("video") {
+            if adaptive || ytdlp_format.is_some() || payload.get("mode").and_then(Value::as_str) == Some("video") {
                 submit_media(message, paths)
             } else {
                 submit(message, paths)
@@ -1180,7 +1252,7 @@ fn process(message: Value, paths: &Paths) -> Value {
     }
     match message.get("type").and_then(Value::as_str) {
         Some("hello") => {
-            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","batch.submit","media.inspect","media.submit","media.adaptive","video.offer"]})
+            json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","batch.submit","media.inspect","media.submit","media.adaptive","video.offer","video.probe"]})
         }
         Some("health") => health(paths),
         Some("download.submit") => submit(&message, paths),
@@ -1188,6 +1260,7 @@ fn process(message: Value, paths: &Paths) -> Value {
         Some("media.inspect") => inspect_media(&message),
         Some("media.submit") => submit_media(&message, paths),
         Some("video.offer") => offer_video(&message, paths),
+        Some("video.probe") => probe_video(&message, paths),
         _ => json!({"version":1,"type":"error","reason":"unsupported message type"}),
     }
 }

@@ -46,7 +46,8 @@ jobs:
         run: |
           npx --yes web-ext lint --source-dir extensions/firefox
           node tests/integration/firefox_handoff.mjs
-      # A real-Firefox handoff (tests/integration/firefox_real.mjs, using XDM_FIREFOX) does not
-      # exist yet: it would need web-ext run or Marionette to load the add-on. Until then the
-      # production-readiness row stays open; run_all.py reports it as SKIP if the file is added
-      # without XDM_FIREFOX.
+      # ubuntu-latest ships Firefox and geckodriver; the test uses an isolated HOME and profile.
+      - name: Real Firefox handoff
+        run: |
+          firefox --version; geckodriver --version
+          XDM_FIREFOX="$(command -v firefox)" xvfb-run -a python3 tests/run_all.py --strict --only firefox_real

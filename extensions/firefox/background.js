@@ -578,7 +578,7 @@ browser.downloads.onCreated.addListener(item => {
       if (timedOut) { await resume(); return; }
       const name = item.filename?.split(/[\\/]/).pop() || undefined;
       const reply = await submit(
-        finalUrl, name, request?.pageUrl || "", `firefox-${item.id}-${item.startTime || Date.now()}`,
+        finalUrl, name, request?.pageUrl || (validHttp(item.referrer) ? item.referrer : ""), `firefox-${item.id}-${item.startTime || Date.now()}`,
         item.mime || "", request?.cookieStoreId, item.tabId
       );
       if (timedOut) { await resume(); return; }

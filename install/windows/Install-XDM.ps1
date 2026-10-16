@@ -48,7 +48,7 @@ $manifestPath = Join-Path $manifestDir 'install-manifest.json'
 function Get-UnpackedExtensionId {
     param([string]$ExtensionDirectory)
     # Chromium derives unpacked-extension IDs from the absolute path of the
-    # extension directory: sha256(path), first 16 hex digits mapped to a-p.
+    # extension directory: sha256(path), first 16 bytes (32 hex digits) mapped to a-p.
     $abs = (Resolve-Path -LiteralPath $ExtensionDirectory).Path.Replace('\', '/')
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -57,7 +57,7 @@ function Get-UnpackedExtensionId {
     finally {
         $sha.Dispose()
     }
-    $hex = -join ($bytes[0..7] | ForEach-Object { $_.ToString('x2') })
+    $hex = -join ($bytes[0..15] | ForEach-Object { $_.ToString('x2') })
     $mapped = -join ($hex.ToCharArray() | ForEach-Object {
             $n = if ($_ -ge '0' -and $_ -le '9') { [int]$_ - 48 } else { [int]$_ - 87 }
             [char]($n + [int][char]'a')

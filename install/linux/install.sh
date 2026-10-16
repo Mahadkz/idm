@@ -137,7 +137,7 @@ render_template() {
 }
 
 # Chromium derives unpacked-extension IDs from the absolute path of the
-# extension directory: sha256(path), first 16 hex digits mapped to a-p.
+# extension directory: sha256(path), first 32 hex digits (16 bytes) mapped to a-p.
 default_chromium_id() {
     local ext_dir="$REPO_ROOT/extensions/chromium"
     [ -d "$ext_dir" ] || return 1
@@ -146,7 +146,7 @@ default_chromium_id() {
 import hashlib
 import sys
 
-digest = hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest()[:16]
+digest = hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest()[:32]
 print("".join(chr(ord("a") + int(c, 16)) for c in digest))
 PY
 }

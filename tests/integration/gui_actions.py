@@ -1268,7 +1268,7 @@ def dialogs_main():
                         process.wait(timeout=5)
 
 
-ADD_URL_BUTTON = (72, 80)
+ADD_URL_BUTTON = (37, 51)  # toolbar "Add URL"
 
 
 if __name__ == "__main__":

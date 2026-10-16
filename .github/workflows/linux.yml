@@ -14,7 +14,20 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool python3-pil libxkbcommon-x11-0 ffmpeg mingw-w64
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool python3-pil fonts-liberation2 libxkbcommon-x11-0 ffmpeg mingw-w64
+      # gui_actions.py clicks at fixed coordinates calibrated on Liberation/Arimo-metric fonts.
+      - name: Pin sans-serif and monospace to Liberation
+        run: |
+          mkdir -p ~/.config/fontconfig
+          cat > ~/.config/fontconfig/fonts.conf <<'XML'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <alias binding="same"><family>sans-serif</family><prefer><family>Liberation Sans</family></prefer></alias>
+            <alias binding="same"><family>monospace</family><prefer><family>Liberation Mono</family></prefer></alias>
+          </fontconfig>
+          XML
+          fc-match sans-serif
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu

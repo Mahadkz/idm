@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: ffmpeg for the media tests
+        run: choco install ffmpeg -y --no-progress
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:

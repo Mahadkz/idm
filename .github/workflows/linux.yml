@@ -14,7 +14,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool libxkbcommon-x11-0 ffmpeg mingw-w64
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool python3-pil libxkbcommon-x11-0 ffmpeg mingw-w64
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu

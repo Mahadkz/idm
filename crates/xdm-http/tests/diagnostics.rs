@@ -57,7 +57,9 @@ fn read_request(stream: &mut TcpStream) {
 #[test]
 fn refused_port_is_connect_refused() {
     let port = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
-    let error = run(format!("http://127.0.0.1:{port}/f"), dir("refused").join("f"), Duration::from_secs(2));
+    // Windows retries a refused loopback connect for about 2 seconds before reporting it.
+    let wait = Duration::from_secs(if cfg!(windows) { 15 } else { 2 });
+    let error = run(format!("http://127.0.0.1:{port}/f"), dir("refused").join("f"), wait);
     assert_eq!(kind_of(error.as_ref()), ErrorKind::ConnectRefused, "{error}");
 }
 

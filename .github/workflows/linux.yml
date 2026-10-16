@@ -14,8 +14,9 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool python3-pil fonts-liberation2 libxkbcommon-x11-0 ffmpeg mingw-w64
-      # gui_actions.py clicks at fixed coordinates calibrated on Liberation/Arimo-metric fonts.
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev xvfb xdotool python3-pil fonts-liberation2 fonts-noto-core libxkbcommon-x11-0 ffmpeg mingw-w64
+      # gui_actions.py clicks at fixed coordinates calibrated on Liberation/Arimo-metric Latin fonts and
+      # Noto Naskh/Kufi for the Urdu layout (fonts-noto-core).
       - name: Pin sans-serif and monospace to Liberation
         run: |
           mkdir -p ~/.config/fontconfig

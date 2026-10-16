@@ -22,11 +22,11 @@ pub fn format_filename(output: &str, url: &str) -> String {
 pub fn format_size(downloaded: Option<u64>, total: Option<u64>) -> String {
     fn fmt(bytes: u64) -> String {
         if bytes < 1024 {
-            format!("{bytes} B")
+            format!("{bytes} Bytes")
         } else if bytes < 1024 * 1024 {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
+            format!("{:.2} KB", bytes as f64 / 1024.0)
         } else if bytes < 1024 * 1024 * 1024 {
-            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+            format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
         } else {
             format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
         }
@@ -35,7 +35,7 @@ pub fn format_size(downloaded: Option<u64>, total: Option<u64>) -> String {
     match (downloaded, total) {
         (_, Some(tot)) if tot > 0 => fmt(tot),
         (Some(done), None) if done > 0 => format!("{} / Unknown", fmt(done)),
-        _ => "—".to_string(),
+        _ => String::new(),
     }
 }
 
@@ -50,10 +50,12 @@ pub fn format_status(status: &str, downloaded: Option<u64>, total: Option<u64>) 
         _ => 0,
     };
 
-    if status == "downloading" || status == "active" {
-        format!("Downloading {progress}%")
+    if status == "downloading" || status == "active" || status == "running" {
+        format!("{progress}%")
+    } else if status == "pausing" {
+        "Pausing".to_string()
     } else if is_complete(status) {
-        "Complete (100%)".to_string()
+        "Complete".to_string()
     } else if status == "quota_wait" {
         "Quota wait".to_string()
     } else if status == "restart_required" {
@@ -71,7 +73,7 @@ pub fn format_status(status: &str, downloaded: Option<u64>, total: Option<u64>) 
 
 pub fn format_time_left(status: &str, eta_seconds: Option<u64>) -> String {
     if is_complete(status) {
-        "0s".to_string()
+        String::new()
     } else if let Some(sec) = eta_seconds {
         if sec < 60 {
             format!("{sec}s")
@@ -81,7 +83,7 @@ pub fn format_time_left(status: &str, eta_seconds: Option<u64>) -> String {
             format!("{}h {}m", sec / 3600, (sec % 3600) / 60)
         }
     } else {
-        "—".to_string()
+        String::new()
     }
 }
 
@@ -94,20 +96,16 @@ pub fn format_rate(rate: Option<u64>) -> String {
                 format!("{:.2} MB/s", b as f64 / (1024.0 * 1024.0))
             }
         }
-        _ => "—".to_string(),
+        _ => String::new(),
     }
 }
 
+/// "Oct 12 06:34" from the daemon's UTC timestamp; unparsable text is shown as is.
 pub fn format_date(updated_at: &str, created_at: &str) -> String {
-    let d = if !updated_at.is_empty() {
-        updated_at
-    } else {
-        created_at
-    };
-    if d.is_empty() {
-        "—".to_string()
-    } else {
-        d.to_string()
+    let d = if !updated_at.is_empty() { updated_at } else { created_at };
+    match chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%d %H:%M:%S") {
+        Ok(time) => time.format("%b %d %H:%M").to_string(),
+        Err(_) => d.to_string(),
     }
 }
 
@@ -181,43 +179,50 @@ mod tests {
     }
 
     #[test]
+    fn dates_use_the_short_month_day_time_form() {
+        assert_eq!(format_date("2026-10-12 06:34:56", ""), "Oct 12 06:34");
+        assert_eq!(format_date("", "2026-01-02 23:05:00"), "Jan 02 23:05");
+        assert_eq!(format_date("garbled", ""), "garbled");
+    }
+
+    #[test]
     fn test_format_size() {
-        assert_eq!(format_size(None, None), "—");
-        assert_eq!(format_size(Some(500), Some(500)), "500 B");
-        assert_eq!(format_size(Some(2048), Some(2048)), "2.0 KB");
-        assert_eq!(format_size(Some(5 * 1024 * 1024), Some(5 * 1024 * 1024)), "5.0 MB");
+        assert_eq!(format_size(None, None), "");
+        assert_eq!(format_size(Some(500), Some(500)), "500 Bytes");
+        assert_eq!(format_size(Some(2048), Some(2048)), "2.00 KB");
+        assert_eq!(format_size(Some(5 * 1024 * 1024), Some(5 * 1024 * 1024)), "5.00 MB");
         assert_eq!(
             format_size(Some(3 * 1024 * 1024 * 1024), Some(3 * 1024 * 1024 * 1024)),
             "3.00 GB"
         );
-        assert_eq!(format_size(Some(1024 * 1024), None), "1.0 MB / Unknown");
+        assert_eq!(format_size(Some(1024 * 1024), None), "1.00 MB / Unknown");
     }
 
     #[test]
     fn test_format_status() {
-        assert_eq!(format_status("completed", Some(100), Some(100)), "Complete (100%)");
-        assert_eq!(format_status("downloading", Some(50), Some(100)), "Downloading 50%");
+        assert_eq!(format_status("completed", Some(100), Some(100)), "Complete");
+        assert_eq!(format_status("downloading", Some(50), Some(100)), "50%");
         assert_eq!(format_status("paused", Some(25), Some(100)), "Paused 25%");
         assert_eq!(format_status("failed", None, None), "Failed");
         assert_eq!(format_status("queued", None, None), "Queued");
-        assert_eq!(format_status("complete", Some(10), Some(10)), "Complete (100%)");
+        assert_eq!(format_status("complete", Some(10), Some(10)), "Complete");
         assert_eq!(format_status("quota_wait", Some(10), Some(100)), "Quota wait");
         assert_eq!(format_status("restart_required", Some(10), Some(100)), "Needs restart");
     }
 
     #[test]
     fn test_format_time_left() {
-        assert_eq!(format_time_left("completed", None), "0s");
+        assert_eq!(format_time_left("completed", None), "");
         assert_eq!(format_time_left("downloading", Some(45)), "45s");
         assert_eq!(format_time_left("downloading", Some(125)), "2m 5s");
         assert_eq!(format_time_left("downloading", Some(3665)), "1h 1m");
-        assert_eq!(format_time_left("paused", None), "—");
+        assert_eq!(format_time_left("paused", None), "");
     }
 
     #[test]
     fn test_format_rate() {
-        assert_eq!(format_rate(None), "—");
-        assert_eq!(format_rate(Some(0)), "—");
+        assert_eq!(format_rate(None), "");
+        assert_eq!(format_rate(Some(0)), "");
         assert_eq!(format_rate(Some(512 * 1024)), "512.0 KB/s");
         assert_eq!(format_rate(Some(2 * 1024 * 1024)), "2.00 MB/s");
     }

@@ -3206,6 +3206,33 @@ mod tests {
     }
 
     #[test]
+    fn finished_and_unfinished_filters_split_the_list() {
+        use xdm_ipc::TaskFilter;
+        let (service, _, _) = service(1000);
+        let ids: Vec<i64> = (0..3).map(|n| submit(&service, &format!("f{n}"))).collect();
+        service.command(Command::Pause { task_id: ids[0] }).unwrap();
+        service
+            .inner
+            .lock()
+            .unwrap()
+            .db
+            .execute("UPDATE tasks SET status='complete' WHERE id=?1", [ids[1]])
+            .unwrap();
+        let count = |status: &str| {
+            service
+                .command(Command::ListPage {
+                    offset: 0,
+                    limit: 10,
+                    sort: None,
+                    filter: Some(TaskFilter { status: Some(status.into()), ..TaskFilter::default() }),
+                })
+                .unwrap()
+                .total
+        };
+        assert_eq!((count("finished"), count("unfinished")), (1, 2));
+    }
+
+    #[test]
     fn every_documented_sort_key_works_with_no_running_task() {
         let (service, _, _) = service(1000);
         submit(&service, "s0");

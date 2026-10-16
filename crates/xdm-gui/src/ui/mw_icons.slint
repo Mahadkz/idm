@@ -1,0 +1,158 @@
+// Original XDM artwork drawn from vector primitives (no bitmap assets).
+import { Pal } from "mw_common.slint";
+
+component Stroke inherits Rectangle {
+    in property <string> commands;
+    in property <brush> stroke;
+    in property <brush> fill: transparent;
+    in property <length> w: 2px;
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 32;
+        viewbox-height: 32;
+        commands: root.commands;
+        stroke: root.stroke;
+        stroke-width: root.w;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: root.fill;
+    }
+}
+
+component Ring inherits Rectangle {
+    in property <color> c;
+    in property <length> inset: 3px;
+    Rectangle {
+        x: root.inset;
+        y: root.inset;
+        width: parent.width - 2 * root.inset;
+        height: parent.height - 2 * root.inset;
+        border-radius: self.width / 2;
+        border-width: 2px;
+        border-color: root.c;
+    }
+}
+
+// Large toolbar glyph, 32x32 logical units.
+export component ToolIcon inherits Rectangle {
+    in property <string> kind;
+    in property <bool> dim;
+    in property <length> size: 32px;
+    width: size;
+    height: size;
+    property <color> base: kind == "add" ? #2f9e6e
+        : kind == "resume" ? #3b82c4
+        : kind == "stop" ? #5a7fa8
+        : kind == "stopall" ? #7a6fb5
+        : kind == "delete" ? #d9534f
+        : kind == "delcompleted" ? #b3448c
+        : kind == "options" ? #6c63c9
+        : kind == "scheduler" ? #9a62b4
+        : kind == "startqueue" ? #3a8fb0
+        : #b34f6a;
+    property <color> c: dim ? (Pal.dark ? #5c626b : #bdbdbd) : base;
+
+    if kind == "add": Rectangle {
+        Ring { c: root.c; inset: 2px; }
+        Stroke { commands: "M16 9 V23 M9 16 H23"; stroke: root.c; w: 3px; }
+    }
+    if kind == "resume": Rectangle {
+        Ring { c: root.c; inset: 2px; }
+        Stroke { commands: "M13 9.5 L23 16 L13 22.5 Z"; stroke: root.c; fill: root.c; w: 1.5px; }
+    }
+    if kind == "stop": Rectangle {
+        Ring { c: root.c; inset: 2px; }
+        Rectangle { x: 11px; y: 11px; width: 10px; height: 10px; border-radius: 1px; border-width: 2px; border-color: root.c; }
+    }
+    if kind == "stopall": Rectangle {
+        Stroke { commands: "M11 4 H21 L28 11 V21 L21 28 H11 L4 21 V11 Z"; stroke: root.c; }
+        Stroke { commands: "M12 11 V21 M20 11 V21"; stroke: root.c; w: 3px; }
+    }
+    if kind == "delete": Rectangle {
+        Stroke { commands: "M6 9 H26 M13 9 V5.5 H19 V9 M8.5 9 L10 27 H22 L23.5 9 M14 14 V22 M18 14 V22"; stroke: root.c; }
+    }
+    if kind == "delcompleted": Rectangle {
+        Stroke { commands: "M6 9 H26 M13 9 V5.5 H19 V9 M8.5 9 L10 27 H22 L23.5 9"; stroke: root.c; }
+        Stroke { commands: "M12.5 17 L15.2 20 L20 13.5"; stroke: root.c; w: 2.5px; }
+    }
+    if kind == "options": Rectangle {
+        Stroke { commands: "M16 3 V8 M16 24 V29 M3 16 H8 M24 16 H29 M6.8 6.8 L10.3 10.3 M21.7 21.7 L25.2 25.2 M25.2 6.8 L21.7 10.3 M10.3 21.7 L6.8 25.2"; stroke: root.c; w: 3px; }
+        Ring { c: root.c; inset: 8px; }
+        Rectangle { x: 13px; y: 13px; width: 6px; height: 6px; border-radius: 3px; background: root.c; }
+    }
+    if kind == "scheduler": Rectangle {
+        Ring { c: root.c; inset: 4px; }
+        Stroke { commands: "M16 10 V16 L20.5 19 M5 8 L9 4 M27 8 L23 4"; stroke: root.c; }
+    }
+    if kind == "startqueue" || kind == "stopqueue": Rectangle {
+        Stroke { commands: "M4 6 H18 V20 H4 Z"; stroke: root.c; }
+        Stroke { commands: "M10 12 H24 V26 H10 Z"; stroke: root.c; }
+        if kind == "startqueue": Stroke { commands: "M14 15 L21 19 L14 23 Z"; stroke: root.c; fill: root.c; w: 1px; }
+        if kind == "stopqueue": Rectangle { x: 14px; y: 16px; width: 6px; height: 6px; background: root.c; }
+    }
+}
+
+// Small 16x16 glyph for the category tree and the table.
+export component TinyIcon inherits Rectangle {
+    in property <string> kind;
+    in property <bool> inverted;
+    width: 16px;
+    height: 16px;
+    property <color> ink: Pal.dark ? #c8ccd4 : #4a5568;
+
+    if kind == "folder" || kind == "folder-open": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: kind == "folder" ? "M1.5 4 H6 L7.5 5.5 H14.5 V13 H1.5 Z" : "M1.5 4 H6 L7.5 5.5 H13 V7 M1.5 13 L3.5 7 H15 L13 13 Z";
+            stroke: #c9a227; stroke-width: 1.2px; fill: #f6dd7a; stroke-line-join: round; }
+    }
+    if kind == "cat-compressed": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M3 2 H13 V14 H3 Z M8 2 V9"; stroke: #b7791f; stroke-width: 1.2px; fill: #fbe9b7; }
+        Rectangle { x: 6.5px; y: 9px; width: 3px; height: 3px; border-width: 1px; border-color: #b7791f; }
+    }
+    if kind == "cat-documents": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M3 1.5 H10 L13 4.5 V14.5 H3 Z M10 1.5 V4.5 H13 M5 8 H11 M5 10.5 H11"; stroke: #5b7aa6; stroke-width: 1px; fill: #ffffff; stroke-line-join: round; }
+    }
+    if kind == "cat-music": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M6 11.5 V3 L13 1.8 V10"; stroke: #2f6fb5; stroke-width: 1.4px; fill: transparent; }
+        Rectangle { x: 3px; y: 10px; width: 4px; height: 3.4px; border-radius: 2px; background: #2f6fb5; }
+        Rectangle { x: 10px; y: 8.6px; width: 4px; height: 3.4px; border-radius: 2px; background: #2f6fb5; }
+    }
+    if kind == "cat-programs": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M1.5 3 H14.5 V13 H1.5 Z M1.5 5.5 H14.5"; stroke: #4b5a8a; stroke-width: 1.1px; fill: #e9edf8; }
+        Rectangle { x: 2.5px; y: 3.6px; width: 11px; height: 1.6px; background: #4b5a8a; }
+    }
+    if kind == "cat-video": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M2 3 H14 V13 H2 Z M5 3 V13 M11 3 V13 M2 6 H5 M2 10 H5 M11 6 H14 M11 10 H14"; stroke: #3d4f66; stroke-width: 1px; fill: #8fb3d9; }
+    }
+    if kind == "cat-other": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M3 1.5 H10 L13 4.5 V14.5 H3 Z M10 1.5 V4.5 H13"; stroke: root.ink; stroke-width: 1px; fill: #f4f4f4; stroke-line-join: round; }
+    }
+    if kind == "unfinished": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M2 4 H6 L7.5 5.5 H14 V13 H2 Z"; stroke: #c9a227; stroke-width: 1.1px; fill: #f6dd7a; }
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M10 7 V12 M7.8 10 L10 12.3 L12.2 10"; stroke: #2f9e5e; stroke-width: 1.6px; stroke-line-cap: round; stroke-line-join: round; fill: transparent; }
+    }
+    if kind == "finished": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M2 4 H6 L7.5 5.5 H14 V13 H2 Z"; stroke: #c9a227; stroke-width: 1.1px; fill: #f6dd7a; }
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M5.5 9.5 L8 12 L13 6"; stroke: #2b6cb0; stroke-width: 1.8px; stroke-line-cap: round; stroke-line-join: round; fill: transparent; }
+    }
+    if kind == "grabber": Rectangle {
+        Rectangle { x: 2px; y: 2px; width: 12px; height: 12px; border-radius: 6px; border-width: 1.2px; border-color: #3b82c4; background: #dbeafe; }
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M2 8 H14 M8 2 C5 5 5 11 8 14 M8 2 C11 5 11 11 8 14"; stroke: #3b82c4; stroke-width: 1px; fill: transparent; }
+    }
+    if kind == "queues": Rectangle {
+        Path { width: 16px; height: 16px; viewbox-width: 16; viewbox-height: 16;
+            commands: "M1.5 5 H5.5 L7 6.5 H14.5 V13.5 H1.5 Z M3 3 H7 L8 4.2"; stroke: #c9a227; stroke-width: 1.1px; fill: #f6dd7a; stroke-line-join: round; }
+    }
+}

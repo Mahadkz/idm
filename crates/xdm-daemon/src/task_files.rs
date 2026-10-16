@@ -219,8 +219,15 @@ fn filter_clause(filter: TaskFilter) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values: Vec<Value> = Vec::new();
     if let Some(status) = filter.status {
-        clauses.push("status=?");
-        values.push(Value::Text(status));
+        // "finished"/"unfinished" group every status for the GUI category tree.
+        match status.as_str() {
+            "finished" => clauses.push("status='complete'"),
+            "unfinished" => clauses.push("status<>'complete'"),
+            _ => {
+                clauses.push("status=?");
+                values.push(Value::Text(status));
+            }
+        }
     }
     if let Some(category) = filter.category {
         clauses.push("category=? COLLATE NOCASE");

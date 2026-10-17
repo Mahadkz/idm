@@ -64,8 +64,9 @@ def main():
             assert display.isdigit(), "Xvfb did not allocate a display"
             (base / "home").mkdir()
             env = {**os.environ, "DISPLAY": f":{display}", "SLINT_BACKEND": "winit-software", "HOME": str(base / "home"),
-                   "XDM_DATA_DIR": str(state), "XDM_FAKE_OS_ACTIONS": "1"}
-            for key in ("WAYLAND_DISPLAY", "XDG_DOWNLOAD_DIR", "XDM_NO_GUI_LAUNCH"):
+                   "XDM_DATA_DIR": str(state), "XDM_FAKE_OS_ACTIONS": "1", "XDM_GUI_AUTOLAUNCH": "1"}
+            env.pop("XDM_NO_GUI_LAUNCH", None)
+            for key in ("WAYLAND_DISPLAY", "XDG_DOWNLOAD_DIR"):
                 env.pop(key, None)
 
             def window(name):
@@ -157,9 +158,35 @@ def main():
                                 "-frames:v", "1", str(shot2)], env=env, check=True, timeout=30)
             finally:
                 fresh.kill()
+            # Dialog-only GUI: SIGTERM exits it, and with nothing to do it leaves by itself after ~30 s.
+            for process in (host, daemon):
+                process.kill()
+                process.wait()
+            for pid in procs_with_data_dir(state):
+                os.kill(pid, signal.SIGKILL)
+            time.sleep(1)
+            termed = subprocess.Popen([str(ROOT / "target/debug/xdm-gui"), "--dialog-only"], env=env, stderr=subprocess.DEVNULL)
+            until(lambda: window("XDM.*Downloads$"))
+            termed.terminate()
+            assert termed.wait(timeout=10) is not None, "SIGTERM ignored"
+            idle = subprocess.Popen([str(ROOT / "target/debug/xdm-gui"), "--dialog-only"], env=env, stderr=subprocess.DEVNULL)
+            started = time.monotonic()
+            assert idle.wait(timeout=60) == 0
+            assert 25 < time.monotonic() - started < 50, "idle dialog-only GUI should exit after about 30 s"
+            # No display: the daemon must not launch a GUI and the host queues directly.
+            bare = {k: v for k, v in env.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+            bare["XDM_DATA_DIR"] = str(base / "bare")
+            daemon = subprocess.Popen([str(ROOT / "target/debug/xdm-daemon")], env=bare, stderr=subprocess.PIPE, text=True)
+            assert "listening locally" in daemon.stderr.readline()
+            host = subprocess.Popen([str(ROOT / "target/debug/xdm-native-host")], env=bare, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            reply = native({"version": 1, "requestId": "hd-bare", "type": "download.submit",
+                            "payload": {"url": f"{origin}/bare.bin", "filenameHint": "bare.bin"}})
+            assert reply["accepted"] and not reply.get("offered"), reply
+            assert not [p for p in procs_with_data_dir(base / "bare") if (Path("/proc") / str(p) / "exe").resolve().name == "xdm-gui"]
             print("gui_handoff_dialog ok; screenshots", shot)
         finally:
-            for pid in procs_with_data_dir(state):
+            for pid in procs_with_data_dir(state) + procs_with_data_dir(base / "bare"):
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except OSError:

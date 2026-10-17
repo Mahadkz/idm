@@ -87,3 +87,29 @@ pub fn raise<C: slint::ComponentHandle>(component: &C) {
         w.focus_window();
     });
 }
+
+/// Set once a dialog-only GUI has been given something to do.
+pub static ENGAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn term_requested() -> bool {
+    TERM.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+pub fn install_term_handler() {
+    extern "C" fn on_term(_: i32) {
+        TERM.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    // SIGINT = 2, SIGTERM = 15 on every unix this targets.
+    unsafe {
+        signal(2, on_term);
+        signal(15, on_term);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn install_term_handler() {}

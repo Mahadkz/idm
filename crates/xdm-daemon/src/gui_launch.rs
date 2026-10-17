@@ -23,10 +23,24 @@ fn gui_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
+/// Safety gate. Never without a display. A private `XDM_DATA_DIR` marks a test or sandbox run, which must
+/// not open windows on the user's desktop unless it opts in with `XDM_GUI_AUTOLAUNCH=1`.
+/// `XDM_NO_GUI_LAUNCH` always wins.
+fn may_launch() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    if set("XDM_NO_GUI_LAUNCH") {
+        return false;
+    }
+    if cfg!(all(unix, not(target_os = "macos"))) && !(set("DISPLAY") || set("WAYLAND_DISPLAY")) {
+        return false;
+    }
+    set("XDM_GUI_AUTOLAUNCH") || !set("XDM_DATA_DIR")
+}
+
 /// Spawns a detached GUI (same environment and data dir) unless one was started moments ago.
 /// Returns false when it could not be started.
 pub(crate) fn launch() -> bool {
-    if std::env::var_os("XDM_NO_GUI_LAUNCH").is_some() {
+    if !may_launch() {
         return false;
     }
     let Ok(mut last) = LAUNCHED.lock() else { return false };

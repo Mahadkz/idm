@@ -5489,10 +5489,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 |paths| paths.request(Command::TakeOffers).ok().map(|reply| reply.offers).unwrap_or_default(),
                 move |offers| {
                     for offer in offers {
+                        instance::ENGAGED.store(true, Ordering::SeqCst);
                         download_dialogs::begin_offer(&shown, offer);
                     }
                 },
             );
+        }
+    });
+    // SIGTERM/SIGINT end the event loop; a GUI started only for a dialog leaves by itself when no offer
+    // or second launch arrives within 30 s.
+    instance::install_term_handler();
+    let started = std::time::Instant::now();
+    let quit_timer = Timer::default();
+    quit_timer.start(TimerMode::Repeated, std::time::Duration::from_millis(250), move || {
+        let idle = dialog_only
+            && !instance::ENGAGED.load(Ordering::SeqCst)
+            && started.elapsed() > std::time::Duration::from_secs(30);
+        if instance::term_requested() || idle {
+            let _ = slint::quit_event_loop();
         }
     });
     let signal_timer = Timer::default();
@@ -5501,6 +5515,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         move || {
             while let Ok(signal) = signals.try_recv() {
+                instance::ENGAGED.store(true, Ordering::SeqCst);
                 match signal {
                     instance::Signal::Show => {
                         if let Some(ui) = weak.upgrade() {

@@ -11,6 +11,7 @@ mod shutdown;
 mod categories;
 mod credentials;
 mod grabber;
+mod gui_launch;
 mod sync;
 mod logins;
 mod media;
@@ -1909,10 +1910,21 @@ impl Service {
                 {
                     return Ok(Reply::error("invalid download offer"));
                 }
+                if !xdm_ipc::Paths::open().map(|p| gui_launch::show_file_info(&p.dir)).unwrap_or(true) {
+                    return Ok(Reply::accepted(0));
+                }
+                let polling = |guard: std::sync::MutexGuard<Inner>| guard.gui_polled.is_some_and(|at| at.elapsed() < Duration::from_secs(5));
+                let mut present = polling(self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?);
+                if !present && gui_launch::launch() {
+                    let end = Instant::now() + Duration::from_secs(20);
+                    while !present && Instant::now() < end {
+                        thread::sleep(Duration::from_millis(150));
+                        present = polling(self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?);
+                    }
+                }
                 let mut inner = self.inner.lock().map_err(|_| io::Error::other("task lock poisoned"))?;
                 let now = Instant::now();
                 inner.offers.retain(|(at, _)| now.duration_since(*at) < Duration::from_secs(600));
-                let present = inner.gui_polled.is_some_and(|at| now.duration_since(at) < Duration::from_secs(5));
                 let mut reply = Reply::accepted(0);
                 if present && inner.offers.len() < 20 {
                     inner.offers.push_back((now, offer));

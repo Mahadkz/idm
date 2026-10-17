@@ -5,7 +5,7 @@ edition = "2024"
 license = "GPL-3.0-only"
 
 [dependencies]
-slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "unstable-winit-030", "backend-winit", "renderer-software", "compat-1-2"] }
 xdm-ipc = { path = "../xdm-ipc" }
 chrono = { version = "0.4", default-features = true }
 xdm-transfer-list = { path = "../xdm-transfer-list" }
@@ -16,3 +16,4 @@ xdm-grabber = { path = "../xdm-grabber" }
 xdm-media = { path = "../xdm-media" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 url = "2.5"
+interprocess = "2.4"

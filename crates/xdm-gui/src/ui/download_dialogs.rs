@@ -812,7 +812,7 @@ fn open_file_info_ex(ctx: &DialogCtx, url: String, typed_destination: Option<Str
         for old in windows.iter() {
             let _ = old.hide();
         }
-        let _ = window.show();
+        crate::instance::raise(&window);
         windows.push(window);
     });
 }

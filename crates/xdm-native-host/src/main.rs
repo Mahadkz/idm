@@ -1077,6 +1077,37 @@ fn probe_video(message: &Value, paths: &Paths) -> Value {
     }
 }
 
+/// Ordinary intercepted download: offered to the GUI so the user confirms it in the Download File Info
+/// dialog (the daemon starts the GUI if needed). Replays with a body and any offer the daemon declines
+/// (dialog setting off, GUI cannot start) are queued directly.
+fn offer_plain(message: &Value, paths: &Paths) -> Value {
+    let request_id = message.get("requestId").and_then(Value::as_str).unwrap_or("");
+    let payload = &message["payload"];
+    let eligible = !request_id.is_empty()
+        && request_id.len() <= 128
+        && matches!(method_body(payload), Ok((ref m, None)) if m == "GET");
+    let url = payload.get("url").and_then(Value::as_str).unwrap_or("");
+    let (Some(name), Ok(headers)) = (filename(payload), request_headers(payload)) else { return submit(message, paths) };
+    if !eligible || handoff_url(url).is_err() {
+        return submit(message, paths);
+    }
+    let offer = xdm_ipc::DownloadOffer {
+        id: request_id.to_owned(),
+        url: url.to_owned(),
+        filename: name,
+        mime: payload.get("mime").and_then(Value::as_str).unwrap_or("").to_owned(),
+        size: payload.get("size").and_then(Value::as_u64),
+        headers,
+        ..Default::default()
+    };
+    match paths.request(Command::OfferDownload { offer }) {
+        Ok(reply) if reply.ok && reply.offered => {
+            json!({"version":1,"requestId":request_id,"type":"download.result","accepted":true,"offered":true})
+        }
+        _ => submit(message, paths),
+    }
+}
+
 /// Video panel choice: offered to a running GUI so the user confirms it in the Download File Info dialog.
 /// With no GUI polling the daemon says so and the choice is queued directly, like any other handoff.
 fn offer_video(message: &Value, paths: &Paths) -> Value {
@@ -1255,7 +1286,7 @@ fn process(message: Value, paths: &Paths) -> Value {
             json!({"version":1,"type":"hello.result","capabilities":["health","download.submit","batch.submit","media.inspect","media.submit","media.adaptive","video.offer","video.probe"]})
         }
         Some("health") => health(paths),
-        Some("download.submit") => submit(&message, paths),
+        Some("download.submit") => offer_plain(&message, paths),
         Some("batch.submit") => submit_batch(&message, paths),
         Some("media.inspect") => inspect_media(&message),
         Some("media.submit") => submit_media(&message, paths),

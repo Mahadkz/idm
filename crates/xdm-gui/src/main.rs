@@ -3,6 +3,7 @@ mod dialog_helpers;
 #[path = "ui/download_dialogs.rs"]
 mod download_dialogs;
 mod i18n;
+mod instance;
 mod layout;
 mod mainwin;
 mod maintenance;
@@ -2013,6 +2014,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = Paths::open()?;
     xdm_ipc::ops::init_logging(&paths.dir, "xdm-gui");
     xdm_ipc::ops::install_panic_hook(&paths.dir, "xdm-gui");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let dialog_only = args.iter().any(|a| a == "--dialog-only");
+    let passed_url = args.iter().find(|a| a.starts_with("http://") || a.starts_with("https://")).cloned();
+    // One window per user: a second launch raises the running one (or hands it the URL) and exits.
+    let Some(signals) = instance::acquire(&paths.dir, passed_url.as_deref())? else { return Ok(()) };
     let ipc = IpcClient::new(paths.clone());
     let ui = MainWindow::new()?;
     let task_ids = Arc::new(Mutex::new(Vec::new()));
@@ -2021,7 +2027,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let initial_settings = gui_settings.lock().map(|s| s.clone()).unwrap_or_default();
     ui.invoke_apply_theme(initial_settings.theme.clone().into());
-    if initial_settings.start_minimized {
+    if initial_settings.start_minimized || dialog_only {
         ui.window().set_minimized(true);
     }
     i18n::set_language(&initial_settings.language);
@@ -5487,6 +5493,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
             );
+        }
+    });
+    let signal_timer = Timer::default();
+    signal_timer.start(TimerMode::Repeated, std::time::Duration::from_millis(150), {
+        let ctx = offers_ctx.clone();
+        let weak = ui.as_weak();
+        move || {
+            while let Ok(signal) = signals.try_recv() {
+                match signal {
+                    instance::Signal::Show => {
+                        if let Some(ui) = weak.upgrade() {
+                            instance::raise(&ui);
+                        }
+                    }
+                    instance::Signal::Url(url) => download_dialogs::begin_add(&ctx, url, None),
+                }
+            }
         }
     });
     let open_add_for_ui = open_add_url_fn.clone();
